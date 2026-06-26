@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% load humanize %}
+
+{% block title %}Despesas — Gestão Patrimonial{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h4 class="fw-bold mb-0"><i class="bi bi-credit-card me-2 text-warning"></i>Despesas</h4>
+    <a href="{% url 'admin:financeiro_despesa_add' %}" class="btn btn-warning btn-sm">
+        <i class="bi bi-plus-circle me-1"></i>Nova Despesa
+    </a>
+</div>
+
+<div class="card shadow-sm mb-3">
+    <div class="card-body py-2">
+        <form method="get" class="row g-2 align-items-end">
+            <div class="col-md-2">
+                <label class="form-label small mb-1">Mês</label>
+                <select name="mes" class="form-select form-select-sm">
+                    {% for num, nome in meses %}
+                    <option value="{{ num }}" {% if num == mes_atual %}selected{% endif %}>{{ nome }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small mb-1">Ano</label>
+                <select name="ano" class="form-select form-select-sm">
+                    {% for a in anos %}
+                    <option value="{{ a }}" {% if a == ano_atual %}selected{% endif %}>{{ a }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small mb-1">Imóvel</label>
+                <select name="imovel" class="form-select form-select-sm">
+                    <option value="">Todos</option>
+                    {% for im in imoveis %}
+                    <option value="{{ im.pk }}" {% if im.pk|stringformat:"s" == imovel_atual %}selected{% endif %}>{{ im.nome }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small mb-1">Categoria</label>
+                <select name="categoria" class="form-select form-select-sm">
+                    <option value="">Todas</option>
+                    {% for val, label in categoria_choices %}
+                    <option value="{{ val }}" {% if val == categoria_atual %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small mb-1">Status</label>
+                <select name="status" class="form-select form-select-sm">
+                    <option value="">Todos</option>
+                    {% for val, label in status_choices %}
+                    <option value="{{ val }}" {% if val == status_atual %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <label class="form-label small mb-1 d-block">&nbsp;</label>
+                <button type="submit" class="btn btn-secondary btn-sm">Filtrar</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="card shadow-sm">
+    <div class="card-body p-0">
+        <table class="table table-hover table-sm mb-0">
+            <thead class="table-dark">
+                <tr>
+                    <th>Descrição</th><th>Imóvel</th><th>Categoria</th>
+                    <th>Vencimento</th><th>Valor</th><th>Status</th><th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for d in despesas %}
+                <tr class="{% if d.status == 'atrasada' %}table-danger{% elif d.status == 'paga' %}table-success{% endif %}">
+                    <td>{{ d.descricao|truncatechars:45 }}</td>
+                    <td>{% if d.imovel %}<a href="{% url 'imovel_detail' d.imovel.pk %}">{{ d.imovel.nome }}</a>{% else %}Geral{% endif %}</td>
+                    <td>{{ d.get_categoria_display }}</td>
+                    <td>{{ d.data_vencimento|date:"d/m/Y" }}</td>
+                    <td>R$ {{ d.valor|floatformat:2|intcomma }}</td>
+                    <td>
+                        {% if d.status == 'paga' %}<span class="badge bg-success">Paga</span>
+                        {% elif d.status == 'atrasada' %}<span class="badge bg-danger">Atrasada</span>
+                        {% elif d.status == 'cancelada' %}<span class="badge bg-dark">Cancelada</span>
+                        {% else %}<span class="badge bg-warning text-dark">Prevista</span>{% endif %}
+                    </td>
+                    <td>
+                        <a href="{% url 'admin:financeiro_despesa_change' d.pk %}" class="btn btn-sm btn-outline-secondary">
+                            <i class="bi bi-pencil"></i>
+                        </a>
+                    </td>
+                </tr>
+                {% empty %}
+                <tr><td colspan="7" class="text-center text-muted py-4">Nenhuma despesa no período selecionado.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <div class="card-footer text-muted small d-flex justify-content-between">
+        <span>{{ despesas|length }} despesa(s)</span>
+        <div>
+            <a href="{% url 'export_despesas' 'csv' %}?mes={{ mes_atual }}&ano={{ ano_atual }}&status={{ status_atual }}&imovel={{ imovel_atual }}&categoria={{ categoria_atual }}"
+               class="btn btn-sm btn-outline-secondary me-1">
+                <i class="bi bi-filetype-csv"></i> CSV
+            </a>
+            <a href="{% url 'export_despesas' 'xlsx' %}?mes={{ mes_atual }}&ano={{ ano_atual }}&status={{ status_atual }}&imovel={{ imovel_atual }}&categoria={{ categoria_atual }}"
+               class="btn btn-sm btn-outline-success">
+                <i class="bi bi-file-earmark-excel"></i> XLSX
+            </a>
+        </div>
+    </div>
+</div>
+{% endblock %}

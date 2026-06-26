@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Gestão Patrimonial Familiar{% endblock %}</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <style>
+        body { background-color: #f8f9fa; }
+        .navbar-brand { font-weight: 700; letter-spacing: .5px; }
+        .sidebar { min-height: calc(100vh - 56px); background: #1f3864; }
+        .sidebar .nav-link { color: rgba(255,255,255,.75); padding: .5rem 1rem; border-radius: 4px; }
+        .sidebar .nav-link:hover, .sidebar .nav-link.active { color: #fff; background: rgba(255,255,255,.12); }
+        .sidebar .nav-section { color: rgba(255,255,255,.4); font-size: .7rem; text-transform: uppercase;
+                                letter-spacing: 1px; padding: 1rem 1rem .25rem; }
+        .card-stat { border: none; border-radius: 10px; }
+        .card-stat .stat-icon { font-size: 2rem; opacity: .2; }
+        .badge-status-alugado   { background: #198754; }
+        .badge-status-vago      { background: #6c757d; }
+        .badge-status-manutencao { background: #fd7e14; }
+        .badge-status-atrasado  { background: #dc3545; }
+        .badge-status-recebido  { background: #198754; }
+        .badge-status-previsto  { background: #0d6efd; }
+        .badge-status-ativo     { background: #198754; }
+        main { padding: 1.5rem; }
+    </style>
+    {% block extra_css %}{% endblock %}
+</head>
+<body>
+
+{% if user.is_authenticated %}
+<nav class="navbar navbar-dark bg-dark px-3">
+    <a class="navbar-brand" href="{% url 'dashboard' %}">
+        <i class="bi bi-building me-2"></i>Gestão Patrimonial
+    </a>
+    <div class="d-flex align-items-center gap-3">
+        <span class="text-white-50 small">{{ user.get_full_name|default:user.username }}</span>
+        <a href="{% url 'logout' %}" class="btn btn-sm btn-outline-light">
+            <i class="bi bi-box-arrow-right"></i> Sair
+        </a>
+    </div>
+</nav>
+
+<div class="container-fluid">
+    <div class="row">
+        <nav class="col-md-2 col-lg-2 d-none d-md-block sidebar pt-3">
+            <div class="nav-section">Painel</div>
+            <ul class="nav flex-column mb-2">
+                <li class="nav-item">
+                    <a class="nav-link {% if request.resolver_match.url_name == 'dashboard' %}active{% endif %}"
+                       href="{% url 'dashboard' %}">
+                        <i class="bi bi-speedometer2 me-2"></i>Dashboard
+                    </a>
+                </li>
+            </ul>
+
+            <div class="nav-section">Patrimônio</div>
+            <ul class="nav flex-column mb-2">
+                <li class="nav-item">
+                    <a class="nav-link {% if 'imovel' in request.resolver_match.url_name %}active{% endif %}"
+                       href="{% url 'imovel_list' %}">
+                        <i class="bi bi-buildings me-2"></i>Imóveis
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if 'pessoa' in request.resolver_match.url_name %}active{% endif %}"
+                       href="{% url 'pessoa_list' %}">
+                        <i class="bi bi-people me-2"></i>Pessoas
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if 'contrato' in request.resolver_match.url_name %}active{% endif %}"
+                       href="{% url 'contrato_list' %}">
+                        <i class="bi bi-file-text me-2"></i>Contratos
+                    </a>
+                </li>
+            </ul>
+
+            <div class="nav-section">Financeiro</div>
+            <ul class="nav flex-column mb-2">
+                <li class="nav-item">
+                    <a class="nav-link {% if 'receitas' in request.resolver_match.url_name %}active{% endif %}"
+                       href="{% url 'receitas_list' %}">
+                        <i class="bi bi-cash-coin me-2"></i>Receitas
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if 'despesas' in request.resolver_match.url_name %}active{% endif %}"
+                       href="{% url 'despesas_list' %}">
+                        <i class="bi bi-credit-card me-2"></i>Despesas
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if 'relatorios' in request.resolver_match.url_name %}active{% endif %}"
+                       href="{% url 'relatorios' %}">
+                        <i class="bi bi-download me-2"></i>Relatórios / Exportar
+                    </a>
+                </li>
+            </ul>
+
+            <div class="nav-section">Documentos</div>
+            <ul class="nav flex-column mb-2">
+                <li class="nav-item">
+                    <a class="nav-link {% if 'documento' in request.resolver_match.url_name %}active{% endif %}"
+                       href="{% url 'documento_list' %}">
+                        <i class="bi bi-folder2-open me-2"></i>Documentos
+                    </a>
+                </li>
+            </ul>
+
+            <div class="nav-section">Admin</div>
+            <ul class="nav flex-column">
+                <li class="nav-item">
+                    <a class="nav-link" href="{% url 'admin:index' %}">
+                        <i class="bi bi-gear me-2"></i>Administração
+                    </a>
+                </li>
+            </ul>
+        </nav>
+
+        <main class="col-md-10 col-lg-10 ms-sm-auto">
+            {% if messages %}
+            <div class="mt-2">
+                {% for msg in messages %}
+                <div class="alert alert-{{ msg.tags }} alert-dismissible fade show" role="alert">
+                    {{ msg }}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+</div>
+
+{% else %}
+    {% block unauthenticated %}{% endblock %}
+{% endif %}
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+{% block extra_js %}{% endblock %}
+</body>
+</html>

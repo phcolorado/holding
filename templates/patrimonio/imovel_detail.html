@@ -1,0 +1,251 @@
+{% extends "base.html" %}
+{% load humanize %}
+
+{% block title %}{{ imovel.nome }} — Gestão Patrimonial{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <div>
+        <a href="{% url 'imovel_list' %}" class="text-muted text-decoration-none small">
+            <i class="bi bi-arrow-left"></i> Imóveis
+        </a>
+        <h4 class="fw-bold mb-0 mt-1">{{ imovel.nome }}</h4>
+        <span class="text-muted small">{{ imovel.endereco }}, {{ imovel.cidade }}/{{ imovel.estado }}</span>
+    </div>
+    <div class="d-flex gap-2">
+        <a href="{% url 'admin:patrimonio_imovel_change' imovel.pk %}" class="btn btn-sm btn-outline-secondary">
+            <i class="bi bi-pencil"></i> Editar
+        </a>
+    </div>
+</div>
+
+<!-- Dados do imóvel + resultado financeiro -->
+<div class="row g-3 mb-4">
+    <div class="col-md-8">
+        <div class="card shadow-sm">
+            <div class="card-header fw-semibold bg-white">Dados do Imóvel</div>
+            <div class="card-body">
+                <div class="row g-2">
+                    <div class="col-sm-4">
+                        <div class="small text-muted">Status</div>
+                        {% if imovel.status == 'alugado' %}<span class="badge bg-success fs-6">Alugado</span>
+                        {% elif imovel.status == 'vago' %}<span class="badge bg-secondary fs-6">Vago</span>
+                        {% elif imovel.status == 'em_manutencao' %}<span class="badge bg-warning text-dark fs-6">Em Manutenção</span>
+                        {% else %}<span class="badge bg-dark fs-6">Vendido</span>{% endif %}
+                    </div>
+                    <div class="col-sm-4">
+                        <div class="small text-muted">Proprietário</div>
+                        <div>{{ imovel.proprietario|default:"—" }}</div>
+                    </div>
+                    <div class="col-sm-4">
+                        <div class="small text-muted">Data de Aquisição</div>
+                        <div>{{ imovel.data_aquisicao|date:"d/m/Y"|default:"—" }}</div>
+                    </div>
+                    <div class="col-sm-4">
+                        <div class="small text-muted">Matrícula</div>
+                        <div>{{ imovel.matricula|default:"—" }}</div>
+                    </div>
+                    <div class="col-sm-4">
+                        <div class="small text-muted">Inscrição IPTU</div>
+                        <div>{{ imovel.inscricao_iptu|default:"—" }}</div>
+                    </div>
+                    <div class="col-sm-4">
+                        <div class="small text-muted">Cartório</div>
+                        <div>{{ imovel.cartorio|default:"—" }}</div>
+                    </div>
+                    <div class="col-sm-4">
+                        <div class="small text-muted">Valor de Aquisição</div>
+                        <div>{% if imovel.valor_aquisicao %}R$ {{ imovel.valor_aquisicao|floatformat:2|intcomma }}{% else %}—{% endif %}</div>
+                    </div>
+                    <div class="col-sm-4">
+                        <div class="small text-muted">Valor Estimado</div>
+                        <div>{% if imovel.valor_estimado %}R$ {{ imovel.valor_estimado|floatformat:2|intcomma }}{% else %}—{% endif %}</div>
+                    </div>
+                </div>
+                {% if imovel.observacoes %}
+                <hr><div class="small text-muted">Observações</div>
+                <p class="mb-0">{{ imovel.observacoes }}</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-4">
+        <div class="card shadow-sm bg-success text-white">
+            <div class="card-body text-center py-4">
+                <div class="small text-white-50">Resultado Financeiro (histórico)</div>
+                <div class="fs-3 fw-bold mt-1">R$ {{ resultado|floatformat:2|intcomma }}</div>
+                <hr class="border-white opacity-25">
+                <div class="d-flex justify-content-between small">
+                    <span>Total recebido</span>
+                    <span>R$ {{ total_recebido|floatformat:2|intcomma }}</span>
+                </div>
+                <div class="d-flex justify-content-between small">
+                    <span>Total despesas pagas</span>
+                    <span>R$ {{ total_despesas|floatformat:2|intcomma }}</span>
+                </div>
+            </div>
+        </div>
+
+        {% if contrato_ativo %}
+        <div class="card shadow-sm mt-3">
+            <div class="card-header fw-semibold bg-white">Contrato Ativo</div>
+            <div class="card-body small">
+                <div><strong>Locatário:</strong> {{ contrato_ativo.locatario.nome }}</div>
+                <div><strong>Valor:</strong> R$ {{ contrato_ativo.valor_aluguel|floatformat:2|intcomma }}</div>
+                <div><strong>Vigência:</strong> {{ contrato_ativo.data_inicio|date:"d/m/Y" }} a {{ contrato_ativo.data_fim|date:"d/m/Y" }}</div>
+                <div><strong>Vencimento:</strong> dia {{ contrato_ativo.dia_vencimento }}</div>
+                <div><strong>Índice:</strong> {{ contrato_ativo.get_indice_reajuste_display }}</div>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Tabs -->
+<ul class="nav nav-tabs mb-3" id="detalheTab">
+    <li class="nav-item">
+        <a class="nav-link active" data-bs-toggle="tab" href="#receitas-tab">
+            <i class="bi bi-cash-coin me-1"></i>Receitas <span class="badge bg-secondary">{{ receitas|length }}</span>
+        </a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link" data-bs-toggle="tab" href="#despesas-tab">
+            <i class="bi bi-credit-card me-1"></i>Despesas <span class="badge bg-secondary">{{ despesas|length }}</span>
+        </a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link" data-bs-toggle="tab" href="#documentos-tab">
+            <i class="bi bi-folder2 me-1"></i>Documentos <span class="badge bg-secondary">{{ documentos|length }}</span>
+        </a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link" data-bs-toggle="tab" href="#manutencoes-tab">
+            <i class="bi bi-tools me-1"></i>Manutenções <span class="badge bg-secondary">{{ manutencoes|length }}</span>
+        </a>
+    </li>
+</ul>
+
+<div class="tab-content">
+    <div class="tab-pane fade show active" id="receitas-tab">
+        <div class="card shadow-sm">
+            <div class="card-body p-0">
+                <table class="table table-sm table-hover mb-0">
+                    <thead class="table-light">
+                        <tr><th>Competência</th><th>Vencimento</th><th>Previsto</th><th>Recebido</th><th>Status</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for r in receitas %}
+                        <tr>
+                            <td>{{ r.get_competencia_mes_display }}/{{ r.competencia_ano }}</td>
+                            <td>{{ r.data_vencimento|date:"d/m/Y" }}</td>
+                            <td>R$ {{ r.valor_previsto|floatformat:2 }}</td>
+                            <td>{% if r.valor_recebido %}R$ {{ r.valor_recebido|floatformat:2 }}{% else %}—{% endif %}</td>
+                            <td>
+                                {% if r.status == 'recebido' %}<span class="badge bg-success">Recebido</span>
+                                {% elif r.status == 'atrasado' %}<span class="badge bg-danger">Atrasado</span>
+                                {% elif r.status == 'parcial' %}<span class="badge bg-warning text-dark">Parcial</span>
+                                {% elif r.status == 'cancelado' %}<span class="badge bg-dark">Cancelado</span>
+                                {% else %}<span class="badge bg-primary">Previsto</span>{% endif %}
+                            </td>
+                        </tr>
+                        {% empty %}
+                        <tr><td colspan="5" class="text-center text-muted py-3">Nenhuma receita cadastrada.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="tab-pane fade" id="despesas-tab">
+        <div class="card shadow-sm">
+            <div class="card-body p-0">
+                <table class="table table-sm table-hover mb-0">
+                    <thead class="table-light">
+                        <tr><th>Descrição</th><th>Categoria</th><th>Vencimento</th><th>Valor</th><th>Status</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for d in despesas %}
+                        <tr>
+                            <td>{{ d.descricao|truncatechars:40 }}</td>
+                            <td>{{ d.get_categoria_display }}</td>
+                            <td>{{ d.data_vencimento|date:"d/m/Y" }}</td>
+                            <td>R$ {{ d.valor|floatformat:2 }}</td>
+                            <td>
+                                {% if d.status == 'paga' %}<span class="badge bg-success">Paga</span>
+                                {% elif d.status == 'atrasada' %}<span class="badge bg-danger">Atrasada</span>
+                                {% elif d.status == 'cancelada' %}<span class="badge bg-dark">Cancelada</span>
+                                {% else %}<span class="badge bg-warning text-dark">Prevista</span>{% endif %}
+                            </td>
+                        </tr>
+                        {% empty %}
+                        <tr><td colspan="5" class="text-center text-muted py-3">Nenhuma despesa cadastrada.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="tab-pane fade" id="documentos-tab">
+        <div class="card shadow-sm">
+            <div class="card-body p-0">
+                <table class="table table-sm table-hover mb-0">
+                    <thead class="table-light">
+                        <tr><th>Título</th><th>Tipo</th><th>Data</th><th>Contabilidade</th><th></th></tr>
+                    </thead>
+                    <tbody>
+                        {% for doc in documentos %}
+                        <tr>
+                            <td>{{ doc.titulo }}</td>
+                            <td>{{ doc.get_tipo_display }}</td>
+                            <td>{{ doc.data_documento|date:"d/m/Y"|default:"—" }}</td>
+                            <td>
+                                {% if doc.enviado_contabilidade %}
+                                <span class="badge bg-success">Enviado</span>
+                                {% else %}
+                                <span class="badge bg-secondary">Pendente</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                <a href="{{ doc.arquivo.url }}" target="_blank" class="btn btn-sm btn-outline-secondary">
+                                    <i class="bi bi-download"></i>
+                                </a>
+                            </td>
+                        </tr>
+                        {% empty %}
+                        <tr><td colspan="5" class="text-center text-muted py-3">Nenhum documento cadastrado.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="tab-pane fade" id="manutencoes-tab">
+        <div class="card shadow-sm">
+            <div class="card-body p-0">
+                <table class="table table-sm table-hover mb-0">
+                    <thead class="table-light">
+                        <tr><th>Descrição</th><th>Categoria</th><th>Solicitação</th><th>Valor Final</th><th>Status</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for m in manutencoes %}
+                        <tr>
+                            <td>{{ m.descricao|truncatechars:50 }}</td>
+                            <td>{{ m.get_categoria_display }}</td>
+                            <td>{{ m.data_solicitacao|date:"d/m/Y" }}</td>
+                            <td>{% if m.valor_final %}R$ {{ m.valor_final|floatformat:2 }}{% else %}—{% endif %}</td>
+                            <td><span class="badge bg-secondary">{{ m.get_status_display }}</span></td>
+                        </tr>
+                        {% empty %}
+                        <tr><td colspan="5" class="text-center text-muted py-3">Nenhuma manutenção cadastrada.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

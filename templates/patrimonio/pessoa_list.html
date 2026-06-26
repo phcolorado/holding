@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+
+{% block title %}Pessoas — Gestão Patrimonial{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h4 class="fw-bold mb-0"><i class="bi bi-people me-2 text-primary"></i>Pessoas</h4>
+    <a href="{% url 'admin:patrimonio_pessoa_add' %}" class="btn btn-primary btn-sm">
+        <i class="bi bi-plus-circle me-1"></i>Nova Pessoa
+    </a>
+</div>
+
+<div class="card shadow-sm mb-3">
+    <div class="card-body py-2">
+        <form method="get" class="row g-2 align-items-end">
+            <div class="col-md-3">
+                <select name="tipo" class="form-select form-select-sm">
+                    <option value="">Todos os tipos</option>
+                    {% for val, label in tipo_choices %}
+                    <option value="{{ val }}" {% if val == tipo_atual %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-5">
+                <input type="text" name="q" value="{{ q }}" class="form-control form-control-sm" placeholder="Buscar por nome, CPF/CNPJ ou e-mail...">
+            </div>
+            <div class="col-auto">
+                <button type="submit" class="btn btn-secondary btn-sm">Buscar</button>
+            </div>
+            <div class="col-auto">
+                <a href="{% url 'pessoa_list' %}" class="btn btn-outline-secondary btn-sm">Limpar</a>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="card shadow-sm">
+    <div class="card-body p-0">
+        <table class="table table-hover table-sm mb-0">
+            <thead class="table-dark">
+                <tr><th>Nome</th><th>Tipo</th><th>CPF/CNPJ</th><th>E-mail</th><th>Telefone</th><th></th></tr>
+            </thead>
+            <tbody>
+                {% for p in pessoas %}
+                <tr>
+                    <td class="fw-semibold">{{ p.nome }}</td>
+                    <td><span class="badge bg-secondary">{{ p.get_tipo_display }}</span></td>
+                    <td>{{ p.cpf_cnpj|default:"—" }}</td>
+                    <td>{{ p.email|default:"—" }}</td>
+                    <td>{{ p.telefone|default:"—" }}</td>
+                    <td>
+                        <a href="{% url 'admin:patrimonio_pessoa_change' p.pk %}" class="btn btn-sm btn-outline-secondary">
+                            <i class="bi bi-pencil"></i>
+                        </a>
+                    </td>
+                </tr>
+                {% empty %}
+                <tr><td colspan="6" class="text-center text-muted py-4">Nenhuma pessoa encontrada.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <div class="card-footer text-muted small">{{ pessoas|length }} pessoa(s)</div>
+</div>
+{% endblock %}

@@ -1,0 +1,133 @@
+from django.db import models
+from django.utils import timezone
+from patrimonio.models import Imovel, Pessoa, Contrato
+
+
+class ReceitaAluguel(models.Model):
+    STATUS_CHOICES = [
+        ('previsto', 'Previsto'),
+        ('recebido', 'Recebido'),
+        ('atrasado', 'Atrasado'),
+        ('parcial', 'Parcial'),
+        ('cancelado', 'Cancelado'),
+    ]
+
+    MESES = [
+        (1, 'Janeiro'), (2, 'Fevereiro'), (3, 'Março'), (4, 'Abril'),
+        (5, 'Maio'), (6, 'Junho'), (7, 'Julho'), (8, 'Agosto'),
+        (9, 'Setembro'), (10, 'Outubro'), (11, 'Novembro'), (12, 'Dezembro'),
+    ]
+
+    contrato = models.ForeignKey(Contrato, on_delete=models.PROTECT, verbose_name='Contrato')
+    imovel = models.ForeignKey(Imovel, on_delete=models.PROTECT, verbose_name='Imóvel')
+    competencia_mes = models.PositiveSmallIntegerField('Mês de Competência', choices=MESES)
+    competencia_ano = models.PositiveSmallIntegerField('Ano de Competência')
+    data_vencimento = models.DateField('Data de Vencimento')
+    valor_previsto = models.DecimalField('Valor Previsto (R$)', max_digits=12, decimal_places=2)
+    valor_recebido = models.DecimalField('Valor Recebido (R$)', max_digits=12, decimal_places=2, null=True, blank=True)
+    data_recebimento = models.DateField('Data de Recebimento', null=True, blank=True)
+    status = models.CharField('Status', max_length=15, choices=STATUS_CHOICES, default='previsto')
+    multa = models.DecimalField('Multa (R$)', max_digits=10, decimal_places=2, default=0)
+    juros = models.DecimalField('Juros (R$)', max_digits=10, decimal_places=2, default=0)
+    desconto = models.DecimalField('Desconto (R$)', max_digits=10, decimal_places=2, default=0)
+    observacoes = models.TextField('Observações', blank=True)
+    criado_em = models.DateTimeField('Criado em', auto_now_add=True)
+    atualizado_em = models.DateTimeField('Atualizado em', auto_now=True)
+
+    class Meta:
+        verbose_name = 'Receita de Aluguel'
+        verbose_name_plural = 'Receitas de Aluguel'
+        ordering = ['-competencia_ano', '-competencia_mes']
+        unique_together = [['contrato', 'competencia_mes', 'competencia_ano']]
+
+    def __str__(self):
+        return f'{self.imovel.nome} — {self.get_competencia_mes_display()}/{self.competencia_ano} ({self.get_status_display()})'
+
+    def verificar_atraso(self):
+        """Marca como atrasado se vencido e ainda não quitado."""
+        if self.status in ('previsto',) and self.data_vencimento < timezone.now().date():
+            self.status = 'atrasado'
+            self.save(update_fields=['status'])
+
+
+class Despesa(models.Model):
+    CATEGORIA_CHOICES = [
+        ('iptu', 'IPTU'),
+        ('condominio', 'Condomínio'),
+        ('manutencao', 'Manutenção'),
+        ('seguro', 'Seguro'),
+        ('taxa_bancaria', 'Taxa Bancária'),
+        ('contabilidade', 'Contabilidade'),
+        ('advocacia', 'Advocacia'),
+        ('comissao_imobiliaria', 'Comissão Imobiliária'),
+        ('obra_reforma', 'Obra / Reforma'),
+        ('outro', 'Outro'),
+    ]
+    STATUS_CHOICES = [
+        ('prevista', 'Prevista'),
+        ('paga', 'Paga'),
+        ('atrasada', 'Atrasada'),
+        ('cancelada', 'Cancelada'),
+    ]
+    MESES = [
+        (1, 'Janeiro'), (2, 'Fevereiro'), (3, 'Março'), (4, 'Abril'),
+        (5, 'Maio'), (6, 'Junho'), (7, 'Julho'), (8, 'Agosto'),
+        (9, 'Setembro'), (10, 'Outubro'), (11, 'Novembro'), (12, 'Dezembro'),
+    ]
+
+    imovel = models.ForeignKey(Imovel, on_delete=models.PROTECT, null=True, blank=True, verbose_name='Imóvel')
+    categoria = models.CharField('Categoria', max_length=30, choices=CATEGORIA_CHOICES, default='outro')
+    fornecedor = models.ForeignKey(
+        Pessoa, on_delete=models.SET_NULL, null=True, blank=True, verbose_name='Fornecedor / Credor'
+    )
+    descricao = models.CharField('Descrição', max_length=300)
+    competencia_mes = models.PositiveSmallIntegerField('Mês de Competência', choices=MESES, null=True, blank=True)
+    competencia_ano = models.PositiveSmallIntegerField('Ano de Competência', null=True, blank=True)
+    data_vencimento = models.DateField('Data de Vencimento')
+    valor = models.DecimalField('Valor (R$)', max_digits=12, decimal_places=2)
+    data_pagamento = models.DateField('Data de Pagamento', null=True, blank=True)
+    status = models.CharField('Status', max_length=15, choices=STATUS_CHOICES, default='prevista')
+    observacoes = models.TextField('Observações', blank=True)
+    criado_em = models.DateTimeField('Criado em', auto_now_add=True)
+    atualizado_em = models.DateTimeField('Atualizado em', auto_now=True)
+
+    class Meta:
+        verbose_name = 'Despesa'
+        verbose_name_plural = 'Despesas'
+        ordering = ['-data_vencimento']
+
+    def __str__(self):
+        imovel_str = self.imovel.nome if self.imovel else 'Geral'
+        return f'{self.get_categoria_display()} — {imovel_str} — R$ {self.valor}'
+
+    def verificar_atraso(self):
+        """Marca como atrasada se vencida e ainda não paga."""
+        if self.status in ('prevista',) and self.data_vencimento < timezone.now().date():
+            self.status = 'atrasada'
+            self.save(update_fields=['status'])
+
+
+class FechamentoMensal(models.Model):
+    MESES = [
+        (1, 'Janeiro'), (2, 'Fevereiro'), (3, 'Março'), (4, 'Abril'),
+        (5, 'Maio'), (6, 'Junho'), (7, 'Julho'), (8, 'Agosto'),
+        (9, 'Setembro'), (10, 'Outubro'), (11, 'Novembro'), (12, 'Dezembro'),
+    ]
+
+    mes = models.PositiveSmallIntegerField('Mês', choices=MESES)
+    ano = models.PositiveSmallIntegerField('Ano')
+    data_fechamento = models.DateField('Data do Fechamento', null=True, blank=True)
+    observacoes = models.TextField('Observações', blank=True)
+    enviado_contabilidade = models.BooleanField('Enviado à Contabilidade', default=False)
+    data_envio_contabilidade = models.DateField('Data de Envio à Contabilidade', null=True, blank=True)
+    criado_em = models.DateTimeField('Criado em', auto_now_add=True)
+    atualizado_em = models.DateTimeField('Atualizado em', auto_now=True)
+
+    class Meta:
+        verbose_name = 'Fechamento Mensal'
+        verbose_name_plural = 'Fechamentos Mensais'
+        ordering = ['-ano', '-mes']
+        unique_together = [['mes', 'ano']]
+
+    def __str__(self):
+        return f'Fechamento {self.get_mes_display()}/{self.ano}'

@@ -1,0 +1,211 @@
+{% extends "base.html" %}
+{% load humanize %}
+
+{% block title %}Dashboard — Gestão Patrimonial{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h4 class="fw-bold mb-0"><i class="bi bi-speedometer2 me-2 text-primary"></i>Dashboard</h4>
+    <span class="text-muted small">Mês atual: {{ mes_atual }}/{{ ano_atual }}</span>
+</div>
+
+<!-- Cards principais -->
+<div class="row g-3 mb-4">
+    <div class="col-sm-6 col-lg-3">
+        <div class="card card-stat bg-primary text-white p-3 shadow-sm">
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <div class="small fw-semibold text-white-50">Total de Imóveis</div>
+                    <div class="fs-2 fw-bold">{{ imoveis_total }}</div>
+                </div>
+                <i class="bi bi-buildings stat-icon"></i>
+            </div>
+            <div class="small mt-1">
+                <span class="badge bg-white text-success">{{ imoveis_alugados }} alugados</span>
+                <span class="badge bg-white text-secondary ms-1">{{ imoveis_vagos }} vagos</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-sm-6 col-lg-3">
+        <div class="card card-stat bg-success text-white p-3 shadow-sm">
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <div class="small fw-semibold text-white-50">Receita Prevista (mês)</div>
+                    <div class="fs-5 fw-bold">R$ {{ receitas_previstas|floatformat:2|intcomma }}</div>
+                </div>
+                <i class="bi bi-cash-coin stat-icon"></i>
+            </div>
+            <div class="small mt-1 text-white-50">
+                Recebido: R$ {{ receitas_recebidas|floatformat:2|intcomma }}
+            </div>
+        </div>
+    </div>
+
+    <div class="col-sm-6 col-lg-3">
+        <div class="card card-stat bg-danger text-white p-3 shadow-sm">
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <div class="small fw-semibold text-white-50">Receitas Atrasadas</div>
+                    <div class="fs-2 fw-bold">{{ receitas_atrasadas }}</div>
+                </div>
+                <i class="bi bi-exclamation-triangle stat-icon"></i>
+            </div>
+            <div class="small mt-1 text-white-50">no mês atual</div>
+        </div>
+    </div>
+
+    <div class="col-sm-6 col-lg-3">
+        <div class="card card-stat bg-warning text-dark p-3 shadow-sm">
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <div class="small fw-semibold" style="opacity:.6">Despesas em Aberto</div>
+                    <div class="fs-2 fw-bold">{{ despesas_abertas }}</div>
+                </div>
+                <i class="bi bi-credit-card stat-icon"></i>
+            </div>
+            <div class="small mt-1" style="opacity:.6">previstas + atrasadas</div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mb-4">
+    <!-- Contratos vencendo -->
+    <div class="col-md-6">
+        <div class="card shadow-sm h-100">
+            <div class="card-header bg-white fw-semibold border-bottom">
+                <i class="bi bi-calendar-x text-warning me-2"></i>
+                Contratos vencendo nos próximos 90 dias
+                <span class="badge bg-warning text-dark ms-1">{{ contratos_vencendo|length }}</span>
+            </div>
+            <div class="card-body p-0">
+                {% if contratos_vencendo %}
+                <table class="table table-sm table-hover mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Imóvel</th>
+                            <th>Locatário</th>
+                            <th>Término</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for c in contratos_vencendo %}
+                        <tr>
+                            <td><a href="{% url 'imovel_detail' c.imovel.pk %}">{{ c.imovel.nome }}</a></td>
+                            <td>{{ c.locatario.nome }}</td>
+                            <td class="text-danger fw-semibold">{{ c.data_fim|date:"d/m/Y" }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <p class="text-muted p-3 mb-0">Nenhum contrato vencendo nos próximos 90 dias.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <!-- Reajustes próximos -->
+    <div class="col-md-6">
+        <div class="card shadow-sm h-100">
+            <div class="card-header bg-white fw-semibold border-bottom">
+                <i class="bi bi-arrow-up-circle text-info me-2"></i>
+                Reajustes previstos nos próximos 90 dias
+                <span class="badge bg-info text-dark ms-1">{{ reajustes_proximos|length }}</span>
+            </div>
+            <div class="card-body p-0">
+                {% if reajustes_proximos %}
+                <table class="table table-sm table-hover mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Imóvel</th>
+                            <th>Índice</th>
+                            <th>Data</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for c in reajustes_proximos %}
+                        <tr>
+                            <td><a href="{% url 'imovel_detail' c.imovel.pk %}">{{ c.imovel.nome }}</a></td>
+                            <td>{{ c.get_indice_reajuste_display }}</td>
+                            <td class="fw-semibold">{{ c.data_proximo_reajuste|date:"d/m/Y" }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <p class="text-muted p-3 mb-0">Nenhum reajuste previsto nos próximos 90 dias.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3">
+    <!-- Manutenções em aberto -->
+    <div class="col-md-6">
+        <div class="card shadow-sm h-100">
+            <div class="card-header bg-white fw-semibold border-bottom">
+                <i class="bi bi-tools text-secondary me-2"></i>
+                Manutenções em aberto
+                <span class="badge bg-secondary ms-1">{{ manutencoes_abertas|length }}</span>
+            </div>
+            <div class="card-body p-0">
+                {% if manutencoes_abertas %}
+                <table class="table table-sm table-hover mb-0">
+                    <thead class="table-light">
+                        <tr><th>Imóvel</th><th>Descrição</th><th>Status</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for m in manutencoes_abertas %}
+                        <tr>
+                            <td>{{ m.imovel.nome }}</td>
+                            <td>{{ m.descricao|truncatechars:40 }}</td>
+                            <td><span class="badge bg-secondary">{{ m.get_status_display }}</span></td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <p class="text-muted p-3 mb-0">Nenhuma manutenção em aberto.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <!-- Ações rápidas -->
+    <div class="col-md-6">
+        <div class="card shadow-sm">
+            <div class="card-header bg-white fw-semibold border-bottom">
+                <i class="bi bi-lightning me-2 text-primary"></i>Ações Rápidas
+            </div>
+            <div class="card-body">
+                <div class="d-grid gap-2">
+                    <a href="{% url 'admin:patrimonio_imovel_add' %}" class="btn btn-outline-primary">
+                        <i class="bi bi-plus-circle me-2"></i>Cadastrar Imóvel
+                    </a>
+                    <a href="{% url 'admin:financeiro_receitaaluguel_add' %}" class="btn btn-outline-success">
+                        <i class="bi bi-plus-circle me-2"></i>Lançar Receita
+                    </a>
+                    <a href="{% url 'admin:financeiro_despesa_add' %}" class="btn btn-outline-warning">
+                        <i class="bi bi-plus-circle me-2"></i>Lançar Despesa
+                    </a>
+                    <a href="{% url 'admin:documentos_documento_add' %}" class="btn btn-outline-secondary">
+                        <i class="bi bi-upload me-2"></i>Enviar Documento
+                    </a>
+                    <a href="{% url 'relatorios' %}" class="btn btn-outline-dark">
+                        <i class="bi bi-download me-2"></i>Exportar Relatórios
+                    </a>
+                </div>
+                {% if docs_pendentes_contabilidade > 0 %}
+                <div class="alert alert-warning mt-3 mb-0 py-2">
+                    <i class="bi bi-exclamation-circle me-1"></i>
+                    <strong>{{ docs_pendentes_contabilidade }}</strong> documento(s) pendente(s) de envio à contabilidade.
+                    <a href="{% url 'documento_list' %}?pendente=1" class="alert-link ms-1">Ver</a>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,228 @@
+{% extends "base.html" %}
+
+{% block title %}Relatórios e Exportações — Gestão Patrimonial{% endblock %}
+
+{% block content %}
+<h4 class="fw-bold mb-4"><i class="bi bi-download me-2 text-primary"></i>Relatórios e Exportações</h4>
+
+<div class="row g-4">
+
+    <!-- Imóveis -->
+    <div class="col-md-6">
+        <div class="card shadow-sm">
+            <div class="card-header fw-semibold bg-white">
+                <i class="bi bi-buildings me-2 text-primary"></i>Imóveis
+            </div>
+            <div class="card-body">
+                <form method="get" action="{% url 'export_imoveis' 'csv' %}" class="mb-2">
+                    <div class="input-group input-group-sm">
+                        <select name="status" class="form-select">
+                            <option value="">Todos os status</option>
+                            {% for val, label in status_receita %}{% endfor %}
+                            <option value="alugado">Alugado</option>
+                            <option value="vago">Vago</option>
+                        </select>
+                        <button class="btn btn-outline-secondary" type="submit">
+                            <i class="bi bi-filetype-csv"></i> CSV
+                        </button>
+                    </div>
+                </form>
+                <a href="{% url 'export_imoveis' 'xlsx' %}" class="btn btn-outline-success btn-sm w-100">
+                    <i class="bi bi-file-earmark-excel"></i> Exportar XLSX
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Contratos ativos -->
+    <div class="col-md-6">
+        <div class="card shadow-sm">
+            <div class="card-header fw-semibold bg-white">
+                <i class="bi bi-file-text me-2 text-primary"></i>Contratos Ativos
+            </div>
+            <div class="card-body">
+                <div class="d-flex gap-2">
+                    <a href="{% url 'export_contratos' 'csv' %}" class="btn btn-outline-secondary btn-sm flex-fill">
+                        <i class="bi bi-filetype-csv"></i> CSV
+                    </a>
+                    <a href="{% url 'export_contratos' 'xlsx' %}" class="btn btn-outline-success btn-sm flex-fill">
+                        <i class="bi bi-file-earmark-excel"></i> XLSX
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Receitas por período -->
+    <div class="col-md-6">
+        <div class="card shadow-sm">
+            <div class="card-header fw-semibold bg-white">
+                <i class="bi bi-cash-coin me-2 text-success"></i>Receitas por Período
+            </div>
+            <div class="card-body">
+                <div class="row g-2 mb-3">
+                    <div class="col-6">
+                        <select id="rec-mes" name="mes" class="form-select form-select-sm">
+                            {% for num, nome in meses %}
+                            <option value="{{ num }}" {% if num == mes_atual %}selected{% endif %}>{{ nome }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-6">
+                        <select id="rec-ano" name="ano" class="form-select form-select-sm">
+                            {% for a in anos %}
+                            <option value="{{ a }}" {% if a == ano_atual %}selected{% endif %}>{{ a }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-6">
+                        <select id="rec-imovel" class="form-select form-select-sm">
+                            <option value="">Todos os imóveis</option>
+                            {% for im in imoveis %}<option value="{{ im.pk }}">{{ im.nome }}</option>{% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-6">
+                        <select id="rec-status" class="form-select form-select-sm">
+                            <option value="">Todos os status</option>
+                            {% for val, label in status_receita %}<option value="{{ val }}">{{ label }}</option>{% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <div class="d-flex gap-2">
+                    <button onclick="exportar('receitas','csv')" class="btn btn-outline-secondary btn-sm flex-fill">
+                        <i class="bi bi-filetype-csv"></i> CSV
+                    </button>
+                    <button onclick="exportar('receitas','xlsx')" class="btn btn-outline-success btn-sm flex-fill">
+                        <i class="bi bi-file-earmark-excel"></i> XLSX
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Despesas por período -->
+    <div class="col-md-6">
+        <div class="card shadow-sm">
+            <div class="card-header fw-semibold bg-white">
+                <i class="bi bi-credit-card me-2 text-warning"></i>Despesas por Período
+            </div>
+            <div class="card-body">
+                <div class="row g-2 mb-3">
+                    <div class="col-6">
+                        <select id="desp-mes" class="form-select form-select-sm">
+                            {% for num, nome in meses %}
+                            <option value="{{ num }}" {% if num == mes_atual %}selected{% endif %}>{{ nome }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-6">
+                        <select id="desp-ano" class="form-select form-select-sm">
+                            {% for a in anos %}
+                            <option value="{{ a }}" {% if a == ano_atual %}selected{% endif %}>{{ a }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-6">
+                        <select id="desp-imovel" class="form-select form-select-sm">
+                            <option value="">Todos os imóveis</option>
+                            {% for im in imoveis %}<option value="{{ im.pk }}">{{ im.nome }}</option>{% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-6">
+                        <select id="desp-categoria" class="form-select form-select-sm">
+                            <option value="">Todas as categorias</option>
+                            {% for val, label in categoria_despesa %}<option value="{{ val }}">{{ label }}</option>{% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <div class="d-flex gap-2">
+                    <button onclick="exportar('despesas','csv')" class="btn btn-outline-secondary btn-sm flex-fill">
+                        <i class="bi bi-filetype-csv"></i> CSV
+                    </button>
+                    <button onclick="exportar('despesas','xlsx')" class="btn btn-outline-success btn-sm flex-fill">
+                        <i class="bi bi-file-earmark-excel"></i> XLSX
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Inadimplência -->
+    <div class="col-md-6">
+        <div class="card shadow-sm">
+            <div class="card-header fw-semibold bg-white">
+                <i class="bi bi-exclamation-triangle me-2 text-danger"></i>Inadimplência
+            </div>
+            <div class="card-body">
+                <p class="text-muted small">Todas as receitas com status <strong>Atrasado</strong>.</p>
+                <div class="d-flex gap-2">
+                    <a href="{% url 'export_inadimplencia' 'csv' %}" class="btn btn-outline-secondary btn-sm flex-fill">
+                        <i class="bi bi-filetype-csv"></i> CSV
+                    </a>
+                    <a href="{% url 'export_inadimplencia' 'xlsx' %}" class="btn btn-outline-success btn-sm flex-fill">
+                        <i class="bi bi-file-earmark-excel"></i> XLSX
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Relatório mensal completo -->
+    <div class="col-md-6">
+        <div class="card shadow-sm border-primary">
+            <div class="card-header fw-semibold bg-primary text-white">
+                <i class="bi bi-file-earmark-excel me-2"></i>Relatório Mensal Completo (XLSX)
+            </div>
+            <div class="card-body">
+                <p class="text-muted small">Exporta receitas, despesas e resumo por imóvel em abas separadas.</p>
+                <div class="row g-2 mb-3">
+                    <div class="col-6">
+                        <select id="rel-mes" class="form-select form-select-sm">
+                            {% for num, nome in meses %}
+                            <option value="{{ num }}" {% if num == mes_atual %}selected{% endif %}>{{ nome }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-6">
+                        <select id="rel-ano" class="form-select form-select-sm">
+                            {% for a in anos %}
+                            <option value="{{ a }}" {% if a == ano_atual %}selected{% endif %}>{{ a }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <button onclick="exportarMensal()" class="btn btn-primary btn-sm w-100">
+                    <i class="bi bi-file-earmark-excel me-1"></i>Baixar Relatório Mensal
+                </button>
+            </div>
+        </div>
+    </div>
+
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function exportar(tipo, fmt) {
+    const params = new URLSearchParams();
+    if (tipo === 'receitas') {
+        params.set('mes', document.getElementById('rec-mes').value);
+        params.set('ano', document.getElementById('rec-ano').value);
+        params.set('imovel', document.getElementById('rec-imovel').value);
+        params.set('status', document.getElementById('rec-status').value);
+        window.location = `/financeiro/export/receitas/${fmt}/?` + params;
+    } else {
+        params.set('mes', document.getElementById('desp-mes').value);
+        params.set('ano', document.getElementById('desp-ano').value);
+        params.set('imovel', document.getElementById('desp-imovel').value);
+        params.set('categoria', document.getElementById('desp-categoria').value);
+        window.location = `/financeiro/export/despesas/${fmt}/?` + params;
+    }
+}
+function exportarMensal() {
+    const mes = document.getElementById('rel-mes').value;
+    const ano = document.getElementById('rel-ano').value;
+    window.location = `/financeiro/export/relatorio-mensal/xlsx/?mes=${mes}&ano=${ano}`;
+}
+</script>
+{% endblock %}

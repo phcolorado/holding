@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+
+{% block title %}Imóveis — Gestão Patrimonial{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h4 class="fw-bold mb-0"><i class="bi bi-buildings me-2 text-primary"></i>Imóveis</h4>
+    <a href="{% url 'admin:patrimonio_imovel_add' %}" class="btn btn-primary btn-sm">
+        <i class="bi bi-plus-circle me-1"></i>Novo Imóvel
+    </a>
+</div>
+
+<!-- Filtros -->
+<div class="card shadow-sm mb-4">
+    <div class="card-body py-2">
+        <form method="get" class="row g-2 align-items-end">
+            <div class="col-md-4">
+                <label class="form-label small mb-1">Status</label>
+                <select name="status" class="form-select form-select-sm">
+                    <option value="">Todos</option>
+                    {% for val, label in status_choices %}
+                    <option value="{{ val }}" {% if val == status_atual %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label small mb-1">Cidade</label>
+                <input type="text" name="cidade" value="{{ cidade_atual }}" class="form-control form-control-sm" placeholder="Filtrar por cidade...">
+            </div>
+            <div class="col-md-2">
+                <button type="submit" class="btn btn-secondary btn-sm w-100">Filtrar</button>
+            </div>
+            <div class="col-md-2">
+                <a href="{% url 'imovel_list' %}" class="btn btn-outline-secondary btn-sm w-100">Limpar</a>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="card shadow-sm">
+    <div class="card-body p-0">
+        <table class="table table-hover table-sm mb-0">
+            <thead class="table-dark">
+                <tr>
+                    <th>Nome</th>
+                    <th>Endereço</th>
+                    <th>Cidade/UF</th>
+                    <th>Status</th>
+                    <th>Valor Estimado</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for imovel in imoveis %}
+                <tr>
+                    <td class="fw-semibold">{{ imovel.nome }}</td>
+                    <td>{{ imovel.endereco|truncatechars:40 }}</td>
+                    <td>{{ imovel.cidade }}/{{ imovel.estado }}</td>
+                    <td>
+                        {% if imovel.status == 'alugado' %}
+                            <span class="badge bg-success">Alugado</span>
+                        {% elif imovel.status == 'vago' %}
+                            <span class="badge bg-secondary">Vago</span>
+                        {% elif imovel.status == 'em_manutencao' %}
+                            <span class="badge bg-warning text-dark">Em Manutenção</span>
+                        {% else %}
+                            <span class="badge bg-dark">Vendido</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if imovel.valor_estimado %}
+                        R$ {{ imovel.valor_estimado|floatformat:0 }}
+                        {% else %}—{% endif %}
+                    </td>
+                    <td>
+                        <a href="{% url 'imovel_detail' imovel.pk %}" class="btn btn-sm btn-outline-primary">
+                            <i class="bi bi-eye"></i> Detalhes
+                        </a>
+                    </td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="6" class="text-center text-muted py-4">Nenhum imóvel encontrado.</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <div class="card-footer text-muted small">
+        {{ imoveis|length }} imóvel(is) exibido(s)
+    </div>
+</div>
+{% endblock %}

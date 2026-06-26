@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% load humanize %}
+
+{% block title %}Receitas — Gestão Patrimonial{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h4 class="fw-bold mb-0"><i class="bi bi-cash-coin me-2 text-success"></i>Receitas de Aluguel</h4>
+    <a href="{% url 'admin:financeiro_receitaaluguel_add' %}" class="btn btn-success btn-sm">
+        <i class="bi bi-plus-circle me-1"></i>Nova Receita
+    </a>
+</div>
+
+<div class="card shadow-sm mb-3">
+    <div class="card-body py-2">
+        <form method="get" class="row g-2 align-items-end">
+            <div class="col-md-2">
+                <label class="form-label small mb-1">Mês</label>
+                <select name="mes" class="form-select form-select-sm">
+                    {% for num, nome in meses %}
+                    <option value="{{ num }}" {% if num == mes_atual %}selected{% endif %}>{{ nome }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small mb-1">Ano</label>
+                <select name="ano" class="form-select form-select-sm">
+                    {% for a in anos %}
+                    <option value="{{ a }}" {% if a == ano_atual %}selected{% endif %}>{{ a }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small mb-1">Imóvel</label>
+                <select name="imovel" class="form-select form-select-sm">
+                    <option value="">Todos</option>
+                    {% for im in imoveis %}
+                    <option value="{{ im.pk }}" {% if im.pk|stringformat:"s" == imovel_atual %}selected{% endif %}>{{ im.nome }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small mb-1">Status</label>
+                <select name="status" class="form-select form-select-sm">
+                    <option value="">Todos</option>
+                    {% for val, label in status_choices %}
+                    <option value="{{ val }}" {% if val == status_atual %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <label class="form-label small mb-1 d-block">&nbsp;</label>
+                <button type="submit" class="btn btn-secondary btn-sm">Filtrar</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+{% with total_prev=receitas|length %}
+<div class="row g-2 mb-3">
+    <div class="col-auto">
+        <div class="badge bg-light text-dark border fs-6 px-3 py-2">
+            Total previsto: <strong>R$ {% for r in receitas %}{{ r.valor_previsto|add:0 }}{% endfor %}</strong>
+        </div>
+    </div>
+</div>
+{% endwith %}
+
+<div class="card shadow-sm">
+    <div class="card-body p-0">
+        <table class="table table-hover table-sm mb-0">
+            <thead class="table-dark">
+                <tr>
+                    <th>Imóvel</th><th>Locatário</th><th>Competência</th>
+                    <th>Vencimento</th><th>Previsto</th><th>Recebido</th><th>Status</th><th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in receitas %}
+                <tr class="{% if r.status == 'atrasado' %}table-danger{% elif r.status == 'recebido' %}table-success{% endif %}">
+                    <td><a href="{% url 'imovel_detail' r.imovel.pk %}">{{ r.imovel.nome }}</a></td>
+                    <td>{% if r.contrato %}{{ r.contrato.locatario.nome }}{% else %}—{% endif %}</td>
+                    <td>{{ r.get_competencia_mes_display }}/{{ r.competencia_ano }}</td>
+                    <td>{{ r.data_vencimento|date:"d/m/Y" }}</td>
+                    <td>R$ {{ r.valor_previsto|floatformat:2|intcomma }}</td>
+                    <td>{% if r.valor_recebido %}R$ {{ r.valor_recebido|floatformat:2|intcomma }}{% else %}—{% endif %}</td>
+                    <td>
+                        {% if r.status == 'recebido' %}<span class="badge bg-success">Recebido</span>
+                        {% elif r.status == 'atrasado' %}<span class="badge bg-danger">Atrasado</span>
+                        {% elif r.status == 'parcial' %}<span class="badge bg-warning text-dark">Parcial</span>
+                        {% elif r.status == 'cancelado' %}<span class="badge bg-dark">Cancelado</span>
+                        {% else %}<span class="badge bg-primary">Previsto</span>{% endif %}
+                    </td>
+                    <td>
+                        <a href="{% url 'admin:financeiro_receitaaluguel_change' r.pk %}" class="btn btn-sm btn-outline-secondary">
+                            <i class="bi bi-pencil"></i>
+                        </a>
+                    </td>
+                </tr>
+                {% empty %}
+                <tr><td colspan="8" class="text-center text-muted py-4">Nenhuma receita no período selecionado.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <div class="card-footer text-muted small d-flex justify-content-between">
+        <span>{{ receitas|length }} receita(s)</span>
+        <div>
+            <a href="{% url 'export_receitas' 'csv' %}?mes={{ mes_atual }}&ano={{ ano_atual }}&status={{ status_atual }}&imovel={{ imovel_atual }}"
+               class="btn btn-sm btn-outline-secondary me-1">
+                <i class="bi bi-filetype-csv"></i> CSV
+            </a>
+            <a href="{% url 'export_receitas' 'xlsx' %}?mes={{ mes_atual }}&ano={{ ano_atual }}&status={{ status_atual }}&imovel={{ imovel_atual }}"
+               class="btn btn-sm btn-outline-success">
+                <i class="bi bi-file-earmark-excel"></i> XLSX
+            </a>
+        </div>
+    </div>
+</div>
+{% endblock %}
