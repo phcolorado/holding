@@ -1,4 +1,4 @@
-from django.contrib import admin
+from django.contrib import admin, messages
 from .models import Imovel, Pessoa, Contrato, Manutencao
 
 
@@ -66,6 +66,36 @@ class ContratoAdmin(admin.ModelAdmin):
     readonly_fields = ('criado_em', 'atualizado_em')
     ordering = ('-data_inicio',)
     raw_id_fields = ('imovel', 'locatario', 'fiador', 'imobiliaria')
+    actions = ['gerar_receitas_esperadas']
+
+    @admin.action(description='Gerar receitas esperadas')
+    def gerar_receitas_esperadas(self, request, queryset):
+        from financeiro.services import gerar_receitas_para_contrato
+
+        total_criadas = 0
+        total_existiam = 0
+        ignorados = 0
+
+        for contrato in queryset:
+            if contrato.status != 'ativo':
+                ignorados += 1
+                continue
+            criadas, existiam = gerar_receitas_para_contrato(contrato)
+            total_criadas += criadas
+            total_existiam += existiam
+
+        if total_criadas:
+            self.message_user(request, f'{total_criadas} receita(s) gerada(s) com sucesso.', messages.SUCCESS)
+        if total_existiam:
+            self.message_user(request, f'{total_existiam} receita(s) já existiam e foram ignoradas.', messages.WARNING)
+        if ignorados:
+            self.message_user(
+                request,
+                f'{ignorados} contrato(s) ignorado(s) por não estar com status ativo.',
+                messages.ERROR,
+            )
+        if not total_criadas and not total_existiam and not ignorados:
+            self.message_user(request, 'Nenhuma receita para gerar.', messages.WARNING)
     fieldsets = (
         ('Partes', {
             'fields': ('imovel', 'locatario', 'fiador', 'imobiliaria')

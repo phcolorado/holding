@@ -11,4 +11,5 @@ urlpatterns = [
     path('export/despesas/<str:formato>/', views.export_despesas, name='export_despesas'),
     path('export/inadimplencia/<str:formato>/', views.export_inadimplencia, name='export_inadimplencia'),
     path('export/relatorio-mensal/<str:formato>/', views.export_relatorio_mensal, name='export_relatorio_mensal'),
+    path('gerar-receitas/', views.gerar_receitas_mes_view, name='gerar_receitas_mes'),
 ]

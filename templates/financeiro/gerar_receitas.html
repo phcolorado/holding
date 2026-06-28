@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+
+{% block title %}Gerar Receitas do Mês — Gestão Patrimonial{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h4 class="fw-bold mb-0">
+        <i class="bi bi-magic me-2 text-success"></i>Gerar Receitas Esperadas
+    </h4>
+    <a href="{% url 'receitas_list' %}" class="btn btn-sm btn-outline-secondary">
+        <i class="bi bi-arrow-left"></i> Voltar às Receitas
+    </a>
+</div>
+
+<div class="row justify-content-center">
+    <div class="col-md-7">
+        <div class="card shadow-sm">
+            <div class="card-header bg-white fw-semibold">
+                <i class="bi bi-info-circle text-primary me-2"></i>O que será feito
+            </div>
+            <div class="card-body">
+                <p class="mb-2">
+                    O sistema irá percorrer <strong>todos os contratos ativos</strong> que cobrem o mês/ano
+                    selecionado e criar automaticamente os registros de <em>Receita de Aluguel</em> ainda
+                    não existentes.
+                </p>
+                <ul class="text-muted small mb-3">
+                    <li>Contratos inativos são ignorados.</li>
+                    <li>Receitas já cadastradas para o mesmo contrato/mês/ano <strong>não</strong> são duplicadas.</li>
+                    <li>O imóvel da receita é sempre o imóvel do contrato.</li>
+                    <li>O dia de vencimento é ajustado automaticamente para meses com menos dias.</li>
+                </ul>
+
+                <form method="post">
+                    {% csrf_token %}
+                    <div class="row g-3 align-items-end mb-4">
+                        <div class="col-sm-5">
+                            <label class="form-label fw-semibold">Mês</label>
+                            <select name="mes" class="form-select">
+                                {% for num, nome in meses %}
+                                <option value="{{ num }}" {% if num == mes_atual %}selected{% endif %}>{{ nome }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-sm-4">
+                            <label class="form-label fw-semibold">Ano</label>
+                            <select name="ano" class="form-select">
+                                {% for a in anos %}
+                                <option value="{{ a }}" {% if a == ano_atual %}selected{% endif %}>{{ a }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-sm-3">
+                            <button type="submit"
+                                    formaction="{% url 'gerar_receitas_mes' %}"
+                                    class="btn btn-sm btn-outline-secondary w-100"
+                                    title="Atualizar prévia">
+                                <i class="bi bi-search"></i> Verificar
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="alert {% if contratos_ativos > 0 %}alert-success{% else %}alert-warning{% endif %} py-2">
+                        <i class="bi bi-buildings me-2"></i>
+                        {% if contratos_ativos > 0 %}
+                            <strong>{{ contratos_ativos }}</strong> contrato(s) ativo(s) cobrem
+                            <strong>{{ mes_atual|stringformat:"02d" }}/{{ ano_atual }}</strong>.
+                        {% else %}
+                            Nenhum contrato ativo cobre o período selecionado.
+                        {% endif %}
+                    </div>
+
+                    <div class="d-grid mt-3">
+                        <button type="submit" class="btn btn-success btn-lg"
+                                {% if contratos_ativos == 0 %}disabled{% endif %}>
+                            <i class="bi bi-magic me-2"></i>
+                            Gerar Receitas de {{ mes_atual|stringformat:"02d" }}/{{ ano_atual }}
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <div class="card shadow-sm mt-3 border-0 bg-light">
+            <div class="card-body small text-muted">
+                <i class="bi bi-lightbulb me-1 text-warning"></i>
+                <strong>Dica:</strong> Para gerar receitas de toda a vigência de um contrato de uma vez,
+                use a <strong>action "Gerar receitas esperadas"</strong> na listagem de Contratos do Admin
+                (<a href="{% url 'admin:patrimonio_contrato_changelist' %}">acessar Admin → Contratos</a>).
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

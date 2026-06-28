@@ -92,6 +92,12 @@
                     </a>
                 </li>
                 <li class="nav-item">
+                    <a class="nav-link {% if 'gerar_receitas' in request.resolver_match.url_name %}active{% endif %}"
+                       href="{% url 'gerar_receitas_mes' %}">
+                        <i class="bi bi-magic me-2"></i>Gerar Receitas
+                    </a>
+                </li>
+                <li class="nav-item">
                     <a class="nav-link {% if 'relatorios' in request.resolver_match.url_name %}active{% endif %}"
                        href="{% url 'relatorios' %}">
                         <i class="bi bi-download me-2"></i>Relatórios / Exportar

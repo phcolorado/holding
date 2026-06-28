@@ -1,5 +1,8 @@
+from django.contrib import messages
 from django.contrib.auth.decorators import login_required
+from django.http import HttpResponseRedirect
 from django.shortcuts import render
+from django.urls import reverse
 from django.utils import timezone
 
 from .models import ReceitaAluguel, Despesa, FechamentoMensal
@@ -169,3 +172,51 @@ def export_inadimplencia(request, formato):
 def export_relatorio_mensal(request, formato):
     mes, ano, _, _, _ = _filtros_periodo(request)
     return exportar_relatorio_mensal_xlsx(request, mes, ano)
+
+
+@login_required
+def gerar_receitas_mes_view(request):
+    """
+    GET: exibe formulário de confirmação com seleção de mês/ano.
+    POST: executa a geração e redireciona para a lista de receitas do período.
+    """
+    from .services import gerar_receitas_mes
+    from calendar import monthrange
+
+    hoje = timezone.now().date()
+
+    try:
+        mes = int(request.POST.get('mes') or request.GET.get('mes') or hoje.month)
+        ano = int(request.POST.get('ano') or request.GET.get('ano') or hoje.year)
+    except (ValueError, TypeError):
+        mes, ano = hoje.month, hoje.year
+
+    if request.method == 'POST':
+        criadas, existiam = gerar_receitas_mes(mes, ano)
+
+        if criadas:
+            messages.success(request, f'{criadas} receita(s) gerada(s) para {mes:02d}/{ano}.')
+        if existiam:
+            messages.warning(request, f'{existiam} receita(s) já existiam e foram ignoradas.')
+        if not criadas and not existiam:
+            messages.info(request, f'Nenhum contrato ativo encontrado para {mes:02d}/{ano}.')
+
+        return HttpResponseRedirect(f"{reverse('receitas_list')}?mes={mes}&ano={ano}")
+
+    # GET — monta contexto para o formulário de confirmação
+    data_inicio_mes = hoje.replace(year=ano, month=mes, day=1)
+    data_fim_mes = hoje.replace(year=ano, month=mes, day=monthrange(ano, mes)[1])
+    contratos_ativos = Contrato.objects.filter(
+        status='ativo',
+        data_inicio__lte=data_fim_mes,
+        data_fim__gte=data_inicio_mes,
+    ).count()
+
+    context = {
+        'mes_atual': mes,
+        'ano_atual': ano,
+        'contratos_ativos': contratos_ativos,
+        'meses': ReceitaAluguel.MESES,
+        'anos': range(2020, hoje.year + 2),
+    }
+    return render(request, 'financeiro/gerar_receitas.html', context)

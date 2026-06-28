@@ -1,3 +1,4 @@
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
 from patrimonio.models import Imovel, Pessoa, Contrato
@@ -42,6 +43,17 @@ class ReceitaAluguel(models.Model):
 
     def __str__(self):
         return f'{self.imovel.nome} — {self.get_competencia_mes_display()}/{self.competencia_ano} ({self.get_status_display()})'
+
+    def clean(self):
+        if self.contrato_id and self.imovel_id:
+            if self.imovel_id != self.contrato.imovel_id:
+                raise ValidationError({'imovel': 'O imóvel deve ser o mesmo imóvel do contrato.'})
+
+    def save(self, *args, **kwargs):
+        # Preenche imovel automaticamente a partir do contrato quando não informado
+        if self.contrato_id and not self.imovel_id:
+            self.imovel_id = self.contrato.imovel_id
+        super().save(*args, **kwargs)
 
     def verificar_atraso(self):
         """Marca como atrasado se vencido e ainda não quitado."""

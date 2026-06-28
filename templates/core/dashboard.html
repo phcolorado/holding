@@ -181,11 +181,14 @@
             </div>
             <div class="card-body">
                 <div class="d-grid gap-2">
+                    <a href="{% url 'gerar_receitas_mes' %}" class="btn btn-success">
+                        <i class="bi bi-magic me-2"></i>Gerar Receitas do Mês Atual
+                    </a>
                     <a href="{% url 'admin:patrimonio_imovel_add' %}" class="btn btn-outline-primary">
                         <i class="bi bi-plus-circle me-2"></i>Cadastrar Imóvel
                     </a>
                     <a href="{% url 'admin:financeiro_receitaaluguel_add' %}" class="btn btn-outline-success">
-                        <i class="bi bi-plus-circle me-2"></i>Lançar Receita
+                        <i class="bi bi-plus-circle me-2"></i>Lançar Receita Manualmente
                     </a>
                     <a href="{% url 'admin:financeiro_despesa_add' %}" class="btn btn-outline-warning">
                         <i class="bi bi-plus-circle me-2"></i>Lançar Despesa
