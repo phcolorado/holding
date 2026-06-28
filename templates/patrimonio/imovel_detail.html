@@ -124,6 +124,14 @@
             <i class="bi bi-tools me-1"></i>Manutenções <span class="badge bg-secondary">{{ manutencoes|length }}</span>
         </a>
     </li>
+    <li class="nav-item">
+        <a class="nav-link" data-bs-toggle="tab" href="#obrigatorios-tab">
+            <i class="bi bi-file-earmark-check me-1"></i>Docs. Obrigatórios
+            {% with pend=docs_obrigatorios|length %}
+            <span class="badge bg-{% if pend > 0 %}warning text-dark{% else %}secondary{% endif %}">{{ pend }}</span>
+            {% endwith %}
+        </a>
+    </li>
 </ul>
 
 <div class="tab-content">
@@ -241,6 +249,57 @@
                         </tr>
                         {% empty %}
                         <tr><td colspan="5" class="text-center text-muted py-3">Nenhuma manutenção cadastrada.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="tab-pane fade" id="obrigatorios-tab">
+        <div class="card shadow-sm">
+            <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                <span class="fw-semibold"><i class="bi bi-file-earmark-check me-2"></i>Documentos Obrigatórios</span>
+                <a href="{% url 'admin:documentos_documentoobrigatorio_add' %}?imovel={{ imovel.pk }}"
+                   class="btn btn-sm btn-outline-primary">
+                    <i class="bi bi-plus"></i> Adicionar
+                </a>
+            </div>
+            <div class="card-body p-0">
+                <table class="table table-sm table-hover mb-0">
+                    <thead class="table-light">
+                        <tr><th>Tipo</th><th>Descrição</th><th>Status</th><th>Documento</th><th>Obs.</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for ob in docs_obrigatorios %}
+                        <tr>
+                            <td>{{ ob.get_tipo_display }}</td>
+                            <td>{{ ob.descricao }}</td>
+                            <td>
+                                {% if ob.pendente %}
+                                    <span class="badge bg-warning text-dark">Pendente</span>
+                                {% else %}
+                                    <span class="badge bg-success">Vinculado</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if ob.documento %}
+                                    <a href="{{ ob.documento.arquivo.url }}" target="_blank" class="small">
+                                        <i class="bi bi-download me-1"></i>{{ ob.documento.titulo|truncatechars:30 }}
+                                    </a>
+                                {% else %}
+                                    <span class="text-muted small">—</span>
+                                {% endif %}
+                            </td>
+                            <td class="small text-muted">{{ ob.observacoes|truncatechars:40|default:"—" }}</td>
+                        </tr>
+                        {% empty %}
+                        <tr>
+                            <td colspan="5" class="text-center text-muted py-3">
+                                Nenhum documento obrigatório cadastrado.
+                                <a href="{% url 'admin:documentos_documentoobrigatorio_add' %}?imovel={{ imovel.pk }}">Adicionar</a>
+                            </td>
+                        </tr>
                         {% endfor %}
                     </tbody>
                 </table>

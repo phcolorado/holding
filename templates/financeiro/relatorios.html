@@ -223,6 +223,37 @@
         </div>
     </div>
 
+    <!-- Relatório para contabilidade -->
+    <div class="col-md-6">
+        <div class="card shadow-sm border-success">
+            <div class="card-header fw-semibold bg-success text-white">
+                <i class="bi bi-building me-2"></i>Relatório para Contabilidade (XLSX)
+            </div>
+            <div class="card-body">
+                <p class="text-muted small">Resumo, receitas, despesas, inadimplência, documentos pendentes e resultado por imóvel.</p>
+                <div class="row g-2 mb-3">
+                    <div class="col-6">
+                        <select id="cont-mes" class="form-select form-select-sm">
+                            {% for num, nome in meses %}
+                            <option value="{{ num }}" {% if num == mes_atual %}selected{% endif %}>{{ nome }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-6">
+                        <select id="cont-ano" class="form-select form-select-sm">
+                            {% for a in anos %}
+                            <option value="{{ a }}" {% if a == ano_atual %}selected{% endif %}>{{ a }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <button onclick="exportarContabilidade()" class="btn btn-success btn-sm w-100">
+                    <i class="bi bi-file-earmark-excel me-1"></i>Baixar Relatório Contabilidade
+                </button>
+            </div>
+        </div>
+    </div>
+
 </div>
 {% endblock %}
 
@@ -261,6 +292,11 @@ function exportarInadimplencia(fmt) {
     const imovel = document.getElementById('inadimp-imovel').value;
     const params = imovel ? `?imovel=${imovel}` : '';
     window.location = `/financeiro/export/inadimplencia/${fmt}/${params}`;
+}
+function exportarContabilidade() {
+    const mes = document.getElementById('cont-mes').value;
+    const ano = document.getElementById('cont-ano').value;
+    window.location = `/financeiro/export/relatorio-contabilidade/xlsx/?mes=${mes}&ano=${ano}`;
 }
 </script>
 {% endblock %}

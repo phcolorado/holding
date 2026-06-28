@@ -80,7 +80,13 @@
             <div class="nav-section">Financeiro</div>
             <ul class="nav flex-column mb-2">
                 <li class="nav-item">
-                    <a class="nav-link {% if 'receitas' in request.resolver_match.url_name %}active{% endif %}"
+                    <a class="nav-link {% if request.resolver_match.url_name == 'baixa_receitas_mes' %}active{% endif %}"
+                       href="{% url 'baixa_receitas_mes' %}">
+                        <i class="bi bi-check2-circle me-2"></i>Baixa de Aluguéis
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if 'receitas' in request.resolver_match.url_name and request.resolver_match.url_name != 'baixa_receitas_mes' %}active{% endif %}"
                        href="{% url 'receitas_list' %}">
                         <i class="bi bi-cash-coin me-2"></i>Receitas
                     </a>

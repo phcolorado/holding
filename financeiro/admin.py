@@ -13,15 +13,14 @@ class ReceitaAluguelAdmin(admin.ModelAdmin):
     date_hierarchy = 'data_vencimento'
     readonly_fields = ('criado_em', 'atualizado_em')
     ordering = ('-competencia_ano', '-competencia_mes')
-    raw_id_fields = ('contrato', 'imovel')
+    raw_id_fields = ('contrato',)
 
     def get_readonly_fields(self, request, obj=None):
-        if obj:
-            return self.readonly_fields + ('imovel',)
-        return self.readonly_fields
+        return self.readonly_fields + ('imovel',)
 
     fieldsets = (
         ('Referência', {
+            'description': 'O imóvel é preenchido automaticamente pelo contrato selecionado ao salvar.',
             'fields': ('contrato', 'imovel', 'competencia_mes', 'competencia_ano')
         }),
         ('Vencimento e Valores', {

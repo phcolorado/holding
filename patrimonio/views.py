@@ -5,7 +5,7 @@ from django.utils import timezone
 
 from .models import Imovel, Pessoa, Contrato, Manutencao
 from financeiro.models import ReceitaAluguel, Despesa
-from documentos.models import Documento
+from documentos.models import Documento, DocumentoObrigatorio
 
 
 @login_required
@@ -37,6 +37,7 @@ def imovel_detail(request, pk):
     despesas = Despesa.objects.filter(imovel=imovel).order_by('-data_vencimento')[:24]
     documentos = Documento.objects.filter(imovel=imovel).order_by('-criado_em')
     manutencoes = Manutencao.objects.filter(imovel=imovel).order_by('-data_solicitacao')
+    docs_obrigatorios = DocumentoObrigatorio.objects.filter(imovel=imovel).select_related('documento')
 
     total_recebido = ReceitaAluguel.objects.filter(
         imovel=imovel, status__in=('recebido', 'parcial')
@@ -56,6 +57,7 @@ def imovel_detail(request, pk):
         'total_recebido': total_recebido,
         'total_despesas': total_despesas,
         'resultado': resultado,
+        'docs_obrigatorios': docs_obrigatorios,
     }
     return render(request, 'patrimonio/imovel_detail.html', context)
 

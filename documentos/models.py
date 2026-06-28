@@ -9,6 +9,47 @@ def upload_documento_path(instance, filename):
     return f'documentos/imovel_{imovel_id}/{tipo}/{filename}'
 
 
+class DocumentoObrigatorio(models.Model):
+    TIPO_CHOICES = [
+        ('matricula', 'Matrícula'),
+        ('iptu', 'IPTU'),
+        ('contrato_atual', 'Contrato Atual'),
+        ('laudo_vistoria', 'Laudo de Vistoria'),
+        ('seguro', 'Seguro'),
+        ('procuracao', 'Procuração'),
+        ('documento_contabil', 'Documento Contábil'),
+        ('outro', 'Outro'),
+    ]
+
+    imovel = models.ForeignKey(
+        Imovel, on_delete=models.CASCADE, verbose_name='Imóvel',
+        related_name='documentos_obrigatorios',
+    )
+    tipo = models.CharField('Tipo', max_length=30, choices=TIPO_CHOICES)
+    descricao = models.CharField('Descrição', max_length=200)
+    obrigatorio = models.BooleanField('Obrigatório', default=True)
+    documento = models.ForeignKey(
+        'Documento', null=True, blank=True, on_delete=models.SET_NULL,
+        verbose_name='Documento Vinculado', related_name='obrigatorios',
+    )
+    observacoes = models.TextField('Observações', blank=True)
+    criado_em = models.DateTimeField('Criado em', auto_now_add=True)
+    atualizado_em = models.DateTimeField('Atualizado em', auto_now=True)
+
+    class Meta:
+        verbose_name = 'Documento Obrigatório'
+        verbose_name_plural = 'Documentos Obrigatórios'
+        ordering = ['imovel__nome', 'tipo']
+        unique_together = [['imovel', 'tipo']]
+
+    def __str__(self):
+        return f'{self.get_tipo_display()} — {self.imovel.nome}'
+
+    @property
+    def pendente(self):
+        return self.obrigatorio and self.documento_id is None
+
+
 class Documento(models.Model):
     TIPO_CHOICES = [
         ('matricula', 'Matrícula'),

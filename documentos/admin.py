@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Documento
+from .models import Documento, DocumentoObrigatorio
 
 
 @admin.register(Documento)
@@ -31,3 +31,32 @@ class DocumentoAdmin(admin.ModelAdmin):
             'classes': ('collapse',),
         }),
     )
+
+
+@admin.register(DocumentoObrigatorio)
+class DocumentoObrigatorioAdmin(admin.ModelAdmin):
+    list_display = ('imovel', 'tipo', 'descricao', 'obrigatorio', 'documento', 'pendente')
+    list_filter = ('tipo', 'obrigatorio', 'imovel')
+    search_fields = ('imovel__nome', 'descricao', 'observacoes')
+    readonly_fields = ('criado_em', 'atualizado_em')
+    ordering = ('imovel__nome', 'tipo')
+    raw_id_fields = ('documento',)
+    fieldsets = (
+        ('Identificação', {
+            'fields': ('imovel', 'tipo', 'descricao', 'obrigatorio')
+        }),
+        ('Documento Vinculado', {
+            'fields': ('documento',)
+        }),
+        ('Observações', {
+            'fields': ('observacoes',)
+        }),
+        ('Controle', {
+            'fields': ('criado_em', 'atualizado_em'),
+            'classes': ('collapse',),
+        }),
+    )
+
+    @admin.display(boolean=True, description='Pendente')
+    def pendente(self, obj):
+        return obj.pendente

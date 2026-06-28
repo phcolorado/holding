@@ -5,7 +5,7 @@ from datetime import timedelta
 
 from patrimonio.models import Imovel, Contrato, Manutencao
 from financeiro.models import ReceitaAluguel, Despesa
-from documentos.models import Documento
+from documentos.models import Documento, DocumentoObrigatorio
 
 
 @login_required
@@ -51,6 +51,10 @@ def dashboard(request):
         enviado_contabilidade=False,
     ).count()
 
+    docs_obrigatorios_pendentes = DocumentoObrigatorio.objects.filter(
+        obrigatorio=True, documento__isnull=True
+    ).count()
+
     context = {
         'imoveis_total': imoveis_total,
         'imoveis_alugados': imoveis_alugados,
@@ -63,6 +67,7 @@ def dashboard(request):
         'reajustes_proximos': reajustes_proximos,
         'manutencoes_abertas': manutencoes_abertas,
         'docs_pendentes_contabilidade': docs_pendentes_contabilidade,
+        'docs_obrigatorios_pendentes': docs_obrigatorios_pendentes,
         'mes_atual': mes_atual,
         'ano_atual': ano_atual,
     }

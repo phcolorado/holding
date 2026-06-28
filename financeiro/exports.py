@@ -3,6 +3,7 @@ import io
 from datetime import date
 
 from django.http import HttpResponse
+from django.utils import timezone
 
 try:
     import openpyxl
@@ -12,7 +13,7 @@ try:
 except ImportError:
     OPENPYXL_AVAILABLE = False
 
-from .models import ReceitaAluguel, Despesa
+from .models import ReceitaAluguel, Despesa, receitas_inadimplentes_qs
 from patrimonio.models import Imovel, Contrato
 
 
@@ -308,5 +309,159 @@ def exportar_relatorio_mensal_xlsx(request, mes, ano):
             ws_res.append([imovel.nome, rec_prev, rec_rec, desp_pagas, rec_rec - desp_pagas])
 
     response = _response_xlsx(f'relatorio_{mes:02d}_{ano}.xlsx')
+    wb.save(response)
+    return response
+
+
+# ─── relatório contabilidade ───────────────────────────────────────────────────
+
+def exportar_relatorio_contabilidade_xlsx(request, mes, ano):
+    if not OPENPYXL_AVAILABLE:
+        return HttpResponse('openpyxl não instalado.', status=500)
+
+    from documentos.models import Documento
+
+    hoje = timezone.now().date()
+    receitas = list(
+        ReceitaAluguel.objects.filter(competencia_mes=mes, competencia_ano=ano)
+        .select_related('imovel', 'contrato__locatario')
+    )
+    despesas = list(
+        Despesa.objects.filter(competencia_mes=mes, competencia_ano=ano)
+        .select_related('imovel', 'fornecedor')
+    )
+    inadimplentes = list(
+        receitas_inadimplentes_qs()
+        .select_related('imovel', 'contrato__locatario')
+        .order_by('data_vencimento')
+    )
+    docs_pendentes = list(
+        Documento.objects.filter(
+            tipo__in=Documento.TIPOS_CONTABILIDADE, enviado_contabilidade=False
+        ).select_related('imovel', 'pessoa')
+    )
+
+    wb = openpyxl.Workbook()
+
+    # ── Aba 1: Resumo ──────────────────────────────────────────────────────────
+    ws_res = wb.active
+    ws_res.title = 'Resumo'
+    ws_res.append(['Campo', 'Valor'])
+    _estilizar_cabecalho(ws_res, 2)
+    total_prev = sum(r.valor_previsto for r in receitas)
+    total_rec = sum(r.valor_recebido or 0 for r in receitas if r.status in ('recebido', 'parcial'))
+    total_desp = sum(d.valor for d in despesas if d.status == 'paga')
+    rec_aberto = sum(1 for r in receitas if r.status not in ReceitaAluguel.STATUS_QUITADOS)
+    rec_vencidas = sum(1 for r in receitas if r.esta_atrasada)
+    docs_pend_cnt = len(docs_pendentes)
+    nome_mes = dict(ReceitaAluguel.MESES).get(mes, str(mes))
+    for row in [
+        (f'Mês/Ano', f'{nome_mes}/{ano}'),
+        ('Total Receitas Previstas (R$)', float(total_prev)),
+        ('Total Receitas Recebidas (R$)', float(total_rec)),
+        ('Total Despesas Pagas (R$)', float(total_desp)),
+        ('Resultado Líquido (R$)', float(total_rec - total_desp)),
+        ('Receitas em Aberto', rec_aberto),
+        ('Receitas Vencidas (inadimplência)', rec_vencidas),
+        ('Documentos Pendentes para Contabilidade', docs_pend_cnt),
+    ]:
+        ws_res.append(row)
+    ws_res.column_dimensions['A'].width = 40
+    ws_res.column_dimensions['B'].width = 25
+
+    # ── Aba 2: Receitas ────────────────────────────────────────────────────────
+    ws_rec = wb.create_sheet('Receitas')
+    cab_rec = [
+        'Imóvel', 'Locatário', 'Competência', 'Vencimento',
+        'Valor Previsto', 'Valor Recebido', 'Data Recebimento',
+        'Status', 'Atrasada', 'Observações',
+    ]
+    ws_rec.append(cab_rec)
+    _estilizar_cabecalho(ws_rec, len(cab_rec))
+    for r in receitas:
+        loc = r.contrato.locatario.nome if r.contrato else ''
+        ws_rec.append([
+            r.imovel.nome, loc,
+            f'{r.get_competencia_mes_display()}/{r.competencia_ano}',
+            r.data_vencimento, float(r.valor_previsto),
+            float(r.valor_recebido) if r.valor_recebido else '',
+            r.data_recebimento, r.get_status_display(),
+            'Sim' if r.esta_atrasada else 'Não',
+            r.observacoes,
+        ])
+
+    # ── Aba 3: Despesas ────────────────────────────────────────────────────────
+    ws_desp = wb.create_sheet('Despesas')
+    cab_desp = [
+        'Imóvel', 'Categoria', 'Fornecedor', 'Descrição',
+        'Competência', 'Vencimento', 'Valor', 'Data Pagamento',
+        'Status', 'Atrasada', 'Observações',
+    ]
+    ws_desp.append(cab_desp)
+    _estilizar_cabecalho(ws_desp, len(cab_desp))
+    for d in despesas:
+        comp = f'{d.get_competencia_mes_display()}/{d.competencia_ano}' if d.competencia_mes else ''
+        ws_desp.append([
+            d.imovel.nome if d.imovel else '',
+            d.get_categoria_display(),
+            d.fornecedor.nome if d.fornecedor else '',
+            d.descricao, comp,
+            d.data_vencimento, float(d.valor), d.data_pagamento,
+            d.get_status_display(),
+            'Sim' if d.esta_atrasada else 'Não',
+            d.observacoes,
+        ])
+
+    # ── Aba 4: Inadimplência ───────────────────────────────────────────────────
+    ws_inad = wb.create_sheet('Inadimplência')
+    cab_inad = [
+        'Imóvel', 'Locatário', 'Competência', 'Vencimento',
+        'Valor Previsto', 'Dias de Atraso', 'Status', 'Observações',
+    ]
+    ws_inad.append(cab_inad)
+    _estilizar_cabecalho(ws_inad, len(cab_inad))
+    for r in inadimplentes:
+        loc = r.contrato.locatario.nome if r.contrato else ''
+        dias = (hoje - r.data_vencimento).days
+        ws_inad.append([
+            r.imovel.nome, loc,
+            f'{r.get_competencia_mes_display()}/{r.competencia_ano}',
+            r.data_vencimento, float(r.valor_previsto), dias,
+            r.get_status_display(), r.observacoes,
+        ])
+
+    # ── Aba 5: Documentos Pendentes ────────────────────────────────────────────
+    ws_docs = wb.create_sheet('Docs. Pendentes')
+    cab_docs = ['Título', 'Tipo', 'Imóvel', 'Pessoa', 'Data Documento', 'Data Validade', 'Observações']
+    ws_docs.append(cab_docs)
+    _estilizar_cabecalho(ws_docs, len(cab_docs))
+    for doc in docs_pendentes:
+        ws_docs.append([
+            doc.titulo, doc.get_tipo_display(),
+            doc.imovel.nome if doc.imovel else '',
+            doc.pessoa.nome if doc.pessoa else '',
+            doc.data_documento, doc.data_validade, doc.observacoes,
+        ])
+
+    # ── Aba 6: Resultado por Imóvel ────────────────────────────────────────────
+    ws_por_im = wb.create_sheet('Por Imóvel')
+    cab_im = ['Imóvel', 'Rec. Prevista', 'Rec. Recebida', 'Desp. Pagas', 'Resultado', 'Em Aberto']
+    ws_por_im.append(cab_im)
+    _estilizar_cabecalho(ws_por_im, len(cab_im))
+    for imovel in Imovel.objects.all():
+        rec_prev = sum(r.valor_previsto for r in receitas if r.imovel_id == imovel.pk)
+        rec_rec = sum(
+            r.valor_recebido or 0 for r in receitas
+            if r.imovel_id == imovel.pk and r.status in ('recebido', 'parcial')
+        )
+        desp_p = sum(d.valor for d in despesas if d.imovel_id == imovel.pk and d.status == 'paga')
+        em_aberto = sum(1 for r in receitas if r.imovel_id == imovel.pk and r.status not in ReceitaAluguel.STATUS_QUITADOS)
+        if rec_prev or rec_rec or desp_p:
+            ws_por_im.append([
+                imovel.nome, float(rec_prev), float(rec_rec),
+                float(desp_p), float(rec_rec - desp_p), em_aberto,
+            ])
+
+    response = _response_xlsx(f'contabilidade_{mes:02d}_{ano}.xlsx')
     wb.save(response)
     return response

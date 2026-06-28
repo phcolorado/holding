@@ -1,0 +1,270 @@
+{% extends "base.html" %}
+{% load humanize %}
+
+{% block title %}Baixa de Aluguéis — Gestão Patrimonial{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h4 class="fw-bold mb-0">
+        <i class="bi bi-check2-circle me-2 text-success"></i>Baixa de Aluguéis
+    </h4>
+    <a href="{% url 'receitas_list' %}" class="btn btn-sm btn-outline-secondary">
+        <i class="bi bi-arrow-left"></i> Receitas
+    </a>
+</div>
+
+<!-- Seletor mês/ano -->
+<form method="get" class="card shadow-sm mb-3">
+    <div class="card-body py-2">
+        <div class="row g-2 align-items-end">
+            <div class="col-auto">
+                <label class="form-label fw-semibold mb-1 small">Mês</label>
+                <select name="mes" class="form-select form-select-sm">
+                    {% for num, nome in meses %}
+                    <option value="{{ num }}" {% if num == mes_atual %}selected{% endif %}>{{ nome }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <label class="form-label fw-semibold mb-1 small">Ano</label>
+                <select name="ano" class="form-select form-select-sm">
+                    {% for a in anos %}
+                    <option value="{{ a }}" {% if a == ano_atual %}selected{% endif %}>{{ a }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <button type="submit" class="btn btn-primary btn-sm">
+                    <i class="bi bi-search me-1"></i>Filtrar
+                </button>
+            </div>
+            <div class="col-auto ms-auto">
+                <form method="post" class="d-inline">
+                    {% csrf_token %}
+                    <input type="hidden" name="mes" value="{{ mes_atual }}">
+                    <input type="hidden" name="ano" value="{{ ano_atual }}">
+                    <input type="hidden" name="action" value="gerar_receitas">
+                    <button type="submit" class="btn btn-outline-success btn-sm">
+                        <i class="bi bi-magic me-1"></i>Gerar Receitas Esperadas
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</form>
+
+<!-- Totais -->
+{% if receitas %}
+{% with total_prev=0 total_rec=0 %}
+<div class="row g-2 mb-3">
+    <div class="col-sm-3">
+        <div class="card border-0 bg-light text-center py-2">
+            <div class="small text-muted">Receitas</div>
+            <div class="fw-bold fs-5">{{ receitas|length }}</div>
+        </div>
+    </div>
+    <div class="col-sm-3">
+        <div class="card border-0 bg-success bg-opacity-10 text-center py-2">
+            <div class="small text-muted">Recebidas</div>
+            <div class="fw-bold fs-5 text-success">
+                {{ receitas|length }}
+                <!-- JS preenche abaixo -->
+                <span id="cnt-recebidas">0</span>/<span id="cnt-total">{{ receitas|length }}</span>
+            </div>
+        </div>
+    </div>
+    <div class="col-sm-3">
+        <div class="card border-0 bg-danger bg-opacity-10 text-center py-2">
+            <div class="small text-muted">Atrasadas</div>
+            <div class="fw-bold fs-5 text-danger" id="cnt-atrasadas">—</div>
+        </div>
+    </div>
+    <div class="col-sm-3">
+        <div class="card border-0 bg-primary bg-opacity-10 text-center py-2">
+            <div class="small text-muted">Previstas</div>
+            <div class="fw-bold fs-5 text-primary" id="cnt-previstas">—</div>
+        </div>
+    </div>
+</div>
+{% endwith %}
+{% endif %}
+
+<!-- Tabela -->
+<div class="card shadow-sm">
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-sm table-hover align-middle mb-0" id="tabela-baixa">
+                <thead class="table-light">
+                    <tr>
+                        <th>Imóvel</th>
+                        <th>Locatário</th>
+                        <th>Venc.</th>
+                        <th class="text-end">Previsto</th>
+                        <th class="text-end">Recebido</th>
+                        <th>Data Rec.</th>
+                        <th>Status</th>
+                        <th>Obs.</th>
+                        <th class="text-center">Ações</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for r in receitas %}
+                    <tr data-status="{{ r.status }}" data-atrasada="{{ r.esta_atrasada|yesno:'1,0' }}">
+                        <td class="fw-semibold">{{ r.imovel.nome }}</td>
+                        <td class="text-muted small">
+                            {% if r.contrato %}{{ r.contrato.locatario.nome }}{% else %}—{% endif %}
+                        </td>
+                        <td class="small {% if r.esta_atrasada %}text-danger fw-semibold{% endif %}">
+                            {{ r.data_vencimento|date:"d/m/Y" }}
+                        </td>
+                        <td class="text-end small">R$ {{ r.valor_previsto|floatformat:2|intcomma }}</td>
+                        <td class="text-end small">
+                            {% if r.valor_recebido %}R$ {{ r.valor_recebido|floatformat:2|intcomma }}{% else %}<span class="text-muted">—</span>{% endif %}
+                        </td>
+                        <td class="small">{{ r.data_recebimento|date:"d/m/Y"|default:"—" }}</td>
+                        <td>
+                            {% if r.status == 'recebido' %}<span class="badge bg-success">Recebido</span>
+                            {% elif r.status == 'parcial' %}<span class="badge bg-warning text-dark">Parcial</span>
+                            {% elif r.status == 'atrasado' %}<span class="badge bg-danger">Atrasado</span>
+                            {% elif r.status == 'cancelado' %}<span class="badge bg-dark">Cancelado</span>
+                            {% else %}
+                                {% if r.esta_atrasada %}
+                                    <span class="badge bg-danger">Vencida</span>
+                                {% else %}
+                                    <span class="badge bg-primary">Previsto</span>
+                                {% endif %}
+                            {% endif %}
+                        </td>
+                        <td class="small text-muted">{{ r.observacoes|truncatechars:30|default:"—" }}</td>
+                        <td class="text-center text-nowrap">
+                            {% if r.status not in 'recebido,cancelado' %}
+                            <form method="post" class="d-inline">
+                                {% csrf_token %}
+                                <input type="hidden" name="mes" value="{{ mes_atual }}">
+                                <input type="hidden" name="ano" value="{{ ano_atual }}">
+                                <input type="hidden" name="receita_id" value="{{ r.pk }}">
+                                <input type="hidden" name="action" value="marcar_recebida">
+                                <button type="submit" class="btn btn-xs btn-success py-0 px-2 me-1"
+                                        title="Marcar como recebida"
+                                        onclick="return confirm('Marcar como recebida?')">
+                                    <i class="bi bi-check-lg"></i>
+                                </button>
+                            </form>
+                            {% endif %}
+                            <button type="button"
+                                    class="btn btn-xs btn-outline-primary py-0 px-2"
+                                    data-bs-toggle="modal" data-bs-target="#editarModal"
+                                    data-id="{{ r.pk }}"
+                                    data-imovel="{{ r.imovel.nome }}"
+                                    data-valor="{{ r.valor_recebido|default:'' }}"
+                                    data-data="{{ r.data_recebimento|date:'Y-m-d'|default:'' }}"
+                                    data-status="{{ r.status }}"
+                                    data-obs="{{ r.observacoes }}"
+                                    title="Editar">
+                                <i class="bi bi-pencil"></i>
+                            </button>
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr>
+                        <td colspan="9" class="text-center text-muted py-4">
+                            Nenhuma receita cadastrada para {{ mes_atual|stringformat:"02d" }}/{{ ano_atual }}.
+                            <br>
+                            <small>Use o botão "Gerar Receitas Esperadas" para criar automaticamente.</small>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Modal de Edição -->
+<div class="modal fade" id="editarModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <form method="post">
+                {% csrf_token %}
+                <input type="hidden" name="mes" value="{{ mes_atual }}">
+                <input type="hidden" name="ano" value="{{ ano_atual }}">
+                <input type="hidden" name="receita_id" id="edit-id">
+                <input type="hidden" name="action" value="editar">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="bi bi-pencil me-2"></i>Editar Recebimento — <span id="edit-imovel"></span></h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Valor Recebido (R$)</label>
+                        <input type="number" step="0.01" min="0" name="valor_recebido"
+                               id="edit-valor" class="form-control" placeholder="0,00">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Data de Recebimento</label>
+                        <input type="date" name="data_recebimento" id="edit-data" class="form-control">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Status</label>
+                        <select name="status" id="edit-status" class="form-select">
+                            {% for val, label in status_choices %}
+                            <option value="{{ val }}">{{ label }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Observações</label>
+                        <textarea name="observacoes" id="edit-obs" class="form-control" rows="2"></textarea>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="bi bi-save me-1"></i>Salvar
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.btn-xs { font-size: .75rem; }
+</style>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const editarModal = document.getElementById('editarModal');
+if (editarModal) {
+    editarModal.addEventListener('show.bs.modal', event => {
+        const btn = event.relatedTarget;
+        document.getElementById('edit-id').value = btn.dataset.id;
+        document.getElementById('edit-imovel').textContent = btn.dataset.imovel;
+        document.getElementById('edit-valor').value = btn.dataset.valor;
+        document.getElementById('edit-data').value = btn.dataset.data;
+        document.getElementById('edit-status').value = btn.dataset.status;
+        document.getElementById('edit-obs').value = btn.dataset.obs;
+    });
+}
+
+// Contar status na tabela
+(function() {
+    const rows = document.querySelectorAll('#tabela-baixa tbody tr[data-status]');
+    let rec = 0, atrasadas = 0, previstas = 0;
+    rows.forEach(r => {
+        const s = r.dataset.status;
+        if (s === 'recebido' || s === 'parcial') rec++;
+        if (r.dataset.atrasada === '1') atrasadas++;
+        if (s === 'previsto' && r.dataset.atrasada === '0') previstas++;
+    });
+    const el = (id) => document.getElementById(id);
+    if (el('cnt-recebidas')) el('cnt-recebidas').textContent = rec;
+    if (el('cnt-atrasadas')) el('cnt-atrasadas').textContent = atrasadas;
+    if (el('cnt-previstas')) el('cnt-previstas').textContent = previstas;
+    if (el('cnt-total')) el('cnt-total').textContent = rows.length;
+})();
+</script>
+{% endblock %}

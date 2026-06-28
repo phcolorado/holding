@@ -1,7 +1,7 @@
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.http import HttpResponseRedirect
-from django.shortcuts import render
+from django.shortcuts import get_object_or_404, render
 from django.urls import reverse
 from django.utils import timezone
 
@@ -13,6 +13,7 @@ from .exports import (
     exportar_despesas_csv, exportar_despesas_xlsx,
     exportar_inadimplencia_csv, exportar_inadimplencia_xlsx,
     exportar_relatorio_mensal_xlsx,
+    exportar_relatorio_contabilidade_xlsx,
 )
 from patrimonio.models import Imovel, Contrato
 
@@ -181,6 +182,84 @@ def export_inadimplencia(request, formato):
 def export_relatorio_mensal(request, formato):
     mes, ano, _, _, _ = _filtros_periodo(request)
     return exportar_relatorio_mensal_xlsx(request, mes, ano)
+
+
+@login_required
+def export_relatorio_contabilidade(request):
+    hoje = timezone.now().date()
+    mes = int(request.GET.get('mes', hoje.month))
+    ano = int(request.GET.get('ano', hoje.year))
+    return exportar_relatorio_contabilidade_xlsx(request, mes, ano)
+
+
+@login_required
+def baixa_receitas_mes_view(request):
+    """
+    GET: lista as receitas do mês para conferência.
+    POST: atualiza individualmente (marcar_recebida ou editar).
+    """
+    hoje = timezone.now().date()
+    try:
+        mes = int(request.GET.get('mes') or request.POST.get('mes') or hoje.month)
+        ano = int(request.GET.get('ano') or request.POST.get('ano') or hoje.year)
+    except (ValueError, TypeError):
+        mes, ano = hoje.month, hoje.year
+
+    if request.method == 'POST':
+        action = request.POST.get('action', '')
+        receita_id = request.POST.get('receita_id')
+
+        if action == 'gerar_receitas':
+            from .services import gerar_receitas_mes
+            criadas, existiam = gerar_receitas_mes(mes, ano)
+            if criadas:
+                messages.success(request, f'{criadas} receita(s) gerada(s) para {mes:02d}/{ano}.')
+            if existiam:
+                messages.info(request, f'{existiam} receita(s) já existiam.')
+            if not criadas and not existiam:
+                messages.warning(request, f'Nenhum contrato ativo para {mes:02d}/{ano}.')
+
+        elif receita_id:
+            receita = get_object_or_404(ReceitaAluguel, pk=receita_id)
+
+            if action == 'marcar_recebida':
+                if not receita.valor_recebido:
+                    receita.valor_recebido = receita.valor_previsto
+                if not receita.data_recebimento:
+                    receita.data_recebimento = hoje
+                receita.status = 'recebido'
+                receita.save()
+                messages.success(request, f'{receita.imovel.nome} marcado como recebido.')
+
+            elif action == 'editar':
+                valor = request.POST.get('valor_recebido', '').strip()
+                data = request.POST.get('data_recebimento', '').strip()
+                receita.valor_recebido = valor if valor else None
+                receita.data_recebimento = data if data else None
+                receita.status = request.POST.get('status', receita.status)
+                receita.observacoes = request.POST.get('observacoes', '')
+                receita.save()
+                messages.success(request, f'{receita.imovel.nome} atualizado.')
+
+        return HttpResponseRedirect(f"{reverse('baixa_receitas_mes')}?mes={mes}&ano={ano}")
+
+    receitas = (
+        ReceitaAluguel.objects
+        .filter(competencia_mes=mes, competencia_ano=ano)
+        .select_related('imovel', 'contrato__locatario')
+        .order_by('imovel__nome')
+    )
+
+    context = {
+        'receitas': receitas,
+        'mes_atual': mes,
+        'ano_atual': ano,
+        'meses': ReceitaAluguel.MESES,
+        'anos': range(2020, hoje.year + 2),
+        'hoje': hoje,
+        'status_choices': ReceitaAluguel.STATUS_CHOICES,
+    }
+    return render(request, 'financeiro/baixa_receitas.html', context)
 
 
 @login_required
