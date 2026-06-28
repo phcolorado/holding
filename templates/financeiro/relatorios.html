@@ -34,20 +34,37 @@
         </div>
     </div>
 
-    <!-- Contratos ativos -->
+    <!-- Contratos -->
     <div class="col-md-6">
         <div class="card shadow-sm">
             <div class="card-header fw-semibold bg-white">
-                <i class="bi bi-file-text me-2 text-primary"></i>Contratos Ativos
+                <i class="bi bi-file-text me-2 text-primary"></i>Contratos
             </div>
             <div class="card-body">
+                <div class="row g-2 mb-3">
+                    <div class="col-6">
+                        <select id="cont-status" class="form-select form-select-sm">
+                            <option value="">Somente ativos (padrão)</option>
+                            <option value="ativo">Ativo</option>
+                            <option value="encerrado">Encerrado</option>
+                            <option value="rescindido">Rescindido</option>
+                            <option value="suspenso">Suspenso</option>
+                        </select>
+                    </div>
+                    <div class="col-6">
+                        <select id="cont-imovel" class="form-select form-select-sm">
+                            <option value="">Todos os imóveis</option>
+                            {% for im in imoveis %}<option value="{{ im.pk }}">{{ im.nome }}</option>{% endfor %}
+                        </select>
+                    </div>
+                </div>
                 <div class="d-flex gap-2">
-                    <a href="{% url 'export_contratos' 'csv' %}" class="btn btn-outline-secondary btn-sm flex-fill">
+                    <button onclick="exportarContratos('csv')" class="btn btn-outline-secondary btn-sm flex-fill">
                         <i class="bi bi-filetype-csv"></i> CSV
-                    </a>
-                    <a href="{% url 'export_contratos' 'xlsx' %}" class="btn btn-outline-success btn-sm flex-fill">
+                    </button>
+                    <button onclick="exportarContratos('xlsx')" class="btn btn-outline-success btn-sm flex-fill">
                         <i class="bi bi-file-earmark-excel"></i> XLSX
-                    </a>
+                    </button>
                 </div>
             </div>
         </div>
@@ -154,14 +171,22 @@
                 <i class="bi bi-exclamation-triangle me-2 text-danger"></i>Inadimplência
             </div>
             <div class="card-body">
-                <p class="text-muted small">Todas as receitas com status <strong>Atrasado</strong>.</p>
+                <p class="text-muted small">Receitas vencidas e não quitadas (independe do campo de status).</p>
+                <div class="row g-2 mb-3">
+                    <div class="col-12">
+                        <select id="inadimp-imovel" class="form-select form-select-sm">
+                            <option value="">Todos os imóveis</option>
+                            {% for im in imoveis %}<option value="{{ im.pk }}">{{ im.nome }}</option>{% endfor %}
+                        </select>
+                    </div>
+                </div>
                 <div class="d-flex gap-2">
-                    <a href="{% url 'export_inadimplencia' 'csv' %}" class="btn btn-outline-secondary btn-sm flex-fill">
+                    <button onclick="exportarInadimplencia('csv')" class="btn btn-outline-secondary btn-sm flex-fill">
                         <i class="bi bi-filetype-csv"></i> CSV
-                    </a>
-                    <a href="{% url 'export_inadimplencia' 'xlsx' %}" class="btn btn-outline-success btn-sm flex-fill">
+                    </button>
+                    <button onclick="exportarInadimplencia('xlsx')" class="btn btn-outline-success btn-sm flex-fill">
                         <i class="bi bi-file-earmark-excel"></i> XLSX
-                    </a>
+                    </button>
                 </div>
             </div>
         </div>
@@ -223,6 +248,19 @@ function exportarMensal() {
     const mes = document.getElementById('rel-mes').value;
     const ano = document.getElementById('rel-ano').value;
     window.location = `/financeiro/export/relatorio-mensal/xlsx/?mes=${mes}&ano=${ano}`;
+}
+function exportarContratos(fmt) {
+    const params = new URLSearchParams();
+    const status = document.getElementById('cont-status').value;
+    const imovel = document.getElementById('cont-imovel').value;
+    if (status) params.set('status', status);
+    if (imovel) params.set('imovel', imovel);
+    window.location = `/financeiro/export/contratos/${fmt}/?` + params;
+}
+function exportarInadimplencia(fmt) {
+    const imovel = document.getElementById('inadimp-imovel').value;
+    const params = imovel ? `?imovel=${imovel}` : '';
+    window.location = `/financeiro/export/inadimplencia/${fmt}/${params}`;
 }
 </script>
 {% endblock %}

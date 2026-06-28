@@ -22,7 +22,11 @@ def dashboard(request):
     receitas_mes = ReceitaAluguel.objects.filter(competencia_mes=mes_atual, competencia_ano=ano_atual)
     receitas_previstas = sum(r.valor_previsto for r in receitas_mes)
     receitas_recebidas = sum(r.valor_recebido or 0 for r in receitas_mes.filter(status__in=('recebido', 'parcial')))
-    receitas_atrasadas = receitas_mes.filter(status='atrasado').count()
+    receitas_atrasadas = receitas_mes.filter(
+        data_vencimento__lt=hoje
+    ).exclude(
+        status__in=ReceitaAluguel.STATUS_QUITADOS
+    ).count()
 
     despesas_abertas = Despesa.objects.filter(status__in=('prevista', 'atrasada')).count()
 

@@ -14,6 +14,12 @@ class ReceitaAluguelAdmin(admin.ModelAdmin):
     readonly_fields = ('criado_em', 'atualizado_em')
     ordering = ('-competencia_ano', '-competencia_mes')
     raw_id_fields = ('contrato', 'imovel')
+
+    def get_readonly_fields(self, request, obj=None):
+        if obj:
+            return self.readonly_fields + ('imovel',)
+        return self.readonly_fields
+
     fieldsets = (
         ('Referência', {
             'fields': ('contrato', 'imovel', 'competencia_mes', 'competencia_ano')

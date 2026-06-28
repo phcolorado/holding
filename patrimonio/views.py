@@ -38,12 +38,12 @@ def imovel_detail(request, pk):
     documentos = Documento.objects.filter(imovel=imovel).order_by('-criado_em')
     manutencoes = Manutencao.objects.filter(imovel=imovel).order_by('-data_solicitacao')
 
-    total_recebido = receitas.filter(status__in=('recebido', 'parcial')).aggregate(
-        total=Sum('valor_recebido')
-    )['total'] or 0
-    total_despesas = despesas.filter(status='paga').aggregate(
-        total=Sum('valor')
-    )['total'] or 0
+    total_recebido = ReceitaAluguel.objects.filter(
+        imovel=imovel, status__in=('recebido', 'parcial')
+    ).aggregate(total=Sum('valor_recebido'))['total'] or 0
+    total_despesas = Despesa.objects.filter(
+        imovel=imovel, status='paga'
+    ).aggregate(total=Sum('valor'))['total'] or 0
     resultado = total_recebido - total_despesas
 
     context = {

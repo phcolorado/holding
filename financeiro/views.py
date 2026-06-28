@@ -119,7 +119,15 @@ def export_imoveis(request, formato):
 
 @login_required
 def export_contratos(request, formato):
-    contratos = Contrato.objects.select_related('imovel', 'locatario').filter(status='ativo')
+    status = request.GET.get('status', '')
+    imovel_id = request.GET.get('imovel', '')
+    contratos = Contrato.objects.select_related('imovel', 'locatario')
+    if status:
+        contratos = contratos.filter(status=status)
+    else:
+        contratos = contratos.filter(status='ativo')
+    if imovel_id:
+        contratos = contratos.filter(imovel_id=imovel_id)
     if formato == 'csv':
         return exportar_contratos_csv(request, contratos)
     return exportar_contratos_xlsx(request, contratos)
@@ -159,8 +167,9 @@ def export_despesas(request, formato):
 
 @login_required
 def export_inadimplencia(request, formato):
+    from .models import receitas_inadimplentes_qs
     imovel_id = request.GET.get('imovel', '')
-    receitas = ReceitaAluguel.objects.select_related('imovel', 'contrato__locatario').filter(status='atrasado')
+    receitas = receitas_inadimplentes_qs().select_related('imovel', 'contrato__locatario')
     if imovel_id:
         receitas = receitas.filter(imovel_id=imovel_id)
     if formato == 'csv':

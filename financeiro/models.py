@@ -12,6 +12,8 @@ class ReceitaAluguel(models.Model):
         ('parcial', 'Parcial'),
         ('cancelado', 'Cancelado'),
     ]
+    # Statuses that indicate the receipt is settled (not considered overdue)
+    STATUS_QUITADOS = frozenset({'recebido', 'parcial', 'cancelado'})
 
     MESES = [
         (1, 'Janeiro'), (2, 'Fevereiro'), (3, 'Março'), (4, 'Abril'),
@@ -20,7 +22,10 @@ class ReceitaAluguel(models.Model):
     ]
 
     contrato = models.ForeignKey(Contrato, on_delete=models.PROTECT, verbose_name='Contrato')
-    imovel = models.ForeignKey(Imovel, on_delete=models.PROTECT, verbose_name='Imóvel')
+    imovel = models.ForeignKey(
+        Imovel, on_delete=models.PROTECT, verbose_name='Imóvel',
+        help_text='Preenchido automaticamente pelo contrato. Não altere manualmente.',
+    )
     competencia_mes = models.PositiveSmallIntegerField('Mês de Competência', choices=MESES)
     competencia_ano = models.PositiveSmallIntegerField('Ano de Competência')
     data_vencimento = models.DateField('Data de Vencimento')
@@ -44,20 +49,31 @@ class ReceitaAluguel(models.Model):
     def __str__(self):
         return f'{self.imovel.nome} — {self.get_competencia_mes_display()}/{self.competencia_ano} ({self.get_status_display()})'
 
+    @property
+    def esta_atrasada(self):
+        """
+        Retorna True se a receita está vencida e não foi quitada/cancelada.
+        Independe do valor do campo status — calcula pela data de vencimento.
+        """
+        return (
+            self.status not in self.STATUS_QUITADOS
+            and self.data_vencimento < timezone.now().date()
+        )
+
     def clean(self):
         if self.contrato_id and self.imovel_id:
             if self.imovel_id != self.contrato.imovel_id:
                 raise ValidationError({'imovel': 'O imóvel deve ser o mesmo imóvel do contrato.'})
 
     def save(self, *args, **kwargs):
-        # Preenche imovel automaticamente a partir do contrato quando não informado
-        if self.contrato_id and not self.imovel_id:
+        # Garante que imovel é sempre o imóvel do contrato — nunca permite inconsistência
+        if self.contrato_id:
             self.imovel_id = self.contrato.imovel_id
         super().save(*args, **kwargs)
 
     def verificar_atraso(self):
-        """Marca como atrasado se vencido e ainda não quitado."""
-        if self.status in ('previsto',) and self.data_vencimento < timezone.now().date():
+        """Atualiza o campo status para 'atrasado' se vencido e não quitado."""
+        if self.esta_atrasada and self.status == 'previsto':
             self.status = 'atrasado'
             self.save(update_fields=['status'])
 
@@ -81,6 +97,9 @@ class Despesa(models.Model):
         ('atrasada', 'Atrasada'),
         ('cancelada', 'Cancelada'),
     ]
+    # Statuses that indicate the expense is settled
+    STATUS_ENCERRADOS = frozenset({'paga', 'cancelada'})
+
     MESES = [
         (1, 'Janeiro'), (2, 'Fevereiro'), (3, 'Março'), (4, 'Abril'),
         (5, 'Maio'), (6, 'Junho'), (7, 'Julho'), (8, 'Agosto'),
@@ -112,9 +131,20 @@ class Despesa(models.Model):
         imovel_str = self.imovel.nome if self.imovel else 'Geral'
         return f'{self.get_categoria_display()} — {imovel_str} — R$ {self.valor}'
 
+    @property
+    def esta_atrasada(self):
+        """
+        Retorna True se a despesa está vencida e não foi paga/cancelada.
+        Independe do valor do campo status — calcula pela data de vencimento.
+        """
+        return (
+            self.status not in self.STATUS_ENCERRADOS
+            and self.data_vencimento < timezone.now().date()
+        )
+
     def verificar_atraso(self):
-        """Marca como atrasada se vencida e ainda não paga."""
-        if self.status in ('prevista',) and self.data_vencimento < timezone.now().date():
+        """Atualiza o campo status para 'atrasada' se vencida e não paga."""
+        if self.esta_atrasada and self.status == 'prevista':
             self.status = 'atrasada'
             self.save(update_fields=['status'])
 
@@ -143,3 +173,15 @@ class FechamentoMensal(models.Model):
 
     def __str__(self):
         return f'Fechamento {self.get_mes_display()}/{self.ano}'
+
+
+def receitas_inadimplentes_qs():
+    """
+    Retorna QuerySet de receitas vencidas e não quitadas.
+    Usa regra de vencimento — independe do campo status.
+    """
+    return ReceitaAluguel.objects.filter(
+        data_vencimento__lt=timezone.now().date()
+    ).exclude(
+        status__in=ReceitaAluguel.STATUS_QUITADOS
+    )

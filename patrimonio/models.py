@@ -1,3 +1,5 @@
+from django.core.exceptions import ValidationError
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 
 
@@ -113,7 +115,10 @@ class Contrato(models.Model):
     data_inicio = models.DateField('Data de Início')
     data_fim = models.DateField('Data de Término')
     valor_aluguel = models.DecimalField('Valor do Aluguel (R$)', max_digits=12, decimal_places=2)
-    dia_vencimento = models.PositiveSmallIntegerField('Dia de Vencimento')
+    dia_vencimento = models.PositiveSmallIntegerField(
+        'Dia de Vencimento',
+        validators=[MinValueValidator(1), MaxValueValidator(31)],
+    )
     indice_reajuste = models.CharField('Índice de Reajuste', max_length=10, choices=INDICE_CHOICES, default='ipca')
     data_proximo_reajuste = models.DateField('Data do Próximo Reajuste', null=True, blank=True)
     tipo_garantia = models.CharField('Tipo de Garantia', max_length=30, choices=GARANTIA_CHOICES, default='sem_garantia')
@@ -132,6 +137,27 @@ class Contrato(models.Model):
 
     def __str__(self):
         return f'Contrato {self.imovel} — {self.locatario.nome} ({self.get_status_display()})'
+
+    def clean(self):
+        # Impede contratos ativos sobrepostos para o mesmo imóvel
+        if (
+            self.status == 'ativo'
+            and self.imovel_id
+            and self.data_inicio
+            and self.data_fim
+        ):
+            qs = Contrato.objects.filter(
+                imovel_id=self.imovel_id,
+                status='ativo',
+                data_inicio__lte=self.data_fim,
+                data_fim__gte=self.data_inicio,
+            )
+            if self.pk:
+                qs = qs.exclude(pk=self.pk)
+            if qs.exists():
+                raise ValidationError(
+                    'Já existe um contrato ativo para este imóvel com período sobreposto.'
+                )
 
 
 class Manutencao(models.Model):

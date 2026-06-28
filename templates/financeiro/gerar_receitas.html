@@ -51,8 +51,8 @@
                             </select>
                         </div>
                         <div class="col-sm-3">
-                            <button type="submit"
-                                    formaction="{% url 'gerar_receitas_mes' %}"
+                            <button type="button"
+                                    id="btn-verificar"
                                     class="btn btn-sm btn-outline-secondary w-100"
                                     title="Atualizar prévia">
                                 <i class="bi bi-search"></i> Verificar
@@ -91,4 +91,14 @@
         </div>
     </div>
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.getElementById('btn-verificar').addEventListener('click', function () {
+    const mes = document.querySelector('select[name="mes"]').value;
+    const ano = document.querySelector('select[name="ano"]').value;
+    window.location = '{% url "gerar_receitas_mes" %}?mes=' + mes + '&ano=' + ano;
+});
+</script>
 {% endblock %}

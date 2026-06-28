@@ -15,7 +15,9 @@ Construído com Python + Django + Bootstrap 5 + SQLite.
 - **Despesas**: categorias, competência e controle de pagamento
 - **Documentos**: upload de arquivos organizados por imóvel e tipo, controle de envio à contabilidade
 - **Manutenções**: registro de solicitações com status e valores
-- **Exportações** em CSV e XLSX (imóveis, contratos, receitas, despesas, inadimplência, relatório mensal)
+- **Geração automática de receitas**: gera `ReceitaAluguel` para todos os contratos ativos de um mês via interface web ou Admin; idempotente (sem duplicatas)
+- **Inadimplência por vencimento**: regra baseada em `data_vencimento`, independente do campo de status — usada no dashboard, na listagem e nas exportações
+- **Exportações** em CSV e XLSX (imóveis, contratos com filtro de status/imóvel, receitas, despesas, inadimplência, relatório mensal)
 - **Django Admin** completo com filtros, buscas e ordenação para todos os modelos
 
 ---
@@ -97,7 +99,10 @@ holding/
 │   ├── urls.py
 │   └── wsgi.py
 ├── core/                   # Dashboard e utilitários
-│   └── management/commands/popular_banco.py
+│   └── management/commands/
+│       ├── popular_banco.py    # Dados de demonstração
+│       ├── criar_grupos.py     # Grupos e permissões básicos
+│       └── backup_local.py     # Backup de banco e mídia
 ├── patrimonio/             # Imóveis, Pessoas, Contratos, Manutenções
 ├── financeiro/             # Receitas, Despesas, Fechamento Mensal, Exportações
 ├── documentos/             # Upload e gestão de documentos
@@ -119,7 +124,13 @@ O sistema usa a autenticação padrão do Django. Você pode criar grupos no Adm
 | familiar_edicao   | Adicionar e editar registros                |
 | familiar_leitura  | Somente visualização                        |
 
-Para criar grupos: acesse `/admin/` → Autenticação → Grupos.
+Para criar grupos automaticamente via comando:
+
+```
+python manage.py criar_grupos
+```
+
+Ou acesse manualmente: `/admin/` → Autenticação → Grupos.
 
 ---
 
@@ -127,6 +138,40 @@ Para criar grupos: acesse `/admin/` → Autenticação → Grupos.
 
 Os documentos são salvos em `media/documentos/imovel_<ID>/<tipo>/`.  
 Configure `MEDIA_ROOT` em `settings.py` para apontar para o local desejado.
+
+---
+
+## Backup local
+
+Para criar um backup local do banco de dados e dos arquivos de mídia:
+
+```
+python manage.py backup_local
+```
+
+O backup é salvo em `backups/<timestamp>/` com `db.sqlite3` e a pasta `media/`.  
+A pasta `backups/` está no `.gitignore` e não é versionada.
+
+---
+
+## Geração automática de receitas
+
+Para gerar receitas de aluguel do mês atual para todos os contratos ativos:
+
+- **Via web**: acesse `/financeiro/gerar-receitas/`, selecione mês/ano e clique em "Gerar"
+- **Via Admin**: na listagem de Contratos, selecione um ou mais e use a action "Gerar receitas esperadas"
+
+A operação é idempotente — chamar múltiplas vezes não cria duplicatas.
+
+---
+
+## Testes
+
+Para executar a suite de testes:
+
+```
+python manage.py test financeiro patrimonio
+```
 
 ---
 

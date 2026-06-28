@@ -1,11 +1,15 @@
 from calendar import monthrange
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
-from django.test import TestCase
+from django.core.exceptions import ValidationError
+from django.test import TestCase, Client
+from django.contrib.auth.models import User
+from django.urls import reverse
+from django.utils import timezone
 
 from patrimonio.models import Imovel, Pessoa, Contrato
-from financeiro.models import ReceitaAluguel
+from financeiro.models import ReceitaAluguel, Despesa, receitas_inadimplentes_qs
 from financeiro.services import gerar_receitas_para_contrato, gerar_receitas_mes
 
 
@@ -249,3 +253,290 @@ class ReceitaAluguelValidacaoTest(TestCase):
 
         with self.assertRaises(ValidationError):
             receita.clean()
+
+
+class ReceitaSaveForcaImovelTest(TestCase):
+    """save() deve sempre forçar imovel a partir do contrato, mesmo se informado outro."""
+
+    def setUp(self):
+        self.imovel, self.locatario = _criar_base()
+        self.imovel2 = Imovel.objects.create(nome='Outro Imóvel', endereco='Rua C', cidade='SP', estado='SP')
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(2024, 1, 1),
+            data_fim=date(2024, 12, 31),
+        )
+
+    def test_save_sobrescreve_imovel_errado(self):
+        """Mesmo passando imovel2, save() deve substituir pelo imóvel do contrato."""
+        receita = ReceitaAluguel(
+            contrato=self.contrato,
+            imovel=self.imovel2,
+            competencia_mes=3,
+            competencia_ano=2024,
+            data_vencimento=date(2024, 3, 10),
+            valor_previsto=Decimal('2000.00'),
+        )
+        receita.save()
+        self.assertEqual(receita.imovel_id, self.imovel.pk)
+
+
+class EstaAtrasadaTest(TestCase):
+    """Testa a property esta_atrasada em ReceitaAluguel e Despesa."""
+
+    def setUp(self):
+        self.imovel, self.locatario = _criar_base()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(2020, 1, 1),
+            data_fim=date(2030, 12, 31),
+        )
+        self.ontem = timezone.now().date() - timedelta(days=1)
+        self.amanha = timezone.now().date() + timedelta(days=1)
+
+    def _receita(self, vencimento, status):
+        return ReceitaAluguel(
+            contrato=self.contrato,
+            imovel=self.imovel,
+            competencia_mes=1,
+            competencia_ano=2024,
+            data_vencimento=vencimento,
+            valor_previsto=Decimal('1000.00'),
+            status=status,
+        )
+
+    def test_receita_prevista_vencida_esta_atrasada(self):
+        r = self._receita(self.ontem, 'previsto')
+        self.assertTrue(r.esta_atrasada)
+
+    def test_receita_prevista_nao_vencida_nao_esta_atrasada(self):
+        r = self._receita(self.amanha, 'previsto')
+        self.assertFalse(r.esta_atrasada)
+
+    def test_receita_recebida_nao_esta_atrasada(self):
+        r = self._receita(self.ontem, 'recebido')
+        self.assertFalse(r.esta_atrasada)
+
+    def test_receita_parcial_nao_esta_atrasada(self):
+        r = self._receita(self.ontem, 'parcial')
+        self.assertFalse(r.esta_atrasada)
+
+    def test_receita_cancelada_nao_esta_atrasada(self):
+        r = self._receita(self.ontem, 'cancelado')
+        self.assertFalse(r.esta_atrasada)
+
+    def test_despesa_prevista_vencida_esta_atrasada(self):
+        d = Despesa(
+            imovel=self.imovel,
+            descricao='Teste',
+            data_vencimento=self.ontem,
+            valor=Decimal('500.00'),
+            status='prevista',
+        )
+        self.assertTrue(d.esta_atrasada)
+
+    def test_despesa_paga_nao_esta_atrasada(self):
+        d = Despesa(
+            imovel=self.imovel,
+            descricao='Teste',
+            data_vencimento=self.ontem,
+            valor=Decimal('500.00'),
+            status='paga',
+        )
+        self.assertFalse(d.esta_atrasada)
+
+    def test_despesa_cancelada_nao_esta_atrasada(self):
+        d = Despesa(
+            imovel=self.imovel,
+            descricao='Teste',
+            data_vencimento=self.ontem,
+            valor=Decimal('500.00'),
+            status='cancelada',
+        )
+        self.assertFalse(d.esta_atrasada)
+
+
+class ReceitasInadimplentesQsTest(TestCase):
+    """Testa receitas_inadimplentes_qs() — regra de vencimento, não de status."""
+
+    def setUp(self):
+        self.imovel, self.locatario = _criar_base()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(2020, 1, 1),
+            data_fim=date(2030, 12, 31),
+        )
+        self.ontem = timezone.now().date() - timedelta(days=1)
+        self.amanha = timezone.now().date() + timedelta(days=1)
+
+    def _criar_receita(self, vencimento, status, mes=1):
+        return ReceitaAluguel.objects.create(
+            contrato=self.contrato,
+            imovel=self.imovel,
+            competencia_mes=mes,
+            competencia_ano=2024,
+            data_vencimento=vencimento,
+            valor_previsto=Decimal('1000.00'),
+            status=status,
+        )
+
+    def test_vencida_previsto_aparece_na_lista(self):
+        self._criar_receita(self.ontem, 'previsto')
+        self.assertEqual(receitas_inadimplentes_qs().count(), 1)
+
+    def test_vencida_atrasado_aparece_na_lista(self):
+        self._criar_receita(self.ontem, 'atrasado')
+        self.assertEqual(receitas_inadimplentes_qs().count(), 1)
+
+    def test_vencida_recebido_nao_aparece(self):
+        self._criar_receita(self.ontem, 'recebido')
+        self.assertEqual(receitas_inadimplentes_qs().count(), 0)
+
+    def test_nao_vencida_nao_aparece(self):
+        self._criar_receita(self.amanha, 'previsto', mes=2)
+        self.assertEqual(receitas_inadimplentes_qs().count(), 0)
+
+
+class ContratoValidacaoTest(TestCase):
+    """Testa validações do modelo Contrato."""
+
+    def setUp(self):
+        self.imovel, self.locatario = _criar_base()
+
+    def test_dia_vencimento_invalido_falha_na_validacao(self):
+        """dia_vencimento = 0 deve levantar ValidationError via full_clean()."""
+        contrato = Contrato(
+            imovel=self.imovel,
+            locatario=self.locatario,
+            data_inicio=date(2024, 1, 1),
+            data_fim=date(2024, 12, 31),
+            valor_aluguel=Decimal('2000.00'),
+            dia_vencimento=0,
+        )
+        with self.assertRaises(ValidationError):
+            contrato.full_clean()
+
+    def test_dia_vencimento_maior_que_31_falha(self):
+        contrato = Contrato(
+            imovel=self.imovel,
+            locatario=self.locatario,
+            data_inicio=date(2024, 1, 1),
+            data_fim=date(2024, 12, 31),
+            valor_aluguel=Decimal('2000.00'),
+            dia_vencimento=32,
+        )
+        with self.assertRaises(ValidationError):
+            contrato.full_clean()
+
+    def test_contratos_sobrepostos_falham(self):
+        """Dois contratos ativos no mesmo imóvel com período sobreposto são bloqueados."""
+        _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(2024, 1, 1),
+            data_fim=date(2024, 12, 31),
+        )
+        contrato2 = Contrato(
+            imovel=self.imovel,
+            locatario=self.locatario,
+            data_inicio=date(2024, 6, 1),
+            data_fim=date(2025, 5, 31),
+            valor_aluguel=Decimal('2500.00'),
+            dia_vencimento=10,
+            status='ativo',
+        )
+        with self.assertRaises(ValidationError):
+            contrato2.clean()
+
+    def test_contratos_nao_sobrepostos_sao_permitidos(self):
+        """Contratos em períodos consecutivos não devem falhar."""
+        _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(2024, 1, 1),
+            data_fim=date(2024, 6, 30),
+        )
+        contrato2 = Contrato(
+            imovel=self.imovel,
+            locatario=self.locatario,
+            data_inicio=date(2024, 7, 1),
+            data_fim=date(2025, 6, 30),
+            valor_aluguel=Decimal('2500.00'),
+            dia_vencimento=10,
+            status='ativo',
+        )
+        try:
+            contrato2.clean()
+        except ValidationError:
+            self.fail('clean() não deveria levantar erro para contratos não sobrepostos')
+
+
+class GerarReceitasViewTest(TestCase):
+    """Testa a view gerar_receitas_mes_view — GET não gera, POST gera."""
+
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user('test', password='test')
+        self.client.login(username='test', password='test')
+        self.imovel, self.locatario = _criar_base()
+        hoje = date.today()
+        self.mes = hoje.month
+        self.ano = hoje.year
+        ultimo_dia = monthrange(self.ano, self.mes)[1]
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(self.ano, self.mes, 1),
+            data_fim=date(self.ano, self.mes, ultimo_dia),
+        )
+
+    def test_get_nao_gera_receitas(self):
+        """GET na view de geração apenas exibe o formulário, não cria receitas."""
+        response = self.client.get(reverse('gerar_receitas_mes'))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(ReceitaAluguel.objects.count(), 0)
+
+    def test_post_gera_receitas_e_redireciona(self):
+        """POST na view de geração cria receitas e redireciona para a lista."""
+        response = self.client.post(
+            reverse('gerar_receitas_mes'),
+            data={'mes': self.mes, 'ano': self.ano},
+        )
+        self.assertRedirects(
+            response,
+            f"{reverse('receitas_list')}?mes={self.mes}&ano={self.ano}",
+        )
+        self.assertEqual(ReceitaAluguel.objects.count(), 1)
+
+
+class ExportContratosViewTest(TestCase):
+    """Testa filtros de status e imóvel na exportação de contratos."""
+
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user('test2', password='test2')
+        self.client.login(username='test2', password='test2')
+        self.imovel, self.locatario = _criar_base()
+        self.imovel2 = Imovel.objects.create(nome='Casa Dois', endereco='Rua D', cidade='SP', estado='SP')
+        _criar_contrato(self.imovel, self.locatario, date(2024, 1, 1), date(2024, 12, 31), status='ativo')
+        _criar_contrato(self.imovel2, self.locatario, date(2023, 1, 1), date(2023, 12, 31), status='encerrado')
+
+    def test_sem_filtro_exporta_apenas_ativos(self):
+        response = self.client.get(reverse('export_contratos', args=['csv']))
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode('utf-8-sig')
+        self.assertIn('Apartamento Teste', content)
+        self.assertNotIn('Casa Dois', content)
+
+    def test_filtro_encerrado_exporta_encerrados(self):
+        response = self.client.get(reverse('export_contratos', args=['csv']) + '?status=encerrado')
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode('utf-8-sig')
+        self.assertIn('Casa Dois', content)
+        self.assertNotIn('Apartamento Teste', content)
+
+    def test_filtro_imovel_restringe_resultado(self):
+        response = self.client.get(
+            reverse('export_contratos', args=['csv']) + f'?status=ativo&imovel={self.imovel.pk}'
+        )
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode('utf-8-sig')
+        self.assertIn('Apartamento Teste', content)
+        self.assertNotIn('Casa Dois', content)
