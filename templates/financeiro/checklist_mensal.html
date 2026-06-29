@@ -51,7 +51,11 @@
         {% for etapa in checklist %}
         <div class="list-group-item d-flex align-items-center gap-3 py-3">
             <div class="flex-shrink-0">
-                {% if etapa.ok %}
+                {% if etapa.informativa %}
+                <span class="badge bg-info rounded-circle p-2">
+                    <i class="bi bi-download fs-6"></i>
+                </span>
+                {% elif etapa.ok %}
                 <span class="badge bg-success rounded-circle p-2">
                     <i class="bi bi-check-lg fs-6"></i>
                 </span>
@@ -62,16 +66,22 @@
                 {% endif %}
             </div>
             <div class="flex-grow-1">
-                <div class="fw-semibold {% if etapa.ok %}text-success{% else %}text-dark{% endif %}">
+                <div class="fw-semibold {% if etapa.informativa %}text-info{% elif etapa.ok %}text-success{% else %}text-dark{% endif %}">
                     {{ etapa.item }}
                 </div>
                 <div class="small text-muted">{{ etapa.detalhe }}</div>
             </div>
-            {% if etapa.link and not etapa.ok %}
+            {% if etapa.link %}
             <div class="flex-shrink-0">
+                {% if etapa.informativa %}
+                <a href="{{ etapa.link }}" class="btn btn-sm btn-info text-white">
+                    <i class="bi bi-download me-1"></i>Baixar
+                </a>
+                {% elif not etapa.ok %}
                 <a href="{{ etapa.link }}" class="btn btn-sm btn-outline-primary">
                     <i class="bi bi-arrow-right-circle"></i>
                 </a>
+                {% endif %}
             </div>
             {% endif %}
         </div>
@@ -107,6 +117,15 @@
             <div class="small text-muted">Docs. Contabilidade</div>
             <div class="fw-bold fs-5 {% if docs_pendentes_cnt > 0 %}text-warning{% endif %}">{{ docs_pendentes_cnt }}</div>
             <div class="small text-muted">pendente(s)</div>
+        </div>
+    </div>
+</div>
+<div class="row g-3 mb-4">
+    <div class="col-sm-6 col-lg-4">
+        <div class="card border-0 {% if docs_obrigatorios_pendentes > 0 %}bg-danger bg-opacity-10{% else %}bg-light{% endif %} text-center py-3">
+            <div class="small text-muted">Docs. Obrigatórios</div>
+            <div class="fw-bold fs-5 {% if docs_obrigatorios_pendentes > 0 %}text-danger{% endif %}">{{ docs_obrigatorios_pendentes }}</div>
+            <div class="small text-muted">sem documento vinculado</div>
         </div>
     </div>
 </div>

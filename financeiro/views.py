@@ -205,6 +205,8 @@ def baixa_receitas_mes_view(request):
     except (ValueError, TypeError):
         mes, ano = hoje.month, hoje.year
 
+    imovel_id = request.GET.get('imovel') or request.POST.get('imovel') or ''
+
     if request.method == 'POST':
         action = request.POST.get('action', '')
         receita_id = request.POST.get('receita_id')
@@ -241,7 +243,10 @@ def baixa_receitas_mes_view(request):
                 receita.save()
                 messages.success(request, f'{receita.imovel.nome} atualizado.')
 
-        return HttpResponseRedirect(f"{reverse('baixa_receitas_mes')}?mes={mes}&ano={ano}")
+        url = f"{reverse('baixa_receitas_mes')}?mes={mes}&ano={ano}"
+        if imovel_id:
+            url += f'&imovel={imovel_id}'
+        return HttpResponseRedirect(url)
 
     receitas = (
         ReceitaAluguel.objects
@@ -249,11 +254,15 @@ def baixa_receitas_mes_view(request):
         .select_related('imovel', 'contrato__locatario')
         .order_by('imovel__nome')
     )
+    if imovel_id:
+        receitas = receitas.filter(imovel_id=imovel_id)
 
     context = {
         'receitas': receitas,
         'mes_atual': mes,
         'ano_atual': ano,
+        'imovel_atual': imovel_id,
+        'imoveis': Imovel.objects.all(),
         'meses': ReceitaAluguel.MESES,
         'anos': range(2020, hoje.year + 2),
         'hoje': hoje,
@@ -269,7 +278,7 @@ def checklist_mensal_view(request):
     POST action=marcar_enviado: registra envio à contabilidade no FechamentoMensal.
     """
     from .models import receitas_inadimplentes_qs
-    from documentos.models import Documento
+    from documentos.models import Documento, DocumentoObrigatorio
 
     hoje = timezone.now().date()
     try:
@@ -303,6 +312,10 @@ def checklist_mensal_view(request):
 
     docs_pendentes_cnt = Documento.objects.filter(
         tipo__in=Documento.TIPOS_CONTABILIDADE, enviado_contabilidade=False
+    ).count()
+
+    docs_obrigatorios_pendentes = DocumentoObrigatorio.objects.filter(
+        obrigatorio=True, documento__isnull=True
     ).count()
 
     try:
@@ -344,6 +357,23 @@ def checklist_mensal_view(request):
             'link': reverse('documento_list') + '?pendente=1',
         },
         {
+            'item': 'Documentos obrigatórios revisados',
+            'ok': docs_obrigatorios_pendentes == 0,
+            'detalhe': (
+                f'{docs_obrigatorios_pendentes} documento(s) obrigatório(s) pendente(s)'
+                if docs_obrigatorios_pendentes
+                else 'Todos os documentos obrigatórios vinculados'
+            ),
+            'link': reverse('admin:documentos_documentoobrigatorio_changelist'),
+        },
+        {
+            'item': 'Relatório contábil exportado',
+            'ok': False,
+            'informativa': True,
+            'detalhe': 'Baixe o relatório contábil após revisar receitas, despesas e documentos',
+            'link': reverse('export_relatorio_contabilidade') + f'?mes={mes}&ano={ano}',
+        },
+        {
             'item': 'Fechamento registrado e enviado',
             'ok': fechamento is not None and fechamento.enviado_contabilidade,
             'detalhe': (
@@ -370,6 +400,7 @@ def checklist_mensal_view(request):
         'despesas_pagas': despesas_pagas,
         'inadimplentes': inadimplentes,
         'docs_pendentes_cnt': docs_pendentes_cnt,
+        'docs_obrigatorios_pendentes': docs_obrigatorios_pendentes,
     }
     return render(request, 'financeiro/checklist_mensal.html', context)
 

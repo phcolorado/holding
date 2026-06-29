@@ -1025,7 +1025,7 @@ class ChecklistMensalViewTest(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertIn('checklist', response.context)
-        self.assertEqual(len(response.context['checklist']), 6)
+        self.assertEqual(len(response.context['checklist']), 8)
 
     def test_post_marcar_enviado_cria_fechamento(self):
         """POST action=marcar_enviado cria FechamentoMensal e redireciona."""
@@ -1068,6 +1068,146 @@ class ChecklistMensalViewTest(TestCase):
         checklist = response.context['checklist']
         etapa_receitas = next(e for e in checklist if e['item'] == 'Receitas geradas')
         self.assertFalse(etapa_receitas['ok'])
+
+    def test_checklist_contem_etapa_docs_obrigatorios(self):
+        """Checklist deve incluir etapa de documentos obrigatórios."""
+        self.client.login(username='chk_user', password='pass')
+        response = self.client.get(reverse('checklist_mensal'), {'mes': self.mes, 'ano': self.ano})
+        checklist = response.context['checklist']
+        items = [e['item'] for e in checklist]
+        self.assertIn('Documentos obrigatórios revisados', items)
+
+    def test_docs_obrigatorios_pendentes_torna_etapa_nao_ok(self):
+        """Criar DocumentoObrigatorio sem doc vinculado torna a etapa não-ok."""
+        from documentos.models import DocumentoObrigatorio
+        DocumentoObrigatorio.objects.create(
+            imovel=self.imovel, tipo='matricula', descricao='Matrícula', obrigatorio=True
+        )
+        self.client.login(username='chk_user', password='pass')
+        response = self.client.get(reverse('checklist_mensal'), {'mes': self.mes, 'ano': self.ano})
+        checklist = response.context['checklist']
+        etapa = next(e for e in checklist if e['item'] == 'Documentos obrigatórios revisados')
+        self.assertFalse(etapa['ok'])
+        self.assertEqual(response.context['docs_obrigatorios_pendentes'], 1)
+
+    def test_docs_obrigatorios_todos_vinculados_torna_etapa_ok(self):
+        """DocumentoObrigatorio com doc vinculado torna a etapa ok."""
+        from documentos.models import DocumentoObrigatorio, Documento
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        doc = Documento.objects.create(
+            titulo='Matrícula',
+            tipo='matricula',
+            arquivo=SimpleUploadedFile('m.pdf', b'x'),
+            imovel=self.imovel,
+        )
+        DocumentoObrigatorio.objects.create(
+            imovel=self.imovel, tipo='matricula', descricao='Matrícula', obrigatorio=True, documento=doc
+        )
+        self.client.login(username='chk_user', password='pass')
+        response = self.client.get(reverse('checklist_mensal'), {'mes': self.mes, 'ano': self.ano})
+        checklist = response.context['checklist']
+        etapa = next(e for e in checklist if e['item'] == 'Documentos obrigatórios revisados')
+        self.assertTrue(etapa['ok'])
+
+    def test_checklist_contem_etapa_relatorio_contabil(self):
+        """Checklist deve incluir etapa informativa de relatório contábil."""
+        self.client.login(username='chk_user', password='pass')
+        response = self.client.get(reverse('checklist_mensal'), {'mes': self.mes, 'ano': self.ano})
+        checklist = response.context['checklist']
+        etapa = next((e for e in checklist if e['item'] == 'Relatório contábil exportado'), None)
+        self.assertIsNotNone(etapa)
+        self.assertTrue(etapa.get('informativa', False))
+        self.assertIn(reverse('export_relatorio_contabilidade'), etapa['link'])
+
+
+# ─── Testes de baixa de aluguéis filtrada por imóvel ─────────────────────────
+
+class BaixaReceitasFiltroImovelTest(TestCase):
+    """Testa filtro por imóvel na tela de baixa de aluguéis."""
+
+    def setUp(self):
+        self.client = Client()
+        User.objects.create_user('filtro_user', password='pass')
+        self.client.login(username='filtro_user', password='pass')
+        locatario = Pessoa.objects.create(nome='Locatário Filtro', tipo='locatario')
+        self.imovel1 = Imovel.objects.create(nome='Apto 1', endereco='Rua A', cidade='SP', estado='SP')
+        self.imovel2 = Imovel.objects.create(nome='Casa 2', endereco='Rua B', cidade='SP', estado='SP')
+        hoje = date.today()
+        self.mes, self.ano = hoje.month, hoje.year
+        ultimo_dia = monthrange(self.ano, self.mes)[1]
+        c1 = _criar_contrato(self.imovel1, locatario, date(self.ano, self.mes, 1), date(self.ano, self.mes, ultimo_dia))
+        c2 = _criar_contrato(self.imovel2, locatario, date(self.ano, self.mes, 1), date(self.ano, self.mes, ultimo_dia))
+        self.r1 = ReceitaAluguel.objects.create(
+            contrato=c1, imovel=self.imovel1,
+            competencia_mes=self.mes, competencia_ano=self.ano,
+            data_vencimento=date(self.ano, self.mes, 10),
+            valor_previsto=Decimal('1000.00'), status='previsto',
+        )
+        self.r2 = ReceitaAluguel.objects.create(
+            contrato=c2, imovel=self.imovel2,
+            competencia_mes=self.mes, competencia_ano=self.ano,
+            data_vencimento=date(self.ano, self.mes, 10),
+            valor_previsto=Decimal('2000.00'), status='previsto',
+        )
+
+    def test_get_sem_filtro_retorna_todas_receitas(self):
+        """Sem filtro de imóvel, retorna receitas de todos os imóveis."""
+        response = self.client.get(reverse('baixa_receitas_mes'), {'mes': self.mes, 'ano': self.ano})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(self.r1, response.context['receitas'])
+        self.assertIn(self.r2, response.context['receitas'])
+
+    def test_get_com_filtro_retorna_apenas_imovel_selecionado(self):
+        """Com filtro de imóvel, retorna apenas as receitas do imóvel."""
+        response = self.client.get(
+            reverse('baixa_receitas_mes'),
+            {'mes': self.mes, 'ano': self.ano, 'imovel': self.imovel1.pk},
+        )
+        self.assertEqual(response.status_code, 200)
+        receitas = list(response.context['receitas'])
+        self.assertIn(self.r1, receitas)
+        self.assertNotIn(self.r2, receitas)
+
+    def test_post_marcar_recebida_preserva_filtro_imovel(self):
+        """POST marcar_recebida com imovel redireciona preservando imovel no URL."""
+        response = self.client.post(
+            reverse('baixa_receitas_mes'),
+            {
+                'mes': self.mes, 'ano': self.ano,
+                'imovel': self.imovel1.pk,
+                'receita_id': self.r1.pk,
+                'action': 'marcar_recebida',
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(f'imovel={self.imovel1.pk}', response['Location'])
+
+    def test_post_editar_preserva_filtro_imovel(self):
+        """POST editar com imovel redireciona preservando imovel no URL."""
+        response = self.client.post(
+            reverse('baixa_receitas_mes'),
+            {
+                'mes': self.mes, 'ano': self.ano,
+                'imovel': self.imovel1.pk,
+                'receita_id': self.r1.pk,
+                'action': 'editar',
+                'status': 'parcial',
+                'valor_recebido': '800.00',
+                'data_recebimento': date.today().isoformat(),
+                'observacoes': '',
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(f'imovel={self.imovel1.pk}', response['Location'])
+
+    def test_contexto_contem_imoveis_e_imovel_atual(self):
+        """GET com filtro popula imovel_atual e imoveis no contexto."""
+        response = self.client.get(
+            reverse('baixa_receitas_mes'),
+            {'mes': self.mes, 'ano': self.ano, 'imovel': self.imovel1.pk},
+        )
+        self.assertEqual(str(self.imovel1.pk), response.context['imovel_atual'])
+        self.assertIn(self.imovel1, response.context['imoveis'])
 
 
 # ─── Teste de migrations pendentes ────────────────────────────────────────────

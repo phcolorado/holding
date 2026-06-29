@@ -184,12 +184,14 @@ A operação é idempotente — chamar múltiplas vezes não cria duplicatas.
 ## Fluxo Mensal Recomendado
 
 1. **Gerar Receitas** — acesse `/financeiro/gerar-receitas/` e gere as receitas do mês (operação idempotente).
-2. **Conferir Recebimentos** — acesse `/financeiro/baixa-receitas/` e marque cada aluguel como recebido.
-3. **Registrar Despesas** — lance e pague as despesas do período no Admin.
-4. **Enviar Documentos** — marque como `enviado_contabilidade = True` os documentos relevantes.
-5. **Checar Inadimplência** — acesse o Dashboard ou a tela de Checklist para ver receitas em atraso.
-6. **Exportar Relatório** — baixe o Relatório para Contabilidade em `/financeiro/relatorios/`.
-7. **Fechar o Mês** — acesse `/financeiro/checklist-mensal/` e clique em "Marcar como Enviado à Contabilidade".
+2. **Conferir Recebimentos** — acesse `/financeiro/baixa-receitas/` e marque cada aluguel como recebido (filtrável por imóvel).
+3. **Revisar Inadimplência** — verifique receitas vencidas no Dashboard ou no Checklist.
+4. **Lançar e Pagar Despesas** — lance despesas no Admin e marque como pagas.
+5. **Enviar Documentos à Contabilidade** — marque `enviado_contabilidade = True` nos documentos relevantes.
+6. **Revisar Documentos Obrigatórios** — certifique-se de que todos os documentos obrigatórios dos imóveis estão vinculados.
+7. **Exportar Relatório Contábil** — baixe o XLSX pela tela de Relatórios ou diretamente do Checklist Mensal.
+8. **Fechar o Mês** — acesse `/financeiro/checklist-mensal/` e clique em "Marcar como Enviado à Contabilidade".
+9. **Backup** — execute `python manage.py backup_local` para gerar um ZIP de segurança.
 
 > A tela de Checklist Mensal consolida todas as etapas acima com indicadores de status em tempo real.
 
@@ -199,7 +201,7 @@ A operação é idempotente — chamar múltiplas vezes não cria duplicatas.
 
 Acesse `/financeiro/checklist-mensal/` (menu lateral: "Checklist Mensal") ou clique em **"Checklist Mensal"** no Dashboard.
 
-A tela exibe 6 etapas com indicador visual (✓ verde / ! amarelo):
+A tela exibe 8 etapas com indicador visual (✓ verde / ! amarelo / ↓ azul para ações):
 
 | Etapa | Critério de conclusão |
 |---|---|
@@ -207,8 +209,10 @@ A tela exibe 6 etapas com indicador visual (✓ verde / ! amarelo):
 | Recebimentos confirmados | Nenhuma receita pendente (exceto canceladas) |
 | Inadimplência em dia | Zero receitas vencidas e não quitadas (histórico) |
 | Despesas pagas | Todas as despesas do mês estão pagas |
-| Documentos enviados à contabilidade | Nenhum documento pendente |
-| Fechamento registrado e enviado | FechamentoMensal marcado como enviado |
+| Documentos enviados à contabilidade | Nenhum documento pendente para contabilidade |
+| Documentos obrigatórios revisados | Todos os `DocumentoObrigatorio` com documento vinculado |
+| Relatório contábil exportado | Etapa informativa com botão de download direto |
+| Fechamento registrado e enviado | `FechamentoMensal` marcado como enviado |
 
 Ao clicar em **"Marcar como Enviado à Contabilidade"**, o sistema cria ou atualiza o registro `FechamentoMensal` com `enviado_contabilidade = True` e a data de envio.
 
@@ -217,6 +221,8 @@ Ao clicar em **"Marcar como Enviado à Contabilidade"**, o sistema cria ou atual
 ## Baixa de Aluguéis (conferência de recebimentos)
 
 Acesse `/financeiro/baixa-receitas/` (menu lateral: "Baixa de Aluguéis") ou clique em **"Conferir Recebimentos"** no Dashboard.
+
+A tela suporta filtro por **imóvel específico** — ao clicar em "Baixa de Aluguéis" na tela de detalhe de um imóvel, a tela já vem filtrada para aquele imóvel. Todas as ações POST (marcar recebida, editar, gerar receitas) preservam o filtro no redirect.
 
 Diferença entre as duas operações:
 | Operação | O que faz |

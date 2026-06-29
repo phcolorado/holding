@@ -13,7 +13,7 @@
     </a>
 </div>
 
-<!-- Seletor mês/ano -->
+<!-- Seletor mês/ano/imóvel -->
 <form method="get" class="card shadow-sm mb-2">
     <div class="card-body py-2">
         <div class="row g-2 align-items-end">
@@ -34,6 +34,15 @@
                 </select>
             </div>
             <div class="col-auto">
+                <label class="form-label fw-semibold mb-1 small">Imóvel</label>
+                <select name="imovel" class="form-select form-select-sm">
+                    <option value="">Todos</option>
+                    {% for im in imoveis %}
+                    <option value="{{ im.pk }}" {% if im.pk|stringformat:"s" == imovel_atual %}selected{% endif %}>{{ im.nome }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
                 <button type="submit" class="btn btn-primary btn-sm">
                     <i class="bi bi-search me-1"></i>Filtrar
                 </button>
@@ -47,6 +56,7 @@
     {% csrf_token %}
     <input type="hidden" name="mes" value="{{ mes_atual }}">
     <input type="hidden" name="ano" value="{{ ano_atual }}">
+    {% if imovel_atual %}<input type="hidden" name="imovel" value="{{ imovel_atual }}">{% endif %}
     <input type="hidden" name="action" value="gerar_receitas">
     <button type="submit" class="btn btn-outline-success btn-sm">
         <i class="bi bi-magic me-1"></i>Gerar Receitas Esperadas
@@ -140,6 +150,7 @@
                                 {% csrf_token %}
                                 <input type="hidden" name="mes" value="{{ mes_atual }}">
                                 <input type="hidden" name="ano" value="{{ ano_atual }}">
+                                {% if imovel_atual %}<input type="hidden" name="imovel" value="{{ imovel_atual }}">{% endif %}
                                 <input type="hidden" name="receita_id" value="{{ r.pk }}">
                                 <input type="hidden" name="action" value="marcar_recebida">
                                 <button type="submit" class="btn btn-xs btn-success py-0 px-2 me-1"
@@ -186,6 +197,7 @@
                 {% csrf_token %}
                 <input type="hidden" name="mes" value="{{ mes_atual }}">
                 <input type="hidden" name="ano" value="{{ ano_atual }}">
+                {% if imovel_atual %}<input type="hidden" name="imovel" value="{{ imovel_atual }}">{% endif %}
                 <input type="hidden" name="receita_id" id="edit-id">
                 <input type="hidden" name="action" value="editar">
                 <div class="modal-header">
