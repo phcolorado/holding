@@ -364,6 +364,8 @@ def exportar_relatorio_contabilidade_xlsx(request, mes, ano):
         ('Receitas em Aberto', rec_aberto),
         ('Receitas Vencidas (inadimplência)', rec_vencidas),
         ('Documentos Pendentes para Contabilidade', docs_pend_cnt),
+        ('', ''),
+        ('Nota — Inadimplência Aberta', 'A aba "Inadimplência Aberta" lista todas as receitas vencidas e não quitadas, independente do mês de competência.'),
     ]:
         ws_res.append(row)
     ws_res.column_dimensions['A'].width = 40
@@ -412,8 +414,8 @@ def exportar_relatorio_contabilidade_xlsx(request, mes, ano):
             d.observacoes,
         ])
 
-    # ── Aba 4: Inadimplência ───────────────────────────────────────────────────
-    ws_inad = wb.create_sheet('Inadimplência')
+    # ── Aba 4: Inadimplência Aberta ────────────────────────────────────────────
+    ws_inad = wb.create_sheet('Inadimplência Aberta')
     cab_inad = [
         'Imóvel', 'Locatário', 'Competência', 'Vencimento',
         'Valor Previsto', 'Dias de Atraso', 'Status', 'Observações',

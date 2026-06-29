@@ -7,6 +7,7 @@ urlpatterns = [
     path('relatorios/', views.relatorios, name='relatorios'),
     path('baixa-receitas/', views.baixa_receitas_mes_view, name='baixa_receitas_mes'),
     path('gerar-receitas/', views.gerar_receitas_mes_view, name='gerar_receitas_mes'),
+    path('checklist-mensal/', views.checklist_mensal_view, name='checklist_mensal'),
     path('export/imoveis/<str:formato>/', views.export_imoveis, name='export_imoveis'),
     path('export/contratos/<str:formato>/', views.export_contratos, name='export_contratos'),
     path('export/receitas/<str:formato>/', views.export_receitas, name='export_receitas'),

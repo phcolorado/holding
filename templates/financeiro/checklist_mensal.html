@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% load humanize %}
+
+{% block title %}Checklist Mensal — Gestão Patrimonial{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <div>
+        <h4 class="fw-bold mb-0">
+            <i class="bi bi-clipboard2-check me-2 text-info"></i>Checklist Mensal
+        </h4>
+        <span class="text-muted small">Fechamento: {{ nome_mes }}/{{ ano_atual }}</span>
+    </div>
+</div>
+
+<!-- Seletor mês/ano -->
+<form method="get" class="card shadow-sm mb-4">
+    <div class="card-body py-2">
+        <div class="row g-2 align-items-end">
+            <div class="col-auto">
+                <label class="form-label fw-semibold mb-1 small">Mês</label>
+                <select name="mes" class="form-select form-select-sm">
+                    {% for num, nome in meses %}
+                    <option value="{{ num }}" {% if num == mes_atual %}selected{% endif %}>{{ nome }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <label class="form-label fw-semibold mb-1 small">Ano</label>
+                <select name="ano" class="form-select form-select-sm">
+                    {% for a in anos %}
+                    <option value="{{ a }}" {% if a == ano_atual %}selected{% endif %}>{{ a }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <button type="submit" class="btn btn-primary btn-sm">
+                    <i class="bi bi-search me-1"></i>Filtrar
+                </button>
+            </div>
+        </div>
+    </div>
+</form>
+
+<!-- Checklist -->
+<div class="card shadow-sm mb-4">
+    <div class="card-header fw-semibold bg-white">
+        <i class="bi bi-list-check me-2 text-info"></i>Etapas do Fechamento — {{ nome_mes }}/{{ ano_atual }}
+    </div>
+    <div class="list-group list-group-flush">
+        {% for etapa in checklist %}
+        <div class="list-group-item d-flex align-items-center gap-3 py-3">
+            <div class="flex-shrink-0">
+                {% if etapa.ok %}
+                <span class="badge bg-success rounded-circle p-2">
+                    <i class="bi bi-check-lg fs-6"></i>
+                </span>
+                {% else %}
+                <span class="badge bg-warning text-dark rounded-circle p-2">
+                    <i class="bi bi-exclamation fs-6"></i>
+                </span>
+                {% endif %}
+            </div>
+            <div class="flex-grow-1">
+                <div class="fw-semibold {% if etapa.ok %}text-success{% else %}text-dark{% endif %}">
+                    {{ etapa.item }}
+                </div>
+                <div class="small text-muted">{{ etapa.detalhe }}</div>
+            </div>
+            {% if etapa.link and not etapa.ok %}
+            <div class="flex-shrink-0">
+                <a href="{{ etapa.link }}" class="btn btn-sm btn-outline-primary">
+                    <i class="bi bi-arrow-right-circle"></i>
+                </a>
+            </div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+</div>
+
+<!-- Resumo rápido -->
+<div class="row g-3 mb-4">
+    <div class="col-sm-6 col-lg-3">
+        <div class="card border-0 bg-light text-center py-3">
+            <div class="small text-muted">Receitas</div>
+            <div class="fw-bold fs-5">{{ receitas_recebidas }}/{{ total_receitas }}</div>
+            <div class="small text-muted">recebidas</div>
+        </div>
+    </div>
+    <div class="col-sm-6 col-lg-3">
+        <div class="card border-0 bg-light text-center py-3">
+            <div class="small text-muted">Despesas</div>
+            <div class="fw-bold fs-5">{{ despesas_pagas }}/{{ total_despesas }}</div>
+            <div class="small text-muted">pagas</div>
+        </div>
+    </div>
+    <div class="col-sm-6 col-lg-3">
+        <div class="card border-0 {% if inadimplentes > 0 %}bg-danger bg-opacity-10{% else %}bg-light{% endif %} text-center py-3">
+            <div class="small text-muted">Inadimplência</div>
+            <div class="fw-bold fs-5 {% if inadimplentes > 0 %}text-danger{% endif %}">{{ inadimplentes }}</div>
+            <div class="small text-muted">em aberto</div>
+        </div>
+    </div>
+    <div class="col-sm-6 col-lg-3">
+        <div class="card border-0 {% if docs_pendentes_cnt > 0 %}bg-warning bg-opacity-10{% else %}bg-light{% endif %} text-center py-3">
+            <div class="small text-muted">Docs. Contabilidade</div>
+            <div class="fw-bold fs-5 {% if docs_pendentes_cnt > 0 %}text-warning{% endif %}">{{ docs_pendentes_cnt }}</div>
+            <div class="small text-muted">pendente(s)</div>
+        </div>
+    </div>
+</div>
+
+<!-- Ação: Marcar como enviado -->
+<div class="card shadow-sm">
+    <div class="card-body">
+        {% if fechamento and fechamento.enviado_contabilidade %}
+        <div class="alert alert-success mb-0">
+            <i class="bi bi-check2-circle me-2"></i>
+            <strong>Fechamento registrado.</strong>
+            Enviado à contabilidade em {{ fechamento.data_envio_contabilidade|date:"d/m/Y" }}.
+        </div>
+        {% else %}
+        <p class="text-muted mb-3">
+            Quando todas as etapas estiverem concluídas, registre o envio à contabilidade:
+        </p>
+        <form method="post">
+            {% csrf_token %}
+            <input type="hidden" name="mes" value="{{ mes_atual }}">
+            <input type="hidden" name="ano" value="{{ ano_atual }}">
+            <input type="hidden" name="action" value="marcar_enviado">
+            <button type="submit" class="btn btn-success">
+                <i class="bi bi-send-check me-2"></i>Marcar como Enviado à Contabilidade
+            </button>
+        </form>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

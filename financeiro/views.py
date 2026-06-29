@@ -263,6 +263,118 @@ def baixa_receitas_mes_view(request):
 
 
 @login_required
+def checklist_mensal_view(request):
+    """
+    GET: exibe checklist de fechamento mensal com indicadores de status.
+    POST action=marcar_enviado: registra envio à contabilidade no FechamentoMensal.
+    """
+    from .models import receitas_inadimplentes_qs
+    from documentos.models import Documento
+
+    hoje = timezone.now().date()
+    try:
+        mes = int(request.GET.get('mes') or request.POST.get('mes') or hoje.month)
+        ano = int(request.GET.get('ano') or request.POST.get('ano') or hoje.year)
+    except (ValueError, TypeError):
+        mes, ano = hoje.month, hoje.year
+
+    if request.method == 'POST':
+        action = request.POST.get('action', '')
+        if action == 'marcar_enviado':
+            fechamento, _ = FechamentoMensal.objects.get_or_create(mes=mes, ano=ano)
+            fechamento.enviado_contabilidade = True
+            fechamento.data_envio_contabilidade = hoje
+            if not fechamento.data_fechamento:
+                fechamento.data_fechamento = hoje
+            fechamento.save()
+            messages.success(request, f'Mês {mes:02d}/{ano} marcado como enviado à contabilidade.')
+        return HttpResponseRedirect(f"{reverse('checklist_mensal')}?mes={mes}&ano={ano}")
+
+    receitas_mes = ReceitaAluguel.objects.filter(competencia_mes=mes, competencia_ano=ano)
+    total_receitas = receitas_mes.count()
+    receitas_recebidas = receitas_mes.filter(status__in=['recebido', 'parcial']).count()
+    receitas_pendentes = receitas_mes.exclude(status__in=['recebido', 'parcial', 'cancelado']).count()
+
+    despesas_mes = Despesa.objects.filter(competencia_mes=mes, competencia_ano=ano)
+    total_despesas = despesas_mes.count()
+    despesas_pagas = despesas_mes.filter(status='paga').count()
+
+    inadimplentes = receitas_inadimplentes_qs().count()
+
+    docs_pendentes_cnt = Documento.objects.filter(
+        tipo__in=Documento.TIPOS_CONTABILIDADE, enviado_contabilidade=False
+    ).count()
+
+    try:
+        fechamento = FechamentoMensal.objects.get(mes=mes, ano=ano)
+    except FechamentoMensal.DoesNotExist:
+        fechamento = None
+
+    nome_mes = dict(ReceitaAluguel.MESES).get(mes, str(mes))
+
+    checklist = [
+        {
+            'item': 'Receitas geradas',
+            'ok': total_receitas > 0,
+            'detalhe': f'{total_receitas} receita(s) cadastrada(s)' if total_receitas else 'Nenhuma receita gerada ainda',
+            'link': reverse('gerar_receitas_mes') + f'?mes={mes}&ano={ano}',
+        },
+        {
+            'item': 'Recebimentos confirmados',
+            'ok': total_receitas > 0 and receitas_pendentes == 0,
+            'detalhe': f'{receitas_recebidas}/{total_receitas} recebida(s)' if total_receitas else '—',
+            'link': reverse('baixa_receitas_mes') + f'?mes={mes}&ano={ano}',
+        },
+        {
+            'item': 'Inadimplência em dia',
+            'ok': inadimplentes == 0,
+            'detalhe': f'{inadimplentes} receita(s) inadimplente(s) em aberto' if inadimplentes else 'Sem inadimplência em aberto',
+            'link': None,
+        },
+        {
+            'item': 'Despesas pagas',
+            'ok': total_despesas == 0 or despesas_pagas == total_despesas,
+            'detalhe': f'{despesas_pagas}/{total_despesas} paga(s)' if total_despesas else 'Sem despesas no período',
+            'link': reverse('despesas_list') + f'?mes={mes}&ano={ano}',
+        },
+        {
+            'item': 'Documentos enviados à contabilidade',
+            'ok': docs_pendentes_cnt == 0,
+            'detalhe': f'{docs_pendentes_cnt} documento(s) pendente(s)' if docs_pendentes_cnt else 'Todos enviados',
+            'link': reverse('documento_list') + '?pendente=1',
+        },
+        {
+            'item': 'Fechamento registrado e enviado',
+            'ok': fechamento is not None and fechamento.enviado_contabilidade,
+            'detalhe': (
+                f'Enviado em {fechamento.data_envio_contabilidade:%d/%m/%Y}'
+                if fechamento and fechamento.enviado_contabilidade
+                else 'Pendente'
+            ),
+            'link': None,
+        },
+    ]
+
+    context = {
+        'mes_atual': mes,
+        'ano_atual': ano,
+        'nome_mes': nome_mes,
+        'meses': ReceitaAluguel.MESES,
+        'anos': range(2020, hoje.year + 2),
+        'checklist': checklist,
+        'fechamento': fechamento,
+        'total_receitas': total_receitas,
+        'receitas_recebidas': receitas_recebidas,
+        'receitas_pendentes': receitas_pendentes,
+        'total_despesas': total_despesas,
+        'despesas_pagas': despesas_pagas,
+        'inadimplentes': inadimplentes,
+        'docs_pendentes_cnt': docs_pendentes_cnt,
+    }
+    return render(request, 'financeiro/checklist_mensal.html', context)
+
+
+@login_required
 def gerar_receitas_mes_view(request):
     """
     GET: exibe formulário de confirmação com seleção de mês/ano.

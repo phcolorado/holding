@@ -1,3 +1,4 @@
+from django.core.exceptions import ValidationError
 from django.db import models
 from patrimonio.models import Imovel, Pessoa, Contrato
 from financeiro.models import ReceitaAluguel, Despesa
@@ -40,10 +41,21 @@ class DocumentoObrigatorio(models.Model):
         verbose_name = 'Documento Obrigatório'
         verbose_name_plural = 'Documentos Obrigatórios'
         ordering = ['imovel__nome', 'tipo']
-        unique_together = [['imovel', 'tipo']]
+        unique_together = [['imovel', 'tipo', 'descricao']]
 
     def __str__(self):
         return f'{self.get_tipo_display()} — {self.imovel.nome}'
+
+    def clean(self):
+        if self.documento_id:
+            if self.documento.imovel_id is None:
+                raise ValidationError(
+                    {'documento': 'O documento vinculado deve pertencer a um imóvel.'}
+                )
+            if self.documento.imovel_id != self.imovel_id:
+                raise ValidationError(
+                    {'documento': 'O documento vinculado deve pertencer ao mesmo imóvel.'}
+                )
 
     @property
     def pendente(self):

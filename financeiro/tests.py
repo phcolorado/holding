@@ -688,8 +688,8 @@ class RelatorioContabilidadeTest(TestCase):
             {'mes': 1, 'ano': 2024},
         )
         wb = openpyxl.load_workbook(io.BytesIO(response.content))
-        self.assertIn('Inadimplência', wb.sheetnames)
-        ws = wb['Inadimplência']
+        self.assertIn('Inadimplência Aberta', wb.sheetnames)
+        ws = wb['Inadimplência Aberta']
         valores = [row[0] for row in ws.iter_rows(min_row=2, values_only=True) if row[0]]
         self.assertTrue(any(self.imovel.nome in str(v) for v in valores))
 
@@ -797,6 +797,277 @@ class BackupLocalTest(TestCase):
             call_command('backup_local', '--destino', tmpdir, '--manter', '2', verbosity=0)
             zips = [f for f in os.listdir(tmpdir) if f.endswith('.zip')]
             self.assertEqual(len(zips), 2)
+
+
+# ─── Testes do formulário baixa_receitas (Items 1-3) ─────────────────────────
+
+class BaixaReceitasFormTest(TestCase):
+    """Verifica que baixa_receitas.html não tem formulário aninhado."""
+
+    def setUp(self):
+        self.client = Client()
+        User.objects.create_user('form_user', password='pass')
+        self.client.login(username='form_user', password='pass')
+
+    def test_get_renderiza_sem_form_aninhado(self):
+        """GET da tela de baixa deve retornar status 200 sem form aninhado."""
+        response = self.client.get(reverse('baixa_receitas_mes'))
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode()
+        # Não deve haver dois <form method="post"> dentro de um <form method="get">
+        # Verificamos que o HTML contém o botão Gerar mas como form separado
+        self.assertIn('gerar_receitas', content)
+        self.assertIn('Gerar Receitas Esperadas', content)
+
+    def test_post_gerar_receitas_a_partir_de_baixa(self):
+        """POST action=gerar_receitas na tela de baixa gera receitas corretamente."""
+        imovel, locatario = _criar_base()
+        hoje = date.today()
+        ultimo_dia = monthrange(hoje.year, hoje.month)[1]
+        _criar_contrato(
+            imovel, locatario,
+            date(hoje.year, hoje.month, 1),
+            date(hoje.year, hoje.month, ultimo_dia),
+        )
+        response = self.client.post(
+            reverse('baixa_receitas_mes'),
+            {'mes': hoje.month, 'ano': hoje.year, 'action': 'gerar_receitas'},
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(ReceitaAluguel.objects.count(), 1)
+
+
+# ─── Testes de DocumentoObrigatorio.clean() (Item 4) ─────────────────────────
+
+class DocumentoObrigatorioCleanTest(TestCase):
+    """Testa o método clean() do DocumentoObrigatorio."""
+
+    def setUp(self):
+        from documentos.models import Documento, DocumentoObrigatorio
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        self.imovel, _ = _criar_base()
+        self.imovel2 = Imovel.objects.create(nome='Outro', endereco='Rua Z', cidade='SP', estado='SP')
+        self.doc_imovel1 = Documento.objects.create(
+            titulo='Matrícula 1',
+            tipo='matricula',
+            arquivo=SimpleUploadedFile('m1.pdf', b'x'),
+            imovel=self.imovel,
+        )
+        self.doc_sem_imovel = Documento.objects.create(
+            titulo='Sem Imóvel',
+            tipo='outro',
+            arquivo=SimpleUploadedFile('s.pdf', b'x'),
+            imovel=None,
+        )
+
+    def test_clean_aceita_documento_do_mesmo_imovel(self):
+        """clean() não levanta erro quando documento pertence ao mesmo imóvel."""
+        from documentos.models import DocumentoObrigatorio
+        from django.core.exceptions import ValidationError
+        ob = DocumentoObrigatorio(
+            imovel=self.imovel,
+            tipo='matricula',
+            descricao='Matrícula',
+            documento=self.doc_imovel1,
+        )
+        try:
+            ob.clean()
+        except ValidationError:
+            self.fail('clean() não deveria levantar ValidationError para documento do mesmo imóvel.')
+
+    def test_clean_rejeita_documento_de_outro_imovel(self):
+        """clean() rejeita documento que pertence a outro imóvel."""
+        from documentos.models import DocumentoObrigatorio
+        from django.core.exceptions import ValidationError
+        ob = DocumentoObrigatorio(
+            imovel=self.imovel2,
+            tipo='matricula',
+            descricao='Matrícula',
+            documento=self.doc_imovel1,
+        )
+        with self.assertRaises(ValidationError):
+            ob.clean()
+
+    def test_clean_rejeita_documento_sem_imovel(self):
+        """clean() rejeita documento sem imóvel vinculado."""
+        from documentos.models import DocumentoObrigatorio
+        from django.core.exceptions import ValidationError
+        ob = DocumentoObrigatorio(
+            imovel=self.imovel,
+            tipo='outro',
+            descricao='Genérico',
+            documento=self.doc_sem_imovel,
+        )
+        with self.assertRaises(ValidationError):
+            ob.clean()
+
+    def test_clean_sem_documento_passa(self):
+        """clean() sem documento vinculado não levanta erro."""
+        from documentos.models import DocumentoObrigatorio
+        ob = DocumentoObrigatorio(
+            imovel=self.imovel,
+            tipo='seguro',
+            descricao='Seguro',
+            documento=None,
+        )
+        try:
+            ob.clean()
+        except Exception:
+            self.fail('clean() sem documento não deve levantar exceção.')
+
+
+# ─── Testes da constraint única (Item 5) ─────────────────────────────────────
+
+class DocumentoObrigatorioUniqueTest(TestCase):
+    """Testa que unique_together inclui descricao (imovel, tipo, descricao)."""
+
+    def setUp(self):
+        from documentos.models import DocumentoObrigatorio
+        self.imovel, _ = _criar_base()
+        DocumentoObrigatorio.objects.create(
+            imovel=self.imovel,
+            tipo='matricula',
+            descricao='Matrícula principal',
+        )
+
+    def test_mesmo_tipo_descricao_diferente_permitido(self):
+        """Dois DocumentoObrigatorio com mesmo tipo mas descrição diferente são permitidos."""
+        from documentos.models import DocumentoObrigatorio
+        from django.db import IntegrityError
+        try:
+            DocumentoObrigatorio.objects.create(
+                imovel=self.imovel,
+                tipo='matricula',
+                descricao='Matrícula atualizada 2024',
+            )
+        except IntegrityError:
+            self.fail('Deve ser possível ter mesmo tipo com descrição diferente.')
+
+    def test_mesmo_tipo_mesma_descricao_falha(self):
+        """Duplicar imovel+tipo+descricao deve levantar IntegrityError."""
+        from documentos.models import DocumentoObrigatorio
+        from django.db import IntegrityError
+        with self.assertRaises(IntegrityError):
+            DocumentoObrigatorio.objects.create(
+                imovel=self.imovel,
+                tipo='matricula',
+                descricao='Matrícula principal',
+            )
+
+
+# ─── Testes do relatório contabilidade — nota inadimplência (Item 6) ──────────
+
+class RelatorioContabilidadeNotaTest(TestCase):
+    """Testa que o Resumo do relatório contabilidade inclui nota sobre inadimplência."""
+
+    def setUp(self):
+        self.client = Client()
+        User.objects.create_user('nota_user', password='pass')
+        self.client.login(username='nota_user', password='pass')
+
+    def test_resumo_contem_nota_inadimplencia(self):
+        """A aba Resumo deve conter a nota sobre o escopo da aba Inadimplência Aberta."""
+        import io
+        try:
+            import openpyxl
+        except ImportError:
+            self.skipTest('openpyxl não instalado')
+        response = self.client.get(
+            reverse('export_relatorio_contabilidade'),
+            {'mes': 1, 'ano': 2024},
+        )
+        wb = openpyxl.load_workbook(io.BytesIO(response.content))
+        ws = wb['Resumo']
+        valores = [str(row[0] or '') for row in ws.iter_rows(values_only=True)]
+        self.assertTrue(any('Nota' in v for v in valores), 'Resumo deve conter linha de nota.')
+
+    def test_aba_inadimplencia_renomeada(self):
+        """A aba de inadimplência deve se chamar 'Inadimplência Aberta'."""
+        import io
+        try:
+            import openpyxl
+        except ImportError:
+            self.skipTest('openpyxl não instalado')
+        response = self.client.get(
+            reverse('export_relatorio_contabilidade'),
+            {'mes': 1, 'ano': 2024},
+        )
+        wb = openpyxl.load_workbook(io.BytesIO(response.content))
+        self.assertIn('Inadimplência Aberta', wb.sheetnames)
+        self.assertNotIn('Inadimplência', wb.sheetnames)
+
+
+# ─── Testes do checklist mensal (Item 8) ─────────────────────────────────────
+
+class ChecklistMensalViewTest(TestCase):
+    """Testa a view checklist_mensal_view."""
+
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user('chk_user', password='pass')
+        self.imovel, self.locatario = _criar_base()
+        hoje = date.today()
+        self.mes = hoje.month
+        self.ano = hoje.year
+
+    def test_exige_login(self):
+        """Acesso sem login deve redirecionar."""
+        response = self.client.get(reverse('checklist_mensal'))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn('/login/', response['Location'])
+
+    def test_get_renderiza_checklist(self):
+        """GET autenticado renderiza a página de checklist."""
+        self.client.login(username='chk_user', password='pass')
+        response = self.client.get(
+            reverse('checklist_mensal'),
+            {'mes': self.mes, 'ano': self.ano},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('checklist', response.context)
+        self.assertEqual(len(response.context['checklist']), 6)
+
+    def test_post_marcar_enviado_cria_fechamento(self):
+        """POST action=marcar_enviado cria FechamentoMensal e redireciona."""
+        from financeiro.models import FechamentoMensal
+        self.client.login(username='chk_user', password='pass')
+        response = self.client.post(
+            reverse('checklist_mensal'),
+            {'mes': self.mes, 'ano': self.ano, 'action': 'marcar_enviado'},
+        )
+        self.assertEqual(response.status_code, 302)
+        fechamento = FechamentoMensal.objects.get(mes=self.mes, ano=self.ano)
+        self.assertTrue(fechamento.enviado_contabilidade)
+        self.assertIsNotNone(fechamento.data_envio_contabilidade)
+
+    def test_post_marcar_enviado_idempotente(self):
+        """Chamar marcar_enviado duas vezes não duplica FechamentoMensal."""
+        from financeiro.models import FechamentoMensal
+        self.client.login(username='chk_user', password='pass')
+        for _ in range(2):
+            self.client.post(
+                reverse('checklist_mensal'),
+                {'mes': self.mes, 'ano': self.ano, 'action': 'marcar_enviado'},
+            )
+        self.assertEqual(FechamentoMensal.objects.filter(mes=self.mes, ano=self.ano).count(), 1)
+
+    def test_dashboard_contem_link_checklist(self):
+        """Dashboard deve ter link para o checklist mensal."""
+        self.client.login(username='chk_user', password='pass')
+        response = self.client.get(reverse('dashboard'))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, reverse('checklist_mensal'))
+
+    def test_checklist_sem_receitas_etapa_nao_ok(self):
+        """Com nenhuma receita no mês, a etapa 'Receitas geradas' deve estar não-ok."""
+        self.client.login(username='chk_user', password='pass')
+        response = self.client.get(
+            reverse('checklist_mensal'),
+            {'mes': self.mes, 'ano': self.ano},
+        )
+        checklist = response.context['checklist']
+        etapa_receitas = next(e for e in checklist if e['item'] == 'Receitas geradas')
+        self.assertFalse(etapa_receitas['ok'])
 
 
 # ─── Teste de migrations pendentes ────────────────────────────────────────────

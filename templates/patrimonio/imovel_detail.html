@@ -12,9 +12,24 @@
         <h4 class="fw-bold mb-0 mt-1">{{ imovel.nome }}</h4>
         <span class="text-muted small">{{ imovel.endereco }}, {{ imovel.cidade }}/{{ imovel.estado }}</span>
     </div>
-    <div class="d-flex gap-2">
+    <div class="d-flex gap-2 flex-wrap">
         <a href="{% url 'admin:patrimonio_imovel_change' imovel.pk %}" class="btn btn-sm btn-outline-secondary">
             <i class="bi bi-pencil"></i> Editar
+        </a>
+        <a href="{% url 'baixa_receitas_mes' %}?imovel={{ imovel.pk }}" class="btn btn-sm btn-outline-success">
+            <i class="bi bi-check2-circle"></i> Baixa de Aluguéis
+        </a>
+        <a href="{% url 'receitas_list' %}?imovel={{ imovel.pk }}" class="btn btn-sm btn-outline-primary">
+            <i class="bi bi-cash-coin"></i> Receitas
+        </a>
+        <a href="{% url 'admin:financeiro_despesa_add' %}?imovel={{ imovel.pk }}" class="btn btn-sm btn-outline-warning">
+            <i class="bi bi-plus-circle"></i> Lançar Despesa
+        </a>
+        <a href="{% url 'admin:documentos_documento_add' %}?imovel={{ imovel.pk }}" class="btn btn-sm btn-outline-dark">
+            <i class="bi bi-upload"></i> Adicionar Documento
+        </a>
+        <a href="{% url 'admin:documentos_documentoobrigatorio_add' %}?imovel={{ imovel.pk }}" class="btn btn-sm btn-outline-dark">
+            <i class="bi bi-file-earmark-plus"></i> Doc. Obrigatório
         </a>
     </div>
 </div>

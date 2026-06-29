@@ -104,6 +104,12 @@
                     </a>
                 </li>
                 <li class="nav-item">
+                    <a class="nav-link {% if request.resolver_match.url_name == 'checklist_mensal' %}active{% endif %}"
+                       href="{% url 'checklist_mensal' %}">
+                        <i class="bi bi-clipboard2-check me-2"></i>Checklist Mensal
+                    </a>
+                </li>
+                <li class="nav-item">
                     <a class="nav-link {% if 'relatorios' in request.resolver_match.url_name %}active{% endif %}"
                        href="{% url 'relatorios' %}">
                         <i class="bi bi-download me-2"></i>Relatórios / Exportar

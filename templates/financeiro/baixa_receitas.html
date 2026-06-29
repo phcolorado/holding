@@ -14,7 +14,7 @@
 </div>
 
 <!-- Seletor mês/ano -->
-<form method="get" class="card shadow-sm mb-3">
+<form method="get" class="card shadow-sm mb-2">
     <div class="card-body py-2">
         <div class="row g-2 align-items-end">
             <div class="col-auto">
@@ -38,19 +38,19 @@
                     <i class="bi bi-search me-1"></i>Filtrar
                 </button>
             </div>
-            <div class="col-auto ms-auto">
-                <form method="post" class="d-inline">
-                    {% csrf_token %}
-                    <input type="hidden" name="mes" value="{{ mes_atual }}">
-                    <input type="hidden" name="ano" value="{{ ano_atual }}">
-                    <input type="hidden" name="action" value="gerar_receitas">
-                    <button type="submit" class="btn btn-outline-success btn-sm">
-                        <i class="bi bi-magic me-1"></i>Gerar Receitas Esperadas
-                    </button>
-                </form>
-            </div>
         </div>
     </div>
+</form>
+
+<!-- Ação: Gerar Receitas Esperadas (formulário POST separado) -->
+<form method="post" class="mb-3 text-end">
+    {% csrf_token %}
+    <input type="hidden" name="mes" value="{{ mes_atual }}">
+    <input type="hidden" name="ano" value="{{ ano_atual }}">
+    <input type="hidden" name="action" value="gerar_receitas">
+    <button type="submit" class="btn btn-outline-success btn-sm">
+        <i class="bi bi-magic me-1"></i>Gerar Receitas Esperadas
+    </button>
 </form>
 
 <!-- Totais -->
@@ -67,8 +67,6 @@
         <div class="card border-0 bg-success bg-opacity-10 text-center py-2">
             <div class="small text-muted">Recebidas</div>
             <div class="fw-bold fs-5 text-success">
-                {{ receitas|length }}
-                <!-- JS preenche abaixo -->
                 <span id="cnt-recebidas">0</span>/<span id="cnt-total">{{ receitas|length }}</span>
             </div>
         </div>
@@ -137,7 +135,7 @@
                         </td>
                         <td class="small text-muted">{{ r.observacoes|truncatechars:30|default:"—" }}</td>
                         <td class="text-center text-nowrap">
-                            {% if r.status not in 'recebido,cancelado' %}
+                            {% if r.status != 'recebido' and r.status != 'cancelado' %}
                             <form method="post" class="d-inline">
                                 {% csrf_token %}
                                 <input type="hidden" name="mes" value="{{ mes_atual }}">

@@ -17,8 +17,9 @@ Construído com Python + Django + Bootstrap 5 + SQLite.
 - **Manutenções**: registro de solicitações com status e valores
 - **Geração automática de receitas**: gera `ReceitaAluguel` para todos os contratos ativos de um mês via interface web ou Admin; idempotente (sem duplicatas)
 - **Baixa de aluguéis**: tela de conferência mensal com marcação rápida de recebimento e edição inline de cada receita
-- **Inadimplência por vencimento**: regra baseada em `data_vencimento`, independente do campo de status — usada no dashboard, na listagem e nas exportações
-- **Relatório para contabilidade** em XLSX (6 abas: resumo, receitas, despesas, inadimplência, documentos pendentes, resultado por imóvel)
+- **Inadimplência por vencimento**: regra baseada em `data_vencimento`, independente do campo de status — a aba "Inadimplência Aberta" do relatório para contabilidade lista **todas** as receitas vencidas e não quitadas, sem filtro de mês de competência
+- **Checklist Mensal**: tela `/financeiro/checklist-mensal/` com 6 etapas de fechamento e ação de marcar envio à contabilidade via `FechamentoMensal`
+- **Relatório para contabilidade** em XLSX (6 abas: resumo, receitas, despesas, inadimplência aberta, documentos pendentes, resultado por imóvel)
 - **Documentos obrigatórios por imóvel**: controle de documentos esperados por imóvel com indicador de pendência
 - **Exportações** em CSV e XLSX (imóveis, contratos com filtro de status/imóvel, receitas, despesas, inadimplência, relatório mensal)
 - **Django Admin** completo com filtros, buscas e ordenação para todos os modelos
@@ -180,6 +181,39 @@ A operação é idempotente — chamar múltiplas vezes não cria duplicatas.
 
 ---
 
+## Fluxo Mensal Recomendado
+
+1. **Gerar Receitas** — acesse `/financeiro/gerar-receitas/` e gere as receitas do mês (operação idempotente).
+2. **Conferir Recebimentos** — acesse `/financeiro/baixa-receitas/` e marque cada aluguel como recebido.
+3. **Registrar Despesas** — lance e pague as despesas do período no Admin.
+4. **Enviar Documentos** — marque como `enviado_contabilidade = True` os documentos relevantes.
+5. **Checar Inadimplência** — acesse o Dashboard ou a tela de Checklist para ver receitas em atraso.
+6. **Exportar Relatório** — baixe o Relatório para Contabilidade em `/financeiro/relatorios/`.
+7. **Fechar o Mês** — acesse `/financeiro/checklist-mensal/` e clique em "Marcar como Enviado à Contabilidade".
+
+> A tela de Checklist Mensal consolida todas as etapas acima com indicadores de status em tempo real.
+
+---
+
+## Checklist Mensal
+
+Acesse `/financeiro/checklist-mensal/` (menu lateral: "Checklist Mensal") ou clique em **"Checklist Mensal"** no Dashboard.
+
+A tela exibe 6 etapas com indicador visual (✓ verde / ! amarelo):
+
+| Etapa | Critério de conclusão |
+|---|---|
+| Receitas geradas | Existe ao menos uma receita no mês |
+| Recebimentos confirmados | Nenhuma receita pendente (exceto canceladas) |
+| Inadimplência em dia | Zero receitas vencidas e não quitadas (histórico) |
+| Despesas pagas | Todas as despesas do mês estão pagas |
+| Documentos enviados à contabilidade | Nenhum documento pendente |
+| Fechamento registrado e enviado | FechamentoMensal marcado como enviado |
+
+Ao clicar em **"Marcar como Enviado à Contabilidade"**, o sistema cria ou atualiza o registro `FechamentoMensal` com `enviado_contabilidade = True` e a data de envio.
+
+---
+
 ## Baixa de Aluguéis (conferência de recebimentos)
 
 Acesse `/financeiro/baixa-receitas/` (menu lateral: "Baixa de Aluguéis") ou clique em **"Conferir Recebimentos"** no Dashboard.
@@ -204,7 +238,7 @@ O XLSX gerado contém 6 abas:
 1. **Resumo** — totais, resultado líquido e indicadores do mês
 2. **Receitas** — lista completa com coluna "Atrasada" calculada
 3. **Despesas** — lista completa com coluna "Atrasada" calculada
-4. **Inadimplência** — receitas vencidas e não quitadas (regra de vencimento, independente do status)
+4. **Inadimplência Aberta** — todas as receitas vencidas e não quitadas em qualquer mês (regra de vencimento, independente do status); escopo histórico, não restrito ao mês selecionado
 5. **Docs. Pendentes** — documentos com `enviado_contabilidade = False`
 6. **Por Imóvel** — resultado financeiro por imóvel
 
