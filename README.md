@@ -277,6 +277,8 @@ Ao gerar a receita mensal, o `valor_previsto` passa a ser a **soma dos encargos 
 
 **Encargo de aluguel sempre garantido:** ao salvar um contrato pelo Admin, ou ao gerar receitas (via web, Admin ou action "Gerar receitas esperadas"), o sistema chama automaticamente `Contrato.garantir_encargo_aluguel()` — se o contrato ativo não tiver nenhum encargo de aluguel ativo, um é criado com o valor de `valor_aluguel`. Isso evita que um contrato com apenas IPTU/condomínio cadastrado gere uma receita sem o aluguel. Um encargo de aluguel já existente (automático ou cadastrado manualmente com valor diferente) nunca é sobrescrito. Há também a action "Garantir encargo de aluguel" na listagem de Contratos do Admin, para aplicar isso em lote a contratos já cadastrados.
 
+No Admin, essa verificação roda em `save_related()` — ou seja, **depois** que os Encargos do Contrato cadastrados no mesmo formulário (inline) já foram salvos — para não duplicar um encargo de aluguel que o próprio usuário acabou de cadastrar manualmente.
+
 ## Taxa de Administração da Imobiliária
 
 O campo `comissao_imobiliaria_percentual` do contrato ("Taxa de Administração Imobiliária (%)") gera, ao gerar a receita mensal, uma **despesa automática** (categoria "Comissão Imobiliária", `origem_automatica = True`) vinculada ao contrato e à receita do mês — o valor é sempre calculado sobre o encargo de aluguel (nunca sobre IPTU/condomínio). A receita continua representando o valor bruto devido pelo inquilino; a taxa nunca é abatida diretamente do aluguel.

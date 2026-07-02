@@ -628,7 +628,12 @@ class GarantirEncargoAluguelTest(TestCase):
         self.assertIsNone(resultado)
         self.assertFalse(EncargoContrato.objects.filter(contrato=contrato, tipo='aluguel').exists())
 
-    def test_admin_save_model_garante_encargo_aluguel(self):
+    def test_admin_save_model_nao_cria_encargo_sozinho(self):
+        """
+        save_model() roda antes dos inlines — não deve mais chamar
+        garantir_encargo_aluguel() diretamente (isso ficou para
+        save_related(), depois que o inline de encargos salva).
+        """
         from django.contrib import admin as django_admin
         from patrimonio.admin import ContratoAdmin
 
@@ -636,7 +641,7 @@ class GarantirEncargoAluguelTest(TestCase):
         admin_instance = ContratoAdmin(Contrato, django_admin.site)
         admin_instance.save_model(request=None, obj=contrato, form=None, change=False)
 
-        self.assertTrue(contrato.encargos.filter(tipo='aluguel', ativo=True).exists())
+        self.assertFalse(contrato.encargos.filter(tipo='aluguel').exists())
 
     def test_admin_action_garante_encargo_aluguel(self):
         from django.contrib import admin as django_admin
@@ -653,6 +658,89 @@ class GarantirEncargoAluguelTest(TestCase):
         admin_instance.garantir_encargo_aluguel_action(request, Contrato.objects.filter(pk=contrato.pk))
 
         self.assertTrue(contrato.encargos.filter(tipo='aluguel', ativo=True).exists())
+
+
+class _FakeFormComM2M:
+    """Form simplificado com o .instance e o .save_m2m() no-op exigidos por ModelAdmin.save_related()."""
+
+    def __init__(self, instance):
+        self.instance = instance
+
+    def save_m2m(self):
+        pass
+
+
+class _FakeEncargoInlineFormSet:
+    """
+    Representa o inline de EncargoContrato já preenchido pelo usuário no
+    admin. Seu .save() simula o que o formset real faz: persiste as linhas
+    do inline no banco — chamado por ContratoAdmin.save_formset() dentro de
+    ModelAdmin.save_related(), antes de garantir_encargo_aluguel() rodar.
+    """
+
+    def __init__(self, contrato, encargos_kwargs):
+        self.model = EncargoContrato
+        self.deleted_objects = []
+        self._contrato = contrato
+        self._encargos_kwargs = encargos_kwargs
+
+    def save(self, commit=True):
+        return [
+            EncargoContrato.objects.create(contrato=self._contrato, **kwargs)
+            for kwargs in self._encargos_kwargs
+        ]
+
+
+class GarantirEncargoAluguelSaveRelatedTest(TestCase):
+    """
+    Testa a ordem correta no Admin: 1) contrato já salvo (save_model já
+    rodou); 2) inline de encargos salva via save_related()/save_formset();
+    3) só então garantir_encargo_aluguel() roda — nunca duplicando um
+    encargo de aluguel cadastrado manualmente no mesmo formulário.
+    """
+
+    def setUp(self):
+        self.imovel = _criar_imovel()
+        self.locatario = _criar_pessoa('Locatário')
+
+    def _save_related(self, contrato, formset):
+        from django.contrib import admin as django_admin
+        from patrimonio.admin import ContratoAdmin
+
+        admin_instance = ContratoAdmin(Contrato, django_admin.site)
+        form = _FakeFormComM2M(contrato)
+        admin_instance.save_related(request=None, form=form, formsets=[formset], change=False)
+
+    def test_save_related_cria_encargo_quando_inline_nao_tem_aluguel(self):
+        contrato = _criar_contrato(
+            self.imovel, self.locatario, date(2024, 1, 1), date(2024, 12, 31),
+            valor_aluguel=Decimal('1100.00'),
+        )
+        formset_vazio = _FakeEncargoInlineFormSet(contrato, [])
+        self._save_related(contrato, formset_vazio)
+
+        self.assertEqual(contrato.encargos.filter(tipo='aluguel', ativo=True).count(), 1)
+        self.assertEqual(contrato.encargos.get(tipo='aluguel').valor, Decimal('1100.00'))
+
+    def test_save_related_nao_duplica_quando_inline_ja_tem_encargo_aluguel(self):
+        contrato = _criar_contrato(
+            self.imovel, self.locatario, date(2024, 1, 1), date(2024, 12, 31),
+            valor_aluguel=Decimal('2000.00'),
+        )
+        formset_com_manual = _FakeEncargoInlineFormSet(contrato, [
+            {
+                'tipo': 'aluguel', 'descricao': 'Aluguel negociado',
+                'valor': Decimal('1850.00'), 'periodicidade': 'mensal', 'ativo': True,
+            },
+        ])
+        self._save_related(contrato, formset_com_manual)
+
+        # O inline salvou o encargo manual ANTES de garantir_encargo_aluguel()
+        # rodar — não deve haver um segundo encargo de aluguel criado por cima.
+        self.assertEqual(contrato.encargos.filter(tipo='aluguel', ativo=True).count(), 1)
+        encargo = contrato.encargos.get(tipo='aluguel', ativo=True)
+        self.assertEqual(encargo.valor, Decimal('1850.00'))
+        self.assertEqual(encargo.descricao, 'Aluguel negociado')
 
 
 # ─── ContratoAdmin.save_formset: transição de aplicado em ReajusteContrato ────

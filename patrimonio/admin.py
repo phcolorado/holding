@@ -121,10 +121,6 @@ class ContratoAdmin(admin.ModelAdmin):
     actions = ['gerar_receitas_esperadas', 'garantir_encargo_aluguel_action']
     inlines = [ContratoParteInline, EncargoContratoInline, ReajusteContratoInline, DocumentoContratoInline]
 
-    def save_model(self, request, obj, form, change):
-        super().save_model(request, obj, form, change)
-        obj.garantir_encargo_aluguel()
-
     @admin.action(description='Garantir encargo de aluguel')
     def garantir_encargo_aluguel_action(self, request, queryset):
         total = 0
@@ -227,6 +223,14 @@ class ContratoAdmin(admin.ModelAdmin):
             formset.save_m2m()
         else:
             formset.save()
+
+    def save_related(self, request, form, formsets, change):
+        # Os inlines (incluindo Encargos do Contrato) só terminam de ser
+        # salvos aqui. Chamar garantir_encargo_aluguel() em save_model()
+        # rodaria antes do inline salvar um encargo de aluguel manual,
+        # podendo duplicá-lo — por isso a garantia roda só depois.
+        super().save_related(request, form, formsets, change)
+        form.instance.garantir_encargo_aluguel()
 
 
 @admin.register(Manutencao)
