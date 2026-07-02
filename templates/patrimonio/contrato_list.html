@@ -14,7 +14,7 @@
 <div class="card shadow-sm mb-3">
     <div class="card-body py-2">
         <form method="get" class="row g-2 align-items-end">
-            <div class="col-md-3">
+            <div class="col-md-2">
                 <select name="status" class="form-select form-select-sm">
                     <option value="">Todos os status</option>
                     {% for val, label in status_choices %}
@@ -22,13 +22,25 @@
                     {% endfor %}
                 </select>
             </div>
-            <div class="col-md-4">
+            <div class="col-md-3">
                 <select name="imovel" class="form-select form-select-sm">
                     <option value="">Todos os imóveis</option>
                     {% for im in imoveis %}
                     <option value="{{ im.pk }}" {% if im.pk|stringformat:"s" == imovel_atual %}selected{% endif %}>{{ im.nome }}</option>
                     {% endfor %}
                 </select>
+            </div>
+            <div class="col-md-3">
+                <select name="imobiliaria" class="form-select form-select-sm">
+                    <option value="">Todas as imobiliárias</option>
+                    {% for p in imobiliarias %}
+                    <option value="{{ p.pk }}" {% if p.pk|stringformat:"s" == imobiliaria_atual %}selected{% endif %}>{{ p.nome }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto form-check ms-2">
+                <input type="checkbox" class="form-check-input" name="reajuste_pendente" value="1" id="reajustePendente" {% if reajuste_pendente_atual %}checked{% endif %}>
+                <label class="form-check-label small" for="reajustePendente">Reajuste pendente</label>
             </div>
             <div class="col-auto">
                 <button type="submit" class="btn btn-secondary btn-sm">Filtrar</button>
@@ -45,7 +57,7 @@
         <table class="table table-hover table-sm mb-0">
             <thead class="table-dark">
                 <tr>
-                    <th>Imóvel</th><th>Locatário</th><th>Início</th><th>Término</th>
+                    <th>Imóvel</th><th>Locatário(s)</th><th>Imobiliária</th><th>Vigência</th>
                     <th>Valor</th><th>Índice</th><th>Status</th><th></th>
                 </tr>
             </thead>
@@ -53,12 +65,24 @@
                 {% for c in contratos %}
                 <tr>
                     <td><a href="{% url 'imovel_detail' c.imovel.pk %}">{{ c.imovel.nome }}</a></td>
-                    <td>{{ c.locatario.nome }}</td>
-                    <td>{{ c.data_inicio|date:"d/m/Y" }}</td>
                     <td>
-                        {{ c.data_fim|date:"d/m/Y" }}
-                        {% if c.data_fim <= hoje and c.status == 'ativo' %}
+                        {{ c.locatarios_display }}
+                        {% if c.fiadores_display != '—' %}
+                        <div class="small text-muted">Fiador(es): {{ c.fiadores_display }}</div>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% with imob=c.get_imobiliaria_principal %}
+                        {{ imob.nome|default:"—" }}
+                        {% endwith %}
+                    </td>
+                    <td>
+                        {{ c.vigencia_display }}
+                        {% if c.esta_vencido %}
                         <span class="badge bg-danger ms-1">Vencido</span>
+                        {% endif %}
+                        {% if c.prazo_indeterminado %}
+                        <span class="badge bg-info text-dark ms-1">Prazo Indeterminado</span>
                         {% endif %}
                     </td>
                     <td>R$ {{ c.valor_aluguel|floatformat:2|intcomma }}</td>

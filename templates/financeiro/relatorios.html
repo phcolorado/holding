@@ -57,6 +57,12 @@
                             {% for im in imoveis %}<option value="{{ im.pk }}">{{ im.nome }}</option>{% endfor %}
                         </select>
                     </div>
+                    <div class="col-12">
+                        <select id="cont-imobiliaria" class="form-select form-select-sm">
+                            <option value="">Todas as imobiliárias</option>
+                            {% for p in imobiliarias %}<option value="{{ p.pk }}">{{ p.nome }}</option>{% endfor %}
+                        </select>
+                    </div>
                 </div>
                 <div class="d-flex gap-2">
                     <button onclick="exportarContratos('csv')" class="btn btn-outline-secondary btn-sm flex-fill">
@@ -284,8 +290,10 @@ function exportarContratos(fmt) {
     const params = new URLSearchParams();
     const status = document.getElementById('cont-status').value;
     const imovel = document.getElementById('cont-imovel').value;
+    const imobiliaria = document.getElementById('cont-imobiliaria').value;
     if (status) params.set('status', status);
     if (imovel) params.set('imovel', imovel);
+    if (imobiliaria) params.set('imobiliaria', imobiliaria);
     window.location = `/financeiro/export/contratos/${fmt}/?` + params;
 }
 function exportarInadimplencia(fmt) {

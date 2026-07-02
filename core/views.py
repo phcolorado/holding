@@ -42,6 +42,12 @@ def dashboard(request):
         data_proximo_reajuste__lte=prazo_90,
     ).order_by('data_proximo_reajuste')
 
+    reajustes_pendentes = Contrato.objects.filter(
+        status='ativo',
+        data_proximo_reajuste__isnull=False,
+        data_proximo_reajuste__lte=hoje,
+    ).count()
+
     manutencoes_abertas = Manutencao.objects.filter(
         status__in=('solicitada', 'orcamento_recebido', 'aprovada', 'em_execucao')
     ).select_related('imovel').order_by('-data_solicitacao')[:10]
@@ -65,6 +71,7 @@ def dashboard(request):
         'despesas_abertas': despesas_abertas,
         'contratos_vencendo': contratos_vencendo,
         'reajustes_proximos': reajustes_proximos,
+        'reajustes_pendentes': reajustes_pendentes,
         'manutencoes_abertas': manutencoes_abertas,
         'docs_pendentes_contabilidade': docs_pendentes_contabilidade,
         'docs_obrigatorios_pendentes': docs_obrigatorios_pendentes,

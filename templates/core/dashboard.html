@@ -220,6 +220,13 @@
                     <a href="{% url 'admin:documentos_documentoobrigatorio_changelist' %}" class="alert-link ms-1">Ver</a>
                 </div>
                 {% endif %}
+                {% if reajustes_pendentes > 0 %}
+                <div class="alert alert-warning mt-2 mb-0 py-2">
+                    <i class="bi bi-arrow-up-circle me-1"></i>
+                    <strong>{{ reajustes_pendentes }}</strong> contrato(s) com reajuste pendente.
+                    <a href="{% url 'contrato_list' %}?reajuste_pendente=1" class="alert-link ms-1">Ver</a>
+                </div>
+                {% endif %}
             </div>
         </div>
     </div>

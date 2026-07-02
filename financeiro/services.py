@@ -1,7 +1,68 @@
 from calendar import monthrange
 from datetime import date
+from decimal import Decimal
 
-from .models import ReceitaAluguel
+from django.db.models import Q
+
+from .models import ReceitaAluguel, ReceitaAluguelItem, Despesa
+
+
+def _itens_para_competencia(contrato, ano, mes):
+    """
+    Retorna a lista de itens (tipo/descrição/valor) com base nos encargos
+    ativos do contrato que se aplicam à competência informada.
+
+    Retorna None quando o contrato não tem nenhum encargo cadastrado —
+    nesse caso o chamador deve usar o fallback para contrato.valor_aluguel.
+    """
+    encargos = list(contrato.encargos.all())
+    if not encargos:
+        return None
+
+    itens = []
+    for encargo in encargos:
+        if encargo.aplica_em(ano, mes):
+            itens.append({
+                'tipo': encargo.tipo,
+                'descricao': encargo.descricao or encargo.get_tipo_display(),
+                'valor': encargo.valor,
+            })
+    return itens
+
+
+def _criar_despesa_administracao(contrato, receita, ano, mes):
+    """
+    Cria (se ainda não existir) a despesa automática de taxa de administração
+    da imobiliária, calculada como percentual sobre o encargo de aluguel
+    (ou sobre valor_aluguel, se não houver encargos configurados).
+    """
+    if not contrato.comissao_imobiliaria_percentual:
+        return None
+
+    encargo_aluguel = contrato.encargos.filter(tipo='aluguel', ativo=True).first()
+    if encargo_aluguel and encargo_aluguel.aplica_em(ano, mes):
+        base = encargo_aluguel.valor
+    else:
+        base = contrato.valor_aluguel
+
+    valor_taxa = (base * contrato.comissao_imobiliaria_percentual / Decimal('100')).quantize(Decimal('0.01'))
+
+    despesa, _criada = Despesa.objects.get_or_create(
+        contrato=contrato,
+        receita=receita,
+        origem_automatica=True,
+        categoria='comissao_imobiliaria',
+        defaults={
+            'imovel': contrato.imovel,
+            'descricao': f'Taxa de administração — {contrato.imovel.nome} ({mes:02d}/{ano})',
+            'competencia_mes': mes,
+            'competencia_ano': ano,
+            'data_vencimento': receita.data_vencimento,
+            'valor': valor_taxa,
+            'status': 'prevista',
+        },
+    )
+    return despesa
 
 
 def gerar_receitas_para_contrato(contrato, data_inicio=None, data_fim=None):
@@ -11,7 +72,14 @@ def gerar_receitas_para_contrato(contrato, data_inicio=None, data_fim=None):
     data_inicio e data_fim são opcionais. Quando informados, limitam o
     intervalo de geração — útil para gerar apenas o mês atual. O período
     efetivo é sempre a interseção desses parâmetros com a vigência real do
-    contrato, portanto nunca gera receitas fora do prazo contratual.
+    contrato (considerando prazo indeterminado e encerramento real),
+    portanto nunca gera receitas fora do prazo contratual.
+
+    Para cada receita nova, cria os itens correspondentes aos encargos
+    ativos do contrato (ou usa valor_aluguel como fallback quando o
+    contrato não tem encargos cadastrados) e, se configurada, a despesa
+    automática de taxa de administração. Receitas já existentes nunca são
+    alteradas.
 
     Retorna: (criadas, ja_existiam)
     """
@@ -28,11 +96,14 @@ def gerar_receitas_para_contrato(contrato, data_inicio=None, data_fim=None):
         ultimo = monthrange(data_fim.year, data_fim.month)[1]
         limite_fim = date(data_fim.year, data_fim.month, ultimo)
     else:
-        limite_fim = contrato.data_fim
+        # Sem intervalo explícito: quando o contrato é por prazo
+        # indeterminado e sem encerramento real, usa a data_fim original
+        # como limite conservador (evita geração indefinida em ações em lote).
+        limite_fim = contrato.data_fim_efetiva or contrato.data_fim
 
-    # Interseção com o período do próprio contrato
+    contrato_fim = contrato.data_fim_efetiva  # None quando indeterminado e sem encerramento real
     inicio_efetivo = max(limite_inicio, contrato.data_inicio)
-    fim_efetivo = min(limite_fim, contrato.data_fim)
+    fim_efetivo = min(limite_fim, contrato_fim) if contrato_fim is not None else limite_fim
 
     if inicio_efetivo > fim_efetivo:
         return 0, 0
@@ -49,19 +120,31 @@ def gerar_receitas_para_contrato(contrato, data_inicio=None, data_fim=None):
         dia_venc = min(contrato.dia_vencimento, ultimo_dia)
         data_vencimento = date(ano, mes, dia_venc)
 
-        _, criada = ReceitaAluguel.objects.get_or_create(
+        itens_dados = _itens_para_competencia(contrato, ano, mes)
+        if itens_dados is not None:
+            valor_previsto_calc = sum((item['valor'] for item in itens_dados), Decimal('0.00'))
+        else:
+            valor_previsto_calc = contrato.valor_aluguel
+
+        receita, criada = ReceitaAluguel.objects.get_or_create(
             contrato=contrato,
             competencia_mes=mes,
             competencia_ano=ano,
             defaults={
                 'imovel': contrato.imovel,
                 'data_vencimento': data_vencimento,
-                'valor_previsto': contrato.valor_aluguel,
+                'valor_previsto': valor_previsto_calc,
                 'status': 'previsto',
             },
         )
 
         if criada:
+            if itens_dados:
+                ReceitaAluguelItem.objects.bulk_create([
+                    ReceitaAluguelItem(receita=receita, tipo=i['tipo'], descricao=i['descricao'], valor=i['valor'])
+                    for i in itens_dados
+                ])
+            _criar_despesa_administracao(contrato, receita, ano, mes)
             criadas += 1
         else:
             ja_existiam += 1
@@ -81,6 +164,11 @@ def gerar_receitas_mes(mes, ano):
     Percorre todos os contratos ativos que cobrem o mês/ano informado
     e gera as ReceitaAluguel esperadas para esse período.
 
+    Contratos por prazo indeterminado continuam sendo considerados mesmo
+    após a data_fim original, desde que não tenham data_encerramento_real
+    anterior ao mês solicitado. Contratos encerrados/rescindidos (status
+    diferente de 'ativo') nunca geram receitas.
+
     Retorna: (total_criadas, total_ja_existiam)
     """
     from patrimonio.models import Contrato
@@ -88,11 +176,15 @@ def gerar_receitas_mes(mes, ano):
     data_inicio_mes = date(ano, mes, 1)
     data_fim_mes = date(ano, mes, monthrange(ano, mes)[1])
 
-    # Contratos ativos que se sobrepõem ao mês solicitado
+    # Contratos ativos que se sobrepõem ao mês solicitado — considera
+    # prazo indeterminado (aberto) e respeita encerramento real, se houver.
     contratos = Contrato.objects.filter(
         status='ativo',
         data_inicio__lte=data_fim_mes,
-        data_fim__gte=data_inicio_mes,
+    ).filter(
+        Q(data_fim__gte=data_inicio_mes) | Q(prazo_indeterminado=True)
+    ).filter(
+        Q(data_encerramento_real__isnull=True) | Q(data_encerramento_real__gte=data_inicio_mes)
     )
 
     total_criadas = 0

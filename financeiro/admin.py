@@ -1,5 +1,11 @@
 from django.contrib import admin
-from .models import ReceitaAluguel, Despesa, FechamentoMensal
+from .models import ReceitaAluguel, ReceitaAluguelItem, Despesa, FechamentoMensal
+
+
+class ReceitaAluguelItemInline(admin.TabularInline):
+    model = ReceitaAluguelItem
+    extra = 0
+    fields = ('tipo', 'descricao', 'valor')
 
 
 @admin.register(ReceitaAluguel)
@@ -14,6 +20,7 @@ class ReceitaAluguelAdmin(admin.ModelAdmin):
     readonly_fields = ('criado_em', 'atualizado_em')
     ordering = ('-competencia_ano', '-competencia_mes')
     raw_id_fields = ('contrato',)
+    inlines = [ReceitaAluguelItemInline]
 
     def get_readonly_fields(self, request, obj=None):
         return self.readonly_fields + ('imovel',)
@@ -41,15 +48,23 @@ class ReceitaAluguelAdmin(admin.ModelAdmin):
 
 @admin.register(Despesa)
 class DespesaAdmin(admin.ModelAdmin):
-    list_display = ('descricao', 'imovel', 'categoria', 'valor', 'data_vencimento', 'status')
-    list_filter = ('status', 'categoria', 'imovel', 'competencia_ano')
+    list_display = (
+        'descricao', 'imovel', 'categoria', 'valor', 'data_vencimento',
+        'status', 'origem_automatica',
+    )
+    list_filter = ('status', 'categoria', 'imovel', 'competencia_ano', 'origem_automatica')
     search_fields = ('descricao', 'imovel__nome', 'fornecedor__nome')
     date_hierarchy = 'data_vencimento'
-    readonly_fields = ('criado_em', 'atualizado_em')
+    readonly_fields = ('criado_em', 'atualizado_em', 'origem_automatica')
     ordering = ('-data_vencimento',)
+    raw_id_fields = ('contrato', 'receita')
     fieldsets = (
         ('Identificação', {
             'fields': ('descricao', 'categoria', 'imovel', 'fornecedor')
+        }),
+        ('Vínculos', {
+            'fields': ('contrato', 'receita', 'origem_automatica'),
+            'description': 'Preenchidos automaticamente quando a despesa é gerada pelo sistema (ex.: taxa de administração).',
         }),
         ('Competência e Vencimento', {
             'fields': ('competencia_mes', 'competencia_ano', 'data_vencimento')

@@ -1,5 +1,6 @@
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
+from django.db.models import Q
 from django.http import HttpResponseRedirect
 from django.shortcuts import get_object_or_404, render
 from django.urls import reverse
@@ -94,9 +95,23 @@ def despesas_list(request):
 
 @login_required
 def relatorios(request):
+    from patrimonio.models import Pessoa, ContratoParte
+
     hoje = timezone.now().date()
+
+    imobiliarias_ids = set(
+        Contrato.objects.exclude(imobiliaria__isnull=True).values_list('imobiliaria_id', flat=True)
+    )
+    imobiliarias_ids |= set(
+        ContratoParte.objects.filter(papel='imobiliaria').values_list('pessoa_id', flat=True)
+    )
+    imobiliarias = Pessoa.objects.filter(
+        Q(pk__in=imobiliarias_ids) | Q(tipo='imobiliaria')
+    ).distinct().order_by('nome')
+
     context = {
         'imoveis': Imovel.objects.all(),
+        'imobiliarias': imobiliarias,
         'mes_atual': hoje.month,
         'ano_atual': hoje.year,
         'meses': ReceitaAluguel.MESES,
@@ -122,13 +137,18 @@ def export_imoveis(request, formato):
 def export_contratos(request, formato):
     status = request.GET.get('status', '')
     imovel_id = request.GET.get('imovel', '')
-    contratos = Contrato.objects.select_related('imovel', 'locatario')
+    imobiliaria_id = request.GET.get('imobiliaria', '')
+    contratos = Contrato.objects.select_related('imovel', 'locatario', 'fiador', 'imobiliaria')
     if status:
         contratos = contratos.filter(status=status)
     else:
         contratos = contratos.filter(status='ativo')
     if imovel_id:
         contratos = contratos.filter(imovel_id=imovel_id)
+    if imobiliaria_id:
+        contratos = contratos.filter(
+            Q(imobiliaria_id=imobiliaria_id) | Q(partes__papel='imobiliaria', partes__pessoa_id=imobiliaria_id)
+        ).distinct()
     if formato == 'csv':
         return exportar_contratos_csv(request, contratos)
     return exportar_contratos_xlsx(request, contratos)
@@ -236,8 +256,14 @@ def baixa_receitas_mes_view(request):
             elif action == 'editar':
                 valor = request.POST.get('valor_recebido', '').strip()
                 data = request.POST.get('data_recebimento', '').strip()
+                multa = request.POST.get('multa', '').strip()
+                juros = request.POST.get('juros', '').strip()
                 receita.valor_recebido = valor if valor else None
                 receita.data_recebimento = data if data else None
+                if multa:
+                    receita.multa = multa
+                if juros:
+                    receita.juros = juros
                 receita.status = request.POST.get('status', receita.status)
                 receita.observacoes = request.POST.get('observacoes', '')
                 receita.save()
@@ -252,10 +278,15 @@ def baixa_receitas_mes_view(request):
         ReceitaAluguel.objects
         .filter(competencia_mes=mes, competencia_ano=ano)
         .select_related('imovel', 'contrato__locatario')
+        .prefetch_related('itens')
         .order_by('imovel__nome')
     )
     if imovel_id:
         receitas = receitas.filter(imovel_id=imovel_id)
+
+    receitas = list(receitas)
+    for r in receitas:
+        r.sugestao = r.calcular_multa_juros(hoje) if r.esta_atrasada else None
 
     context = {
         'receitas': receitas,
@@ -318,6 +349,10 @@ def checklist_mensal_view(request):
         obrigatorio=True, documento__isnull=True
     ).count()
 
+    reajustes_pendentes = Contrato.objects.filter(
+        status='ativo', data_proximo_reajuste__isnull=False, data_proximo_reajuste__lte=hoje,
+    ).count()
+
     try:
         fechamento = FechamentoMensal.objects.get(mes=mes, ano=ano)
     except FechamentoMensal.DoesNotExist:
@@ -343,6 +378,15 @@ def checklist_mensal_view(request):
             'ok': inadimplentes == 0,
             'detalhe': f'{inadimplentes} receita(s) inadimplente(s) em aberto' if inadimplentes else 'Sem inadimplência em aberto',
             'link': None,
+        },
+        {
+            'item': 'Reajustes em dia',
+            'ok': reajustes_pendentes == 0,
+            'detalhe': (
+                f'{reajustes_pendentes} contrato(s) com reajuste pendente'
+                if reajustes_pendentes else 'Nenhum reajuste pendente'
+            ),
+            'link': reverse('contrato_list') + '?reajuste_pendente=1',
         },
         {
             'item': 'Despesas pagas',
@@ -401,6 +445,7 @@ def checklist_mensal_view(request):
         'inadimplentes': inadimplentes,
         'docs_pendentes_cnt': docs_pendentes_cnt,
         'docs_obrigatorios_pendentes': docs_obrigatorios_pendentes,
+        'reajustes_pendentes': reajustes_pendentes,
     }
     return render(request, 'financeiro/checklist_mensal.html', context)
 

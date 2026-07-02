@@ -1,18 +1,30 @@
 from django.contrib import admin, messages
-from .models import Imovel, Pessoa, Contrato, Manutencao
+from .models import (
+    Imovel, Pessoa, Contrato, Manutencao,
+    ContratoParte, EncargoContrato, ReajusteContrato,
+)
+from documentos.models import Documento
 
 
 @admin.register(Imovel)
 class ImovelAdmin(admin.ModelAdmin):
-    list_display = ('nome', 'cidade', 'estado', 'status', 'proprietario', 'valor_estimado', 'criado_em')
-    list_filter = ('status', 'estado', 'cidade')
+    list_display = (
+        'nome', 'cidade', 'estado', 'tipo_imovel', 'uso', 'status',
+        'imovel_pai', 'proprietario', 'valor_estimado', 'criado_em',
+    )
+    list_filter = ('status', 'tipo_imovel', 'uso', 'estado', 'cidade')
     search_fields = ('nome', 'endereco', 'cidade', 'matricula', 'inscricao_iptu', 'proprietario')
     date_hierarchy = 'data_aquisicao'
     readonly_fields = ('criado_em', 'atualizado_em')
     ordering = ('nome',)
+    raw_id_fields = ('imovel_pai',)
     fieldsets = (
         ('Identificação', {
-            'fields': ('nome', 'status', 'proprietario')
+            'fields': ('nome', 'status', 'proprietario', 'tipo_imovel', 'uso')
+        }),
+        ('Prédio / Unidades', {
+            'fields': ('imovel_pai', 'unidade_locavel'),
+            'description': 'Preencha "Imóvel Pai" quando este imóvel for uma unidade de um prédio maior.',
         }),
         ('Localização', {
             'fields': ('endereco', 'cidade', 'estado', 'cep')
@@ -42,7 +54,12 @@ class PessoaAdmin(admin.ModelAdmin):
     ordering = ('nome',)
     fieldsets = (
         ('Dados Principais', {
-            'fields': ('nome', 'tipo', 'cpf_cnpj')
+            'fields': ('nome', 'tipo', 'cpf_cnpj'),
+            'description': (
+                'A categoria é apenas uma referência de busca — a mesma pessoa pode '
+                'assumir papéis diferentes (locatário, fiador, imobiliária etc.) em '
+                'contratos diferentes, cadastrados em "Partes do Contrato".'
+            ),
         }),
         ('Contato', {
             'fields': ('email', 'telefone', 'endereco')
@@ -57,16 +74,52 @@ class PessoaAdmin(admin.ModelAdmin):
     )
 
 
+class ContratoParteInline(admin.TabularInline):
+    model = ContratoParte
+    extra = 1
+    fields = ('pessoa', 'papel', 'principal', 'observacoes')
+    raw_id_fields = ('pessoa',)
+
+
+class EncargoContratoInline(admin.TabularInline):
+    model = EncargoContrato
+    extra = 0
+    fields = ('tipo', 'descricao', 'valor', 'periodicidade', 'data_inicio_cobranca', 'data_fim_cobranca', 'ativo')
+
+
+class ReajusteContratoInline(admin.TabularInline):
+    model = ReajusteContrato
+    extra = 0
+    fields = ('data_reajuste', 'indice', 'percentual_aplicado', 'valor_anterior', 'valor_novo', 'aplicado', 'observacoes')
+
+
+class DocumentoContratoInline(admin.TabularInline):
+    """Permite anexar documentos (contrato assinado, aditivos, vistoria) direto no cadastro do contrato."""
+    model = Documento
+    fk_name = 'contrato'
+    fields = ('titulo', 'tipo', 'arquivo', 'data_documento')
+    extra = 0
+    verbose_name = 'Documento do Contrato'
+    verbose_name_plural = 'Documentos do Contrato'
+
+
 @admin.register(Contrato)
 class ContratoAdmin(admin.ModelAdmin):
-    list_display = ('imovel', 'locatario', 'data_inicio', 'data_fim', 'valor_aluguel', 'status', 'indice_reajuste')
-    list_filter = ('status', 'indice_reajuste', 'tipo_garantia')
-    search_fields = ('imovel__nome', 'locatario__nome', 'fiador__nome')
+    list_display = (
+        'imovel', 'locatarios_display', 'vigencia_display', 'valor_aluguel',
+        'status', 'indice_reajuste',
+    )
+    list_filter = ('status', 'indice_reajuste', 'tipo_garantia', 'prazo_indeterminado')
+    search_fields = (
+        'imovel__nome', 'locatario__nome', 'fiador__nome',
+        'partes__pessoa__nome',
+    )
     date_hierarchy = 'data_inicio'
     readonly_fields = ('criado_em', 'atualizado_em')
     ordering = ('-data_inicio',)
     raw_id_fields = ('imovel', 'locatario', 'fiador', 'imobiliaria')
     actions = ['gerar_receitas_esperadas']
+    inlines = [ContratoParteInline, EncargoContratoInline, ReajusteContratoInline, DocumentoContratoInline]
 
     @admin.action(description='Gerar receitas esperadas')
     def gerar_receitas_esperadas(self, request, queryset):
@@ -96,15 +149,30 @@ class ContratoAdmin(admin.ModelAdmin):
             )
         if not total_criadas and not total_existiam and not ignorados:
             self.message_user(request, 'Nenhuma receita para gerar.', messages.WARNING)
+
     fieldsets = (
-        ('Partes', {
-            'fields': ('imovel', 'locatario', 'fiador', 'imobiliaria')
+        ('Imóvel e Vigência', {
+            'fields': (
+                'imovel', 'data_inicio', 'data_fim', 'prazo_indeterminado',
+                'data_encerramento_real', 'status',
+            )
         }),
-        ('Vigência e Valores', {
-            'fields': ('data_inicio', 'data_fim', 'valor_aluguel', 'dia_vencimento', 'status')
+        ('Partes (campos legados)', {
+            'fields': ('locatario', 'fiador', 'imobiliaria'),
+            'description': (
+                'Mantidos por compatibilidade com contratos já cadastrados. '
+                'Para múltiplos locatários, fiadores ou representantes, use a '
+                'seção "Partes do Contrato" logo abaixo.'
+            ),
+        }),
+        ('Valores', {
+            'fields': ('valor_aluguel', 'dia_vencimento')
         }),
         ('Reajuste e Garantia', {
             'fields': ('indice_reajuste', 'data_proximo_reajuste', 'tipo_garantia', 'comissao_imobiliaria_percentual')
+        }),
+        ('Multa e Juros por Atraso', {
+            'fields': ('multa_atraso_percentual', 'juros_mora_percentual_mes', 'dias_carencia_multa')
         }),
         ('Observações', {
             'fields': ('observacoes',)
@@ -114,6 +182,29 @@ class ContratoAdmin(admin.ModelAdmin):
             'classes': ('collapse',),
         }),
     )
+
+    def save_formset(self, request, form, formset, change):
+        if formset.model is ReajusteContrato:
+            instances = formset.save(commit=False)
+            for obj in instances:
+                is_new = obj.pk is None
+                obj.save()
+                if is_new and obj.aplicado:
+                    obj.aplicar()
+            for obj in formset.deleted_objects:
+                obj.delete()
+            formset.save_m2m()
+        elif formset.model is Documento:
+            instances = formset.save(commit=False)
+            for obj in instances:
+                if not obj.imovel_id:
+                    obj.imovel_id = form.instance.imovel_id
+                obj.save()
+            for obj in formset.deleted_objects:
+                obj.delete()
+            formset.save_m2m()
+        else:
+            formset.save()
 
 
 @admin.register(Manutencao)

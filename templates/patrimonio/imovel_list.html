@@ -14,7 +14,7 @@
 <div class="card shadow-sm mb-4">
     <div class="card-body py-2">
         <form method="get" class="row g-2 align-items-end">
-            <div class="col-md-4">
+            <div class="col-md-2">
                 <label class="form-label small mb-1">Status</label>
                 <select name="status" class="form-select form-select-sm">
                     <option value="">Todos</option>
@@ -23,14 +23,32 @@
                     {% endfor %}
                 </select>
             </div>
-            <div class="col-md-4">
+            <div class="col-md-2">
+                <label class="form-label small mb-1">Tipo</label>
+                <select name="tipo_imovel" class="form-select form-select-sm">
+                    <option value="">Todos</option>
+                    {% for val, label in tipo_imovel_choices %}
+                    <option value="{{ val }}" {% if val == tipo_imovel_atual %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small mb-1">Uso</label>
+                <select name="uso" class="form-select form-select-sm">
+                    <option value="">Todos</option>
+                    {% for val, label in uso_choices %}
+                    <option value="{{ val }}" {% if val == uso_atual %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-3">
                 <label class="form-label small mb-1">Cidade</label>
                 <input type="text" name="cidade" value="{{ cidade_atual }}" class="form-control form-control-sm" placeholder="Filtrar por cidade...">
             </div>
             <div class="col-md-2">
                 <button type="submit" class="btn btn-secondary btn-sm w-100">Filtrar</button>
             </div>
-            <div class="col-md-2">
+            <div class="col-md-1">
                 <a href="{% url 'imovel_list' %}" class="btn btn-outline-secondary btn-sm w-100">Limpar</a>
             </div>
         </form>
@@ -43,6 +61,7 @@
             <thead class="table-dark">
                 <tr>
                     <th>Nome</th>
+                    <th>Tipo / Uso</th>
                     <th>Endereço</th>
                     <th>Cidade/UF</th>
                     <th>Status</th>
@@ -53,7 +72,13 @@
             <tbody>
                 {% for imovel in imoveis %}
                 <tr>
-                    <td class="fw-semibold">{{ imovel.nome }}</td>
+                    <td class="fw-semibold">
+                        {{ imovel.nome }}
+                        {% if imovel.imovel_pai %}
+                        <div class="small text-muted">unidade de {{ imovel.imovel_pai.nome }}</div>
+                        {% endif %}
+                    </td>
+                    <td class="small">{{ imovel.get_tipo_imovel_display }} / {{ imovel.get_uso_display }}</td>
                     <td>{{ imovel.endereco|truncatechars:40 }}</td>
                     <td>{{ imovel.cidade }}/{{ imovel.estado }}</td>
                     <td>
@@ -80,7 +105,7 @@
                 </tr>
                 {% empty %}
                 <tr>
-                    <td colspan="6" class="text-center text-muted py-4">Nenhum imóvel encontrado.</td>
+                    <td colspan="7" class="text-center text-muted py-4">Nenhum imóvel encontrado.</td>
                 </tr>
                 {% endfor %}
             </tbody>

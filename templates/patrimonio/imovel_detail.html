@@ -49,6 +49,18 @@
                         {% else %}<span class="badge bg-dark fs-6">Vendido</span>{% endif %}
                     </div>
                     <div class="col-sm-4">
+                        <div class="small text-muted">Tipo / Uso</div>
+                        <div>{{ imovel.get_tipo_imovel_display }} / {{ imovel.get_uso_display }}</div>
+                    </div>
+                    <div class="col-sm-4">
+                        <div class="small text-muted">Imóvel Pai</div>
+                        <div>
+                            {% if imovel.imovel_pai %}
+                            <a href="{% url 'imovel_detail' imovel.imovel_pai.pk %}">{{ imovel.imovel_pai.nome }}</a>
+                            {% else %}—{% endif %}
+                        </div>
+                    </div>
+                    <div class="col-sm-4">
                         <div class="small text-muted">Proprietário</div>
                         <div>{{ imovel.proprietario|default:"—" }}</div>
                     </div>
@@ -106,9 +118,9 @@
         <div class="card shadow-sm mt-3">
             <div class="card-header fw-semibold bg-white">Contrato Ativo</div>
             <div class="card-body small">
-                <div><strong>Locatário:</strong> {{ contrato_ativo.locatario.nome }}</div>
+                <div><strong>Locatário(s):</strong> {{ contrato_ativo.locatarios_display }}</div>
                 <div><strong>Valor:</strong> R$ {{ contrato_ativo.valor_aluguel|floatformat:2|intcomma }}</div>
-                <div><strong>Vigência:</strong> {{ contrato_ativo.data_inicio|date:"d/m/Y" }} a {{ contrato_ativo.data_fim|date:"d/m/Y" }}</div>
+                <div><strong>Vigência:</strong> {{ contrato_ativo.vigencia_display }}</div>
                 <div><strong>Vencimento:</strong> dia {{ contrato_ativo.dia_vencimento }}</div>
                 <div><strong>Índice:</strong> {{ contrato_ativo.get_indice_reajuste_display }}</div>
             </div>
@@ -145,6 +157,11 @@
             {% with pend=docs_obrigatorios|length %}
             <span class="badge bg-{% if pend > 0 %}warning text-dark{% else %}secondary{% endif %}">{{ pend }}</span>
             {% endwith %}
+        </a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link" data-bs-toggle="tab" href="#unidades-tab">
+            <i class="bi bi-diagram-3 me-1"></i>Unidades <span class="badge bg-secondary">{{ unidades|length }}</span>
         </a>
     </li>
 </ul>
@@ -315,6 +332,35 @@
                                 <a href="{% url 'admin:documentos_documentoobrigatorio_add' %}?imovel={{ imovel.pk }}">Adicionar</a>
                             </td>
                         </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="tab-pane fade" id="unidades-tab">
+        <div class="card shadow-sm">
+            <div class="card-body p-0">
+                <table class="table table-sm table-hover mb-0">
+                    <thead class="table-light">
+                        <tr><th>Nome</th><th>Tipo</th><th>Status</th><th>Locável</th><th></th></tr>
+                    </thead>
+                    <tbody>
+                        {% for u in unidades %}
+                        <tr>
+                            <td>{{ u.nome }}</td>
+                            <td>{{ u.get_tipo_imovel_display }}</td>
+                            <td><span class="badge bg-secondary">{{ u.get_status_display }}</span></td>
+                            <td>{% if u.unidade_locavel %}Sim{% else %}Não{% endif %}</td>
+                            <td>
+                                <a href="{% url 'imovel_detail' u.pk %}" class="btn btn-sm btn-outline-primary">
+                                    <i class="bi bi-eye"></i>
+                                </a>
+                            </td>
+                        </tr>
+                        {% empty %}
+                        <tr><td colspan="5" class="text-center text-muted py-3">Nenhuma unidade vinculada a este imóvel.</td></tr>
                         {% endfor %}
                     </tbody>
                 </table>

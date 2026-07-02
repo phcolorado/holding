@@ -125,7 +125,14 @@
                         <td class="small {% if r.esta_atrasada %}text-danger fw-semibold{% endif %}">
                             {{ r.data_vencimento|date:"d/m/Y" }}
                         </td>
-                        <td class="text-end small">R$ {{ r.valor_previsto|floatformat:2|intcomma }}</td>
+                        <td class="text-end small">
+                            R$ {{ r.valor_previsto|floatformat:2|intcomma }}
+                            {% if r.itens.all %}
+                            <div class="small text-muted">
+                                {% for it in r.itens.all %}{{ it.descricao|default:it.tipo }}: R$ {{ it.valor|floatformat:2 }}{% if not forloop.last %}<br>{% endif %}{% endfor %}
+                            </div>
+                            {% endif %}
+                        </td>
                         <td class="text-end small">
                             {% if r.valor_recebido %}R$ {{ r.valor_recebido|floatformat:2|intcomma }}{% else %}<span class="text-muted">—</span>{% endif %}
                         </td>
@@ -141,6 +148,11 @@
                                 {% else %}
                                     <span class="badge bg-primary">Previsto</span>
                                 {% endif %}
+                            {% endif %}
+                            {% if r.sugestao and r.sugestao.dias_atraso > 0 %}
+                            <div class="small text-danger">
+                                Sugestão: multa R$ {{ r.sugestao.multa }} + juros R$ {{ r.sugestao.juros }} ({{ r.sugestao.dias_atraso }}d)
+                            </div>
                             {% endif %}
                         </td>
                         <td class="small text-muted">{{ r.observacoes|truncatechars:30|default:"—" }}</td>
@@ -169,6 +181,10 @@
                                     data-data="{{ r.data_recebimento|date:'Y-m-d'|default:'' }}"
                                     data-status="{{ r.status }}"
                                     data-obs="{{ r.observacoes }}"
+                                    data-multa="{{ r.multa|default:'0' }}"
+                                    data-juros="{{ r.juros|default:'0' }}"
+                                    data-sugestao-multa="{% if r.sugestao %}{{ r.sugestao.multa }}{% endif %}"
+                                    data-sugestao-juros="{% if r.sugestao %}{{ r.sugestao.juros }}{% endif %}"
                                     title="Editar">
                                 <i class="bi bi-pencil"></i>
                             </button>
@@ -222,6 +238,19 @@
                             {% endfor %}
                         </select>
                     </div>
+                    <div class="row g-2 mb-1">
+                        <div class="col-6">
+                            <label class="form-label fw-semibold">Multa (R$)</label>
+                            <input type="number" step="0.01" min="0" name="multa" id="edit-multa" class="form-control">
+                        </div>
+                        <div class="col-6">
+                            <label class="form-label fw-semibold">Juros (R$)</label>
+                            <input type="number" step="0.01" min="0" name="juros" id="edit-juros" class="form-control">
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <small class="text-muted" id="edit-sugestao"></small>
+                    </div>
                     <div class="mb-3">
                         <label class="form-label fw-semibold">Observações</label>
                         <textarea name="observacoes" id="edit-obs" class="form-control" rows="2"></textarea>
@@ -257,6 +286,22 @@ if (editarModal) {
         document.getElementById('edit-data').value = btn.dataset.data;
         document.getElementById('edit-status').value = btn.dataset.status;
         document.getElementById('edit-obs').value = btn.dataset.obs;
+        document.getElementById('edit-multa').value = btn.dataset.multa;
+        document.getElementById('edit-juros').value = btn.dataset.juros;
+
+        const sugestaoEl = document.getElementById('edit-sugestao');
+        const sm = btn.dataset.sugestaoMulta, sj = btn.dataset.sugestaoJuros;
+        if (sm && sj) {
+            sugestaoEl.innerHTML = `Sugestão calculada: multa R$ ${sm} + juros R$ ${sj}. ` +
+                `<a href="#" id="usar-sugestao">Usar sugestão</a>`;
+            document.getElementById('usar-sugestao').addEventListener('click', (e) => {
+                e.preventDefault();
+                document.getElementById('edit-multa').value = sm;
+                document.getElementById('edit-juros').value = sj;
+            });
+        } else {
+            sugestaoEl.innerHTML = '';
+        }
     });
 }
 

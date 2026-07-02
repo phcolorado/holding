@@ -9,8 +9,8 @@ from django.contrib.auth.models import User
 from django.urls import reverse
 from django.utils import timezone
 
-from patrimonio.models import Imovel, Pessoa, Contrato
-from financeiro.models import ReceitaAluguel, Despesa, receitas_inadimplentes_qs
+from patrimonio.models import Imovel, Pessoa, Contrato, EncargoContrato
+from financeiro.models import ReceitaAluguel, ReceitaAluguelItem, Despesa, receitas_inadimplentes_qs
 from financeiro.services import gerar_receitas_para_contrato, gerar_receitas_mes
 
 
@@ -26,15 +26,17 @@ def _criar_base():
     return imovel, locatario
 
 
-def _criar_contrato(imovel, locatario, data_inicio, data_fim, status='ativo', dia_vencimento=10):
+def _criar_contrato(imovel, locatario, data_inicio, data_fim, status='ativo', dia_vencimento=10, **kwargs):
+    defaults = dict(valor_aluguel=Decimal('2000.00'))
+    defaults.update(kwargs)
     return Contrato.objects.create(
         imovel=imovel,
         locatario=locatario,
         data_inicio=data_inicio,
         data_fim=data_fim,
-        valor_aluguel=Decimal('2000.00'),
         dia_vencimento=dia_vencimento,
         status=status,
+        **defaults,
     )
 
 
@@ -1025,7 +1027,7 @@ class ChecklistMensalViewTest(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertIn('checklist', response.context)
-        self.assertEqual(len(response.context['checklist']), 8)
+        self.assertEqual(len(response.context['checklist']), 9)
 
     def test_post_marcar_enviado_cria_fechamento(self):
         """POST action=marcar_enviado cria FechamentoMensal e redireciona."""
@@ -1208,6 +1210,303 @@ class BaixaReceitasFiltroImovelTest(TestCase):
         )
         self.assertEqual(str(self.imovel1.pk), response.context['imovel_atual'])
         self.assertIn(self.imovel1, response.context['imoveis'])
+
+
+# ─── Geração de receitas: prazo indeterminado e encerramento real ────────────
+
+class GerarReceitasPrazoIndeterminadoTest(TestCase):
+    """Testa gerar_receitas_mes/gerar_receitas_para_contrato com prazo indeterminado."""
+
+    def setUp(self):
+        self.imovel, self.locatario = _criar_base()
+
+    def test_geracao_continua_apos_data_fim_original(self):
+        """Contrato por prazo indeterminado gera receita em mês posterior à data_fim original."""
+        contrato = _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(2024, 1, 1), data_fim=date(2024, 3, 31),
+        )
+        contrato.prazo_indeterminado = True
+        contrato.save()
+
+        # Gera explicitamente para um mês além da data_fim original (junho/2024)
+        criadas, existiam = gerar_receitas_mes(6, 2024)
+
+        self.assertEqual(criadas, 1)
+        self.assertTrue(
+            ReceitaAluguel.objects.filter(contrato=contrato, competencia_mes=6, competencia_ano=2024).exists()
+        )
+
+    def test_data_encerramento_real_limita_geracao(self):
+        """Contrato com data_encerramento_real não gera receita após o encerramento."""
+        contrato = _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(2024, 1, 1), data_fim=date(2024, 12, 31),
+        )
+        contrato.prazo_indeterminado = True
+        contrato.data_encerramento_real = date(2024, 3, 31)
+        contrato.save()
+
+        criadas, existiam = gerar_receitas_mes(6, 2024)
+
+        self.assertEqual(criadas, 0)
+        self.assertFalse(
+            ReceitaAluguel.objects.filter(contrato=contrato, competencia_mes=6, competencia_ano=2024).exists()
+        )
+
+    def test_contrato_encerrado_nao_gera_receita(self):
+        """Contrato com status diferente de ativo nunca gera receita, mesmo com prazo indeterminado."""
+        contrato = _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(2024, 1, 1), data_fim=date(2024, 3, 31),
+            status='encerrado',
+        )
+        contrato.prazo_indeterminado = True
+        contrato.save()
+
+        criadas, existiam = gerar_receitas_mes(6, 2024)
+        self.assertEqual(criadas, 0)
+        self.assertEqual(existiam, 0)
+
+
+# ─── Geração de receitas: encargos e itens ────────────────────────────────────
+
+class GerarReceitasComEncargosTest(TestCase):
+    """Testa a geração de ReceitaAluguelItem a partir de EncargoContrato."""
+
+    def setUp(self):
+        self.imovel, self.locatario = _criar_base()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(2024, 1, 1), data_fim=date(2024, 12, 31),
+            valor_aluguel=Decimal('2000.00'),
+        )
+
+    def test_receita_soma_aluguel_iptu_taxa_manutencao(self):
+        EncargoContrato.objects.create(contrato=self.contrato, tipo='aluguel', valor=Decimal('2000.00'))
+        EncargoContrato.objects.create(contrato=self.contrato, tipo='iptu', valor=Decimal('150.00'))
+        EncargoContrato.objects.create(contrato=self.contrato, tipo='taxa_manutencao', valor=Decimal('300.00'))
+
+        gerar_receitas_para_contrato(self.contrato, data_inicio=date(2024, 3, 1), data_fim=date(2024, 3, 31))
+
+        receita = ReceitaAluguel.objects.get(contrato=self.contrato, competencia_mes=3, competencia_ano=2024)
+        self.assertEqual(receita.valor_previsto, Decimal('2450.00'))
+        self.assertEqual(receita.itens.count(), 3)
+        soma_itens = sum(i.valor for i in receita.itens.all())
+        self.assertEqual(soma_itens, receita.valor_previsto)
+
+    def test_encargo_com_inicio_futuro_nao_cobrado_antes(self):
+        EncargoContrato.objects.create(contrato=self.contrato, tipo='aluguel', valor=Decimal('2000.00'))
+        EncargoContrato.objects.create(
+            contrato=self.contrato, tipo='seguro', valor=Decimal('100.00'),
+            data_inicio_cobranca=date(2024, 6, 1),
+        )
+
+        gerar_receitas_para_contrato(self.contrato, data_inicio=date(2024, 3, 1), data_fim=date(2024, 3, 31))
+        gerar_receitas_para_contrato(self.contrato, data_inicio=date(2024, 6, 1), data_fim=date(2024, 6, 30))
+
+        receita_marco = ReceitaAluguel.objects.get(contrato=self.contrato, competencia_mes=3, competencia_ano=2024)
+        receita_junho = ReceitaAluguel.objects.get(contrato=self.contrato, competencia_mes=6, competencia_ano=2024)
+        self.assertEqual(receita_marco.valor_previsto, Decimal('2000.00'))
+        self.assertEqual(receita_junho.valor_previsto, Decimal('2100.00'))
+
+    def test_encargo_encerrado_nao_cobrado_depois(self):
+        EncargoContrato.objects.create(contrato=self.contrato, tipo='aluguel', valor=Decimal('2000.00'))
+        EncargoContrato.objects.create(
+            contrato=self.contrato, tipo='seguro', valor=Decimal('100.00'),
+            data_fim_cobranca=date(2024, 3, 31),
+        )
+
+        gerar_receitas_para_contrato(self.contrato, data_inicio=date(2024, 3, 1), data_fim=date(2024, 3, 31))
+        gerar_receitas_para_contrato(self.contrato, data_inicio=date(2024, 4, 1), data_fim=date(2024, 4, 30))
+
+        receita_marco = ReceitaAluguel.objects.get(contrato=self.contrato, competencia_mes=3, competencia_ano=2024)
+        receita_abril = ReceitaAluguel.objects.get(contrato=self.contrato, competencia_mes=4, competencia_ano=2024)
+        self.assertEqual(receita_marco.valor_previsto, Decimal('2100.00'))
+        self.assertEqual(receita_abril.valor_previsto, Decimal('2000.00'))
+
+    def test_fallback_valor_aluguel_sem_encargos(self):
+        """Contrato sem nenhum EncargoContrato continua usando valor_aluguel, sem itens."""
+        gerar_receitas_para_contrato(self.contrato, data_inicio=date(2024, 3, 1), data_fim=date(2024, 3, 31))
+
+        receita = ReceitaAluguel.objects.get(contrato=self.contrato, competencia_mes=3, competencia_ano=2024)
+        self.assertEqual(receita.valor_previsto, self.contrato.valor_aluguel)
+        self.assertEqual(receita.itens.count(), 0)
+
+    def test_receitas_ja_existentes_nao_sao_alteradas(self):
+        """Gerar novamente não sobrescreve receita/itens já existentes."""
+        EncargoContrato.objects.create(contrato=self.contrato, tipo='aluguel', valor=Decimal('2000.00'))
+        gerar_receitas_para_contrato(self.contrato, data_inicio=date(2024, 3, 1), data_fim=date(2024, 3, 31))
+
+        receita = ReceitaAluguel.objects.get(contrato=self.contrato, competencia_mes=3, competencia_ano=2024)
+        receita.valor_recebido = Decimal('2000.00')
+        receita.status = 'recebido'
+        receita.save()
+
+        # Adiciona um novo encargo depois — não deve afetar a receita já criada
+        EncargoContrato.objects.create(contrato=self.contrato, tipo='iptu', valor=Decimal('150.00'))
+        criadas, existiam = gerar_receitas_para_contrato(
+            self.contrato, data_inicio=date(2024, 3, 1), data_fim=date(2024, 3, 31)
+        )
+
+        self.assertEqual(criadas, 0)
+        self.assertEqual(existiam, 1)
+        receita.refresh_from_db()
+        self.assertEqual(receita.valor_previsto, Decimal('2000.00'))
+        self.assertEqual(receita.status, 'recebido')
+        # O novo encargo IPTU (criado depois) não deve retroagir sobre a receita já existente
+        self.assertEqual(receita.itens.count(), 1)
+
+
+# ─── Taxa de administração da imobiliária (despesa automática) ────────────────
+
+class TaxaAdministracaoDespesaTest(TestCase):
+    def setUp(self):
+        self.imovel, self.locatario = _criar_base()
+
+    def test_contrato_com_taxa_gera_despesa_automatica(self):
+        contrato = _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(2024, 1, 1), data_fim=date(2024, 12, 31),
+            valor_aluguel=Decimal('2000.00'),
+        )
+        contrato.comissao_imobiliaria_percentual = Decimal('10.00')
+        contrato.save()
+
+        gerar_receitas_para_contrato(contrato, data_inicio=date(2024, 3, 1), data_fim=date(2024, 3, 31))
+
+        despesa = Despesa.objects.get(contrato=contrato, origem_automatica=True, categoria='comissao_imobiliaria')
+        self.assertEqual(despesa.valor, Decimal('200.00'))
+
+    def test_contrato_sem_taxa_nao_gera_despesa(self):
+        contrato = _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(2024, 1, 1), data_fim=date(2024, 12, 31),
+        )
+        gerar_receitas_para_contrato(contrato, data_inicio=date(2024, 3, 1), data_fim=date(2024, 3, 31))
+        self.assertFalse(Despesa.objects.filter(contrato=contrato, origem_automatica=True).exists())
+
+    def test_gerar_duas_vezes_nao_duplica_despesa(self):
+        contrato = _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(2024, 1, 1), data_fim=date(2024, 12, 31),
+        )
+        contrato.comissao_imobiliaria_percentual = Decimal('8.00')
+        contrato.save()
+
+        gerar_receitas_para_contrato(contrato, data_inicio=date(2024, 3, 1), data_fim=date(2024, 3, 31))
+        gerar_receitas_para_contrato(contrato, data_inicio=date(2024, 3, 1), data_fim=date(2024, 3, 31))
+
+        self.assertEqual(
+            Despesa.objects.filter(contrato=contrato, origem_automatica=True).count(), 1
+        )
+
+    def test_taxa_calculada_sobre_encargo_aluguel_nao_sobre_total(self):
+        contrato = _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(2024, 1, 1), data_fim=date(2024, 12, 31),
+            valor_aluguel=Decimal('2000.00'),
+        )
+        contrato.comissao_imobiliaria_percentual = Decimal('10.00')
+        contrato.save()
+        EncargoContrato.objects.create(contrato=contrato, tipo='aluguel', valor=Decimal('2000.00'))
+        EncargoContrato.objects.create(contrato=contrato, tipo='iptu', valor=Decimal('500.00'))
+
+        gerar_receitas_para_contrato(contrato, data_inicio=date(2024, 3, 1), data_fim=date(2024, 3, 31))
+
+        despesa = Despesa.objects.get(contrato=contrato, origem_automatica=True)
+        # 10% sobre 2000 (aluguel) — não sobre 2500 (aluguel + IPTU)
+        self.assertEqual(despesa.valor, Decimal('200.00'))
+
+
+# ─── Multa e juros por atraso ──────────────────────────────────────────────────
+
+class CalcularMultaJurosTest(TestCase):
+    def setUp(self):
+        self.imovel, self.locatario = _criar_base()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
+        )
+        self.contrato.multa_atraso_percentual = Decimal('2.00')
+        self.contrato.juros_mora_percentual_mes = Decimal('1.00')
+        self.contrato.dias_carencia_multa = 3
+        self.contrato.save()
+
+    def _receita(self, vencimento):
+        return ReceitaAluguel(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=1, competencia_ano=2024,
+            data_vencimento=vencimento, valor_previsto=Decimal('1000.00'),
+            status='previsto',
+        )
+
+    def test_sem_atraso_multa_juros_zero(self):
+        receita = self._receita(date.today() + timedelta(days=1))
+        resultado = receita.calcular_multa_juros(date.today())
+        self.assertEqual(resultado['multa'], Decimal('0.00'))
+        self.assertEqual(resultado['juros'], Decimal('0.00'))
+
+    def test_atraso_alem_da_carencia_gera_multa_e_juros(self):
+        vencimento = date(2024, 1, 1)
+        data_recebimento = date(2024, 1, 15)  # 14 dias de atraso, carência de 3
+        receita = self._receita(vencimento)
+        resultado = receita.calcular_multa_juros(data_recebimento)
+
+        self.assertEqual(resultado['dias_atraso'], 14)
+        self.assertEqual(resultado['multa'], Decimal('20.00'))  # 2% de 1000
+        # juros: 1000 * 1% / 30 * 14 = 4.67
+        self.assertEqual(resultado['juros'], Decimal('4.67'))
+
+    def test_atraso_dentro_da_carencia_nao_gera_multa(self):
+        vencimento = date(2024, 1, 1)
+        data_recebimento = date(2024, 1, 3)  # 2 dias de atraso, carência de 3
+        receita = self._receita(vencimento)
+        resultado = receita.calcular_multa_juros(data_recebimento)
+        self.assertEqual(resultado['multa'], Decimal('0.00'))
+        self.assertEqual(resultado['juros'], Decimal('0.00'))
+
+    def test_calculo_nao_altera_a_receita(self):
+        """calcular_multa_juros apenas retorna a sugestão — nunca salva no banco."""
+        receita = ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=1, competencia_ano=2024,
+            data_vencimento=date(2024, 1, 1), valor_previsto=Decimal('1000.00'),
+            multa=Decimal('5.00'), juros=Decimal('3.00'), status='previsto',
+        )
+        receita.calcular_multa_juros(date(2024, 1, 20))
+        receita.refresh_from_db()
+        self.assertEqual(receita.multa, Decimal('5.00'))
+        self.assertEqual(receita.juros, Decimal('3.00'))
+
+
+# ─── Checklist: etapa de reajustes pendentes ──────────────────────────────────
+
+class ChecklistReajustesPendentesTest(TestCase):
+    def setUp(self):
+        self.client = Client()
+        User.objects.create_user('chk_reaj_user', password='pass')
+        self.client.login(username='chk_reaj_user', password='pass')
+        self.imovel, self.locatario = _criar_base()
+
+    def test_etapa_reajustes_nao_ok_quando_pendente(self):
+        contrato = _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
+        )
+        contrato.data_proximo_reajuste = date.today() - timedelta(days=1)
+        contrato.save()
+
+        response = self.client.get(reverse('checklist_mensal'))
+        checklist = response.context['checklist']
+        etapa = next(e for e in checklist if e['item'] == 'Reajustes em dia')
+        self.assertFalse(etapa['ok'])
+
+    def test_etapa_reajustes_ok_quando_sem_pendencia(self):
+        response = self.client.get(reverse('checklist_mensal'))
+        checklist = response.context['checklist']
+        etapa = next(e for e in checklist if e['item'] == 'Reajustes em dia')
+        self.assertTrue(etapa['ok'])
 
 
 # ─── Teste de migrations pendentes ────────────────────────────────────────────

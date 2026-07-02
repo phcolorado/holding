@@ -51,6 +51,7 @@ def _response_csv(nome_arquivo):
 CABECALHO_IMOVEIS = [
     'ID', 'Nome', 'Endereço', 'Cidade', 'Estado', 'CEP',
     'Matrícula', 'Inscrição IPTU', 'Proprietário', 'Status',
+    'Tipo', 'Uso', 'Imóvel Pai',
     'Data Aquisição', 'Valor Aquisição', 'Valor Estimado',
 ]
 
@@ -61,6 +62,8 @@ def _linhas_imoveis(imoveis):
             i.pk, i.nome, i.endereco, i.cidade, i.estado, i.cep,
             i.matricula, i.inscricao_iptu, i.proprietario,
             i.get_status_display(),
+            i.get_tipo_imovel_display(), i.get_uso_display(),
+            i.imovel_pai.nome if i.imovel_pai else '',
             i.data_aquisicao, i.valor_aquisicao, i.valor_estimado,
         ]
 
@@ -92,7 +95,8 @@ def exportar_imoveis_xlsx(request, imoveis):
 # ─── contratos ─────────────────────────────────────────────────────────────────
 
 CABECALHO_CONTRATOS = [
-    'ID', 'Imóvel', 'Locatário', 'Data Início', 'Data Fim',
+    'ID', 'Imóvel', 'Locatário(s)', 'Fiador(es)', 'Imobiliária',
+    'Data Início', 'Data Fim', 'Prazo Indeterminado',
     'Valor Aluguel', 'Dia Vencimento', 'Índice', 'Próximo Reajuste',
     'Garantia', 'Status',
 ]
@@ -100,9 +104,12 @@ CABECALHO_CONTRATOS = [
 
 def _linhas_contratos(contratos):
     for c in contratos:
+        imobiliaria = c.get_imobiliaria_principal()
         yield [
-            c.pk, c.imovel.nome, c.locatario.nome,
-            c.data_inicio, c.data_fim, c.valor_aluguel,
+            c.pk, c.imovel.nome, c.locatarios_display, c.fiadores_display,
+            imobiliaria.nome if imobiliaria else '',
+            c.data_inicio, c.data_fim, 'Sim' if c.prazo_indeterminado else 'Não',
+            c.valor_aluguel,
             c.dia_vencimento, c.get_indice_reajuste_display(),
             c.data_proximo_reajuste, c.get_tipo_garantia_display(),
             c.get_status_display(),

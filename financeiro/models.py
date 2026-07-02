@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
@@ -77,6 +79,40 @@ class ReceitaAluguel(models.Model):
             self.status = 'atrasado'
             self.save(update_fields=['status'])
 
+    def calcular_multa_juros(self, data_recebimento=None):
+        """
+        Sugestão de multa/juros por atraso com base nas regras do contrato.
+        Apenas calcula e retorna — nunca altera o registro automaticamente.
+        """
+        data_ref = data_recebimento or timezone.now().date()
+        contrato = self.contrato
+        dias_atraso = (data_ref - self.data_vencimento).days
+
+        if dias_atraso <= contrato.dias_carencia_multa:
+            return {'multa': Decimal('0.00'), 'juros': Decimal('0.00'), 'dias_atraso': 0}
+
+        base = self.valor_previsto
+        multa = (base * contrato.multa_atraso_percentual / Decimal('100')).quantize(Decimal('0.01'))
+        juros = (
+            base * contrato.juros_mora_percentual_mes / Decimal('100') / Decimal('30') * dias_atraso
+        ).quantize(Decimal('0.01'))
+        return {'multa': multa, 'juros': juros, 'dias_atraso': dias_atraso}
+
+
+class ReceitaAluguelItem(models.Model):
+    receita = models.ForeignKey(ReceitaAluguel, on_delete=models.CASCADE, related_name='itens', verbose_name='Receita')
+    tipo = models.CharField('Tipo', max_length=30)
+    descricao = models.CharField('Descrição', max_length=200, blank=True)
+    valor = models.DecimalField('Valor (R$)', max_digits=12, decimal_places=2)
+
+    class Meta:
+        verbose_name = 'Item da Receita'
+        verbose_name_plural = 'Itens da Receita'
+        ordering = ['id']
+
+    def __str__(self):
+        return f'{self.descricao or self.tipo} — R$ {self.valor}'
+
 
 class Despesa(models.Model):
     CATEGORIA_CHOICES = [
@@ -107,6 +143,18 @@ class Despesa(models.Model):
     ]
 
     imovel = models.ForeignKey(Imovel, on_delete=models.PROTECT, null=True, blank=True, verbose_name='Imóvel')
+    contrato = models.ForeignKey(
+        Contrato, on_delete=models.SET_NULL, null=True, blank=True, verbose_name='Contrato',
+        related_name='despesas',
+    )
+    receita = models.ForeignKey(
+        ReceitaAluguel, on_delete=models.SET_NULL, null=True, blank=True, verbose_name='Receita de Aluguel Vinculada',
+        related_name='despesas_vinculadas',
+    )
+    origem_automatica = models.BooleanField(
+        'Gerada Automaticamente', default=False,
+        help_text='Marcado pelo sistema quando a despesa é criada automaticamente (ex.: taxa de administração).',
+    )
     categoria = models.CharField('Categoria', max_length=30, choices=CATEGORIA_CHOICES, default='outro')
     fornecedor = models.ForeignKey(
         Pessoa, on_delete=models.SET_NULL, null=True, blank=True, verbose_name='Fornecedor / Credor'
