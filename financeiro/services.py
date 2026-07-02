@@ -86,6 +86,8 @@ def gerar_receitas_para_contrato(contrato, data_inicio=None, data_fim=None):
     if contrato.status != 'ativo':
         return 0, 0
 
+    contrato.garantir_encargo_aluguel()
+
     # Normaliza os limites para o primeiro/último dia do mês informado
     if data_inicio:
         limite_inicio = date(data_inicio.year, data_inicio.month, 1)
@@ -159,6 +161,32 @@ def gerar_receitas_para_contrato(contrato, data_inicio=None, data_fim=None):
     return criadas, ja_existiam
 
 
+def contratos_para_geracao_mes(mes, ano):
+    """
+    Retorna o queryset de contratos aptos a gerar receita no mês/ano
+    informado: ativos, iniciados até o fim do mês, e com vigência cobrindo
+    o mês — seja por data_fim (contrato determinado) ou por prazo
+    indeterminado (considerado aberto). Contratos com data_encerramento_real
+    anterior ao mês são excluídos, independentemente de prazo_indeterminado.
+
+    Usada tanto para gerar as receitas quanto para exibir a contagem de
+    contratos aptos na tela "Gerar Receitas".
+    """
+    from patrimonio.models import Contrato
+
+    data_inicio_mes = date(ano, mes, 1)
+    data_fim_mes = date(ano, mes, monthrange(ano, mes)[1])
+
+    return Contrato.objects.filter(
+        status='ativo',
+        data_inicio__lte=data_fim_mes,
+    ).filter(
+        Q(data_fim__gte=data_inicio_mes) | Q(prazo_indeterminado=True)
+    ).filter(
+        Q(data_encerramento_real__isnull=True) | Q(data_encerramento_real__gte=data_inicio_mes)
+    )
+
+
 def gerar_receitas_mes(mes, ano):
     """
     Percorre todos os contratos ativos que cobrem o mês/ano informado
@@ -171,21 +199,10 @@ def gerar_receitas_mes(mes, ano):
 
     Retorna: (total_criadas, total_ja_existiam)
     """
-    from patrimonio.models import Contrato
-
     data_inicio_mes = date(ano, mes, 1)
     data_fim_mes = date(ano, mes, monthrange(ano, mes)[1])
 
-    # Contratos ativos que se sobrepõem ao mês solicitado — considera
-    # prazo indeterminado (aberto) e respeita encerramento real, se houver.
-    contratos = Contrato.objects.filter(
-        status='ativo',
-        data_inicio__lte=data_fim_mes,
-    ).filter(
-        Q(data_fim__gte=data_inicio_mes) | Q(prazo_indeterminado=True)
-    ).filter(
-        Q(data_encerramento_real__isnull=True) | Q(data_encerramento_real__gte=data_inicio_mes)
-    )
+    contratos = contratos_para_geracao_mes(mes, ano)
 
     total_criadas = 0
     total_existiam = 0

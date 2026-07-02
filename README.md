@@ -275,6 +275,8 @@ Cada encargo tem:
 
 Ao gerar a receita mensal, o `valor_previsto` passa a ser a **soma dos encargos ativos aplicáveis** naquele mês, e cada encargo gera um item em `ReceitaAluguelItem` (visível na tela de baixa e no Admin). Contratos sem nenhum encargo cadastrado continuam usando `valor_aluguel` diretamente, sem itens — nenhuma migração de dados é necessária para contratos já existentes (a migração automática já criou o encargo "Aluguel" a partir do valor vigente).
 
+**Encargo de aluguel sempre garantido:** ao salvar um contrato pelo Admin, ou ao gerar receitas (via web, Admin ou action "Gerar receitas esperadas"), o sistema chama automaticamente `Contrato.garantir_encargo_aluguel()` — se o contrato ativo não tiver nenhum encargo de aluguel ativo, um é criado com o valor de `valor_aluguel`. Isso evita que um contrato com apenas IPTU/condomínio cadastrado gere uma receita sem o aluguel. Um encargo de aluguel já existente (automático ou cadastrado manualmente com valor diferente) nunca é sobrescrito. Há também a action "Garantir encargo de aluguel" na listagem de Contratos do Admin, para aplicar isso em lote a contratos já cadastrados.
+
 ## Taxa de Administração da Imobiliária
 
 O campo `comissao_imobiliaria_percentual` do contrato ("Taxa de Administração Imobiliária (%)") gera, ao gerar a receita mensal, uma **despesa automática** (categoria "Comissão Imobiliária", `origem_automatica = True`) vinculada ao contrato e à receita do mês — o valor é sempre calculado sobre o encargo de aluguel (nunca sobre IPTU/condomínio). A receita continua representando o valor bruto devido pelo inquilino; a taxa nunca é abatida diretamente do aluguel.
@@ -304,6 +306,13 @@ Cada imóvel tem `tipo_imovel` (apartamento, casa, sala comercial, prédio, anda
 ## Documentos do Contrato
 
 Documentos relacionados diretamente a um contrato (contrato assinado, aditivos, laudo de vistoria) podem ser anexados na seção **"Documentos do Contrato"** (inline no Admin, dentro do cadastro do contrato) — o campo `imovel` do documento é preenchido automaticamente com o imóvel do contrato.
+
+---
+
+## Limitações Conhecidas
+
+- **Receitas já geradas não são recalculadas automaticamente.** Se você adicionar, remover ou alterar encargos (`EncargoContrato`) ou a taxa de administração de um contrato **depois** que a receita do mês já foi gerada, essa receita e seus itens **não são atualizados retroativamente** — o novo valor só vale a partir da próxima geração (próximo mês, ou meses futuros ainda não gerados). Isso é intencional, para preservar lançamentos já revisados/conferidos na baixa de aluguéis. Se for necessário corrigir uma receita já gerada, edite-a manualmente (ou seus itens) pelo Admin; não há, nesta fase, uma action de recálculo em massa.
+- A mesma lógica vale para reajustes: `ReajusteContrato.aplicar()` nunca altera receitas já existentes, mesmo as futuras já geradas para o mês seguinte — apenas receitas geradas **depois** do reajuste usam o novo valor.
 
 ---
 

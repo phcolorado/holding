@@ -576,3 +576,199 @@ class DocumentoContratoInlineTest(TestCase):
             arquivo=SimpleUploadedFile('aditivo.pdf', b'x'),
         )
         self.assertEqual(contrato.documento_set.count(), 1)
+
+
+# ─── garantir_encargo_aluguel ──────────────────────────────────────────────────
+
+class GarantirEncargoAluguelTest(TestCase):
+    def setUp(self):
+        self.imovel = _criar_imovel()
+        self.locatario = _criar_pessoa('Locatário')
+
+    def test_contrato_sem_encargos_cria_encargo_aluguel(self):
+        contrato = _criar_contrato(
+            self.imovel, self.locatario, date(2024, 1, 1), date(2024, 12, 31),
+            valor_aluguel=Decimal('1100.00'),
+        )
+        encargo = contrato.garantir_encargo_aluguel()
+        self.assertIsNotNone(encargo)
+        self.assertEqual(encargo.tipo, 'aluguel')
+        self.assertEqual(encargo.valor, Decimal('1100.00'))
+        self.assertEqual(encargo.periodicidade, 'mensal')
+        self.assertEqual(encargo.data_inicio_cobranca, contrato.data_inicio)
+
+    def test_contrato_com_encargo_aluguel_nao_duplica(self):
+        contrato = _criar_contrato(self.imovel, self.locatario, date(2024, 1, 1), date(2024, 12, 31))
+        contrato.garantir_encargo_aluguel()
+        resultado_segunda_chamada = contrato.garantir_encargo_aluguel()
+        self.assertIsNone(resultado_segunda_chamada)
+        self.assertEqual(EncargoContrato.objects.filter(contrato=contrato, tipo='aluguel').count(), 1)
+
+    def test_encargo_aluguel_manual_nao_e_sobrescrito(self):
+        contrato = _criar_contrato(
+            self.imovel, self.locatario, date(2024, 1, 1), date(2024, 12, 31),
+            valor_aluguel=Decimal('2000.00'),
+        )
+        encargo_manual = EncargoContrato.objects.create(
+            contrato=contrato, tipo='aluguel', descricao='Aluguel negociado',
+            valor=Decimal('1850.00'),
+        )
+        resultado = contrato.garantir_encargo_aluguel()
+        self.assertIsNone(resultado)
+        encargo_manual.refresh_from_db()
+        self.assertEqual(encargo_manual.valor, Decimal('1850.00'))
+        self.assertEqual(encargo_manual.descricao, 'Aluguel negociado')
+
+    def test_contrato_encerrado_nao_cria_encargo(self):
+        contrato = _criar_contrato(
+            self.imovel, self.locatario, date(2024, 1, 1), date(2024, 12, 31),
+            status='encerrado',
+        )
+        resultado = contrato.garantir_encargo_aluguel()
+        self.assertIsNone(resultado)
+        self.assertFalse(EncargoContrato.objects.filter(contrato=contrato, tipo='aluguel').exists())
+
+    def test_admin_save_model_garante_encargo_aluguel(self):
+        from django.contrib import admin as django_admin
+        from patrimonio.admin import ContratoAdmin
+
+        contrato = _criar_contrato(self.imovel, self.locatario, date(2024, 1, 1), date(2024, 12, 31))
+        admin_instance = ContratoAdmin(Contrato, django_admin.site)
+        admin_instance.save_model(request=None, obj=contrato, form=None, change=False)
+
+        self.assertTrue(contrato.encargos.filter(tipo='aluguel', ativo=True).exists())
+
+    def test_admin_action_garante_encargo_aluguel(self):
+        from django.contrib import admin as django_admin
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+        from patrimonio.admin import ContratoAdmin
+
+        contrato = _criar_contrato(self.imovel, self.locatario, date(2024, 1, 1), date(2024, 12, 31))
+        admin_instance = ContratoAdmin(Contrato, django_admin.site)
+        request = RequestFactory().get('/admin/patrimonio/contrato/')
+        request.session = {}
+        request._messages = FallbackStorage(request)
+
+        admin_instance.garantir_encargo_aluguel_action(request, Contrato.objects.filter(pk=contrato.pk))
+
+        self.assertTrue(contrato.encargos.filter(tipo='aluguel', ativo=True).exists())
+
+
+# ─── ContratoAdmin.save_formset: transição de aplicado em ReajusteContrato ────
+
+class _FakeReajusteFormSet:
+    def __init__(self, instances):
+        self.model = ReajusteContrato
+        self._instances = instances
+        self.deleted_objects = []
+
+    def save(self, commit=False):
+        return self._instances
+
+    def save_m2m(self):
+        pass
+
+
+class ReajusteAdminTransicaoTest(TestCase):
+    """Testa ContratoAdmin.save_formset para ReajusteContrato via formset simplificado."""
+
+    def setUp(self):
+        self.imovel = _criar_imovel()
+        self.locatario = _criar_pessoa('Locatário')
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, date(2024, 1, 1), date(2025, 12, 31),
+            valor_aluguel=Decimal('2000.00'), indice_reajuste='ipca',
+            data_proximo_reajuste=date(2025, 1, 1),
+        )
+        EncargoContrato.objects.create(contrato=self.contrato, tipo='aluguel', valor=Decimal('2000.00'))
+
+    def _save_formset(self, reajuste):
+        from django.contrib import admin as django_admin
+        from patrimonio.admin import ContratoAdmin
+
+        admin_instance = ContratoAdmin(Contrato, django_admin.site)
+        formset = _FakeReajusteFormSet([reajuste])
+        form = DocumentoContratoInlineTest._FakeForm(self.contrato)
+        admin_instance.save_formset(request=None, form=form, formset=formset, change=True)
+
+    def test_reajuste_novo_aplicado_true_aplica(self):
+        reajuste = ReajusteContrato(
+            contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'), aplicado=True,
+        )
+        self._save_formset(reajuste)
+        self.contrato.refresh_from_db()
+        self.assertEqual(self.contrato.valor_aluguel, Decimal('2150.00'))
+
+    def test_reajuste_existente_de_false_para_true_aplica(self):
+        reajuste = ReajusteContrato.objects.create(
+            contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'), aplicado=False,
+        )
+        reajuste.aplicado = True  # simula edição no admin, ainda não salva
+        self._save_formset(reajuste)
+
+        self.contrato.refresh_from_db()
+        self.assertEqual(self.contrato.valor_aluguel, Decimal('2150.00'))
+        self.assertEqual(self.contrato.data_proximo_reajuste, date(2026, 1, 1))
+
+        encargo = self.contrato.encargos.get(tipo='aluguel')
+        self.assertEqual(encargo.valor, Decimal('2150.00'))
+
+    def test_reajuste_ja_aplicado_nao_reaplica(self):
+        reajuste = ReajusteContrato.objects.create(
+            contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'), aplicado=True,
+        )
+        # Primeira aplicação real (fora do save_formset, simulando estado já processado)
+        reajuste.aplicar()
+        self.contrato.refresh_from_db()
+        self.assertEqual(self.contrato.valor_aluguel, Decimal('2150.00'))
+
+        # Um segundo reajuste é registrado; ao salvar o formset novamente, o
+        # primeiro reajuste (já aplicado=True antes e depois) não deve reaplicar.
+        reajuste.observacoes = 'apenas edição de observação'
+        self._save_formset(reajuste)
+
+        self.contrato.refresh_from_db()
+        self.assertEqual(self.contrato.valor_aluguel, Decimal('2150.00'))
+        self.assertEqual(self.contrato.data_proximo_reajuste, date(2026, 1, 1))
+
+    def test_reajuste_novo_aplicado_false_nao_aplica(self):
+        reajuste = ReajusteContrato(
+            contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'), aplicado=False,
+        )
+        self._save_formset(reajuste)
+        self.contrato.refresh_from_db()
+        self.assertEqual(self.contrato.valor_aluguel, Decimal('2000.00'))
+
+
+# ─── Dashboard: contratos vencendo respeita prazo indeterminado ───────────────
+
+class DashboardContratosVencendoTest(TestCase):
+    def setUp(self):
+        self.client = Client()
+        User.objects.create_user('dash_vencendo_user', password='pass')
+        self.client.login(username='dash_vencendo_user', password='pass')
+        self.imovel1 = _criar_imovel('Imóvel Determinado')
+        self.imovel2 = _criar_imovel('Imóvel Indeterminado')
+        self.locatario = _criar_pessoa('Locatário')
+
+    def test_contrato_determinado_com_data_fim_proxima_aparece(self):
+        contrato = _criar_contrato(
+            self.imovel1, self.locatario, date(2020, 1, 1),
+            date.today() + timedelta(days=30),
+        )
+        response = self.client.get(reverse('dashboard'))
+        self.assertIn(contrato, list(response.context['contratos_vencendo']))
+
+    def test_contrato_prazo_indeterminado_nao_aparece_vencendo(self):
+        contrato = _criar_contrato(
+            self.imovel2, self.locatario, date(2020, 1, 1),
+            date.today() + timedelta(days=30),
+            prazo_indeterminado=True,
+        )
+        response = self.client.get(reverse('dashboard'))
+        self.assertNotIn(contrato, list(response.context['contratos_vencendo']))

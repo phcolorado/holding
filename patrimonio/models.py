@@ -296,6 +296,27 @@ class Contrato(models.Model):
         nomes = [p.nome for p in self.get_fiadores()]
         return ', '.join(nomes) if nomes else '—'
 
+    def garantir_encargo_aluguel(self):
+        """
+        Garante que o contrato ativo tenha um EncargoContrato ativo do tipo
+        aluguel coerente com valor_aluguel. Idempotente — nunca duplica nem
+        sobrescreve um encargo de aluguel já existente (manual ou automático).
+        Retorna o encargo criado, ou None se não criou nenhum.
+        """
+        if self.status != 'ativo':
+            return None
+        if self.encargos.filter(tipo='aluguel', ativo=True).exists():
+            return None
+        return EncargoContrato.objects.create(
+            contrato=self,
+            tipo='aluguel',
+            descricao='Aluguel',
+            valor=self.valor_aluguel,
+            periodicidade='mensal',
+            ativo=True,
+            data_inicio_cobranca=self.data_inicio,
+        )
+
 
 class ContratoParte(models.Model):
     PAPEL_CHOICES = [

@@ -118,8 +118,23 @@ class ContratoAdmin(admin.ModelAdmin):
     readonly_fields = ('criado_em', 'atualizado_em')
     ordering = ('-data_inicio',)
     raw_id_fields = ('imovel', 'locatario', 'fiador', 'imobiliaria')
-    actions = ['gerar_receitas_esperadas']
+    actions = ['gerar_receitas_esperadas', 'garantir_encargo_aluguel_action']
     inlines = [ContratoParteInline, EncargoContratoInline, ReajusteContratoInline, DocumentoContratoInline]
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        obj.garantir_encargo_aluguel()
+
+    @admin.action(description='Garantir encargo de aluguel')
+    def garantir_encargo_aluguel_action(self, request, queryset):
+        total = 0
+        for contrato in queryset:
+            if contrato.garantir_encargo_aluguel() is not None:
+                total += 1
+        if total:
+            self.message_user(request, f'{total} encargo(s) de aluguel criado(s).', messages.SUCCESS)
+        else:
+            self.message_user(request, 'Nenhum encargo de aluguel precisou ser criado.', messages.WARNING)
 
     @admin.action(description='Gerar receitas esperadas')
     def gerar_receitas_esperadas(self, request, queryset):
@@ -187,9 +202,16 @@ class ContratoAdmin(admin.ModelAdmin):
         if formset.model is ReajusteContrato:
             instances = formset.save(commit=False)
             for obj in instances:
-                is_new = obj.pk is None
+                aplicado_anterior = False
+                if obj.pk is not None:
+                    aplicado_anterior = ReajusteContrato.objects.filter(pk=obj.pk).values_list(
+                        'aplicado', flat=True
+                    ).first() or False
                 obj.save()
-                if is_new and obj.aplicado:
+                # Aplica quando o reajuste é novo com aplicado=True, ou quando
+                # um reajuste existente muda de aplicado=False para True.
+                # Um reajuste já aplicado nunca é reaplicado.
+                if obj.aplicado and not aplicado_anterior:
                     obj.aplicar()
             for obj in formset.deleted_objects:
                 obj.delete()

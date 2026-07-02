@@ -30,8 +30,11 @@ def dashboard(request):
 
     despesas_abertas = Despesa.objects.filter(status__in=('prevista', 'atrasada')).count()
 
+    # Contratos por prazo indeterminado (sem encerramento real) não têm uma
+    # data_fim efetiva próxima — não devem aparecer como "vencendo".
     contratos_vencendo = Contrato.objects.filter(
         status='ativo',
+        prazo_indeterminado=False,
         data_fim__gte=hoje,
         data_fim__lte=prazo_90,
     ).order_by('data_fim')

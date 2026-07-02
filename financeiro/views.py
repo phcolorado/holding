@@ -456,8 +456,7 @@ def gerar_receitas_mes_view(request):
     GET: exibe formulário de confirmação com seleção de mês/ano.
     POST: executa a geração e redireciona para a lista de receitas do período.
     """
-    from .services import gerar_receitas_mes
-    from calendar import monthrange
+    from .services import gerar_receitas_mes, contratos_para_geracao_mes
 
     hoje = timezone.now().date()
 
@@ -480,13 +479,7 @@ def gerar_receitas_mes_view(request):
         return HttpResponseRedirect(f"{reverse('receitas_list')}?mes={mes}&ano={ano}")
 
     # GET — monta contexto para o formulário de confirmação
-    data_inicio_mes = hoje.replace(year=ano, month=mes, day=1)
-    data_fim_mes = hoje.replace(year=ano, month=mes, day=monthrange(ano, mes)[1])
-    contratos_ativos = Contrato.objects.filter(
-        status='ativo',
-        data_inicio__lte=data_fim_mes,
-        data_fim__gte=data_inicio_mes,
-    ).count()
+    contratos_ativos = contratos_para_geracao_mes(mes, ano).count()
 
     context = {
         'mes_atual': mes,

@@ -11,7 +11,7 @@ from django.utils import timezone
 
 from patrimonio.models import Imovel, Pessoa, Contrato, EncargoContrato
 from financeiro.models import ReceitaAluguel, ReceitaAluguelItem, Despesa, receitas_inadimplentes_qs
-from financeiro.services import gerar_receitas_para_contrato, gerar_receitas_mes
+from financeiro.services import gerar_receitas_para_contrato, gerar_receitas_mes, contratos_para_geracao_mes
 
 
 def _criar_base():
@@ -507,6 +507,43 @@ class GerarReceitasViewTest(TestCase):
             f"{reverse('receitas_list')}?mes={self.mes}&ano={self.ano}",
         )
         self.assertEqual(ReceitaAluguel.objects.count(), 1)
+
+    def test_get_contagem_inclui_contrato_prazo_indeterminado_apos_data_fim(self):
+        """
+        A contagem de contratos_ativos exibida na tela GET deve incluir
+        contratos por prazo indeterminado mesmo em meses após a data_fim
+        original (usa contratos_para_geracao_mes, não data_fim__gte cru).
+        """
+        contrato_indeterminado = _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(2020, 1, 1), data_fim=date(2020, 12, 31),
+            prazo_indeterminado=True,
+        )
+        mes_futuro, ano_futuro = 6, date.today().year + 1
+        response = self.client.get(reverse('gerar_receitas_mes'), {'mes': mes_futuro, 'ano': ano_futuro})
+        self.assertGreaterEqual(response.context['contratos_ativos'], 1)
+
+    def test_get_contagem_exclui_contrato_encerrado(self):
+        contrato_encerrado = _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
+            status='encerrado',
+        )
+        response = self.client.get(reverse('gerar_receitas_mes'), {'mes': self.mes, 'ano': self.ano})
+        # Apenas self.contrato (ativo) deve contar; o encerrado nunca conta.
+        self.assertEqual(response.context['contratos_ativos'], 1)
+
+    def test_get_contagem_exclui_data_encerramento_real_anterior_ao_mes(self):
+        imovel2 = Imovel.objects.create(nome='Imóvel Encerrado', endereco='Rua Z', cidade='SP', estado='SP')
+        inicio_do_mes = date(self.ano, self.mes, 1)
+        contrato_encerrado_de_fato = _criar_contrato(
+            imovel2, self.locatario,
+            data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
+            prazo_indeterminado=True,
+            data_encerramento_real=inicio_do_mes - timedelta(days=1),
+        )
+        contratos_aptos = list(contratos_para_geracao_mes(self.mes, self.ano))
+        self.assertNotIn(contrato_encerrado_de_fato, contratos_aptos)
 
 
 class ExportContratosViewTest(TestCase):
@@ -1282,6 +1319,21 @@ class GerarReceitasComEncargosTest(TestCase):
             valor_aluguel=Decimal('2000.00'),
         )
 
+    def test_contrato_com_iptu_mas_sem_aluguel_gera_aluguel_e_iptu(self):
+        """
+        Contrato com apenas um encargo de IPTU cadastrado (sem aluguel) deve,
+        ao gerar a receita, ter o encargo de aluguel garantido automaticamente
+        — a receita final soma aluguel + IPTU, nunca apenas o IPTU.
+        """
+        EncargoContrato.objects.create(contrato=self.contrato, tipo='iptu', valor=Decimal('150.00'))
+
+        gerar_receitas_para_contrato(self.contrato, data_inicio=date(2024, 3, 1), data_fim=date(2024, 3, 31))
+
+        receita = ReceitaAluguel.objects.get(contrato=self.contrato, competencia_mes=3, competencia_ano=2024)
+        tipos = set(receita.itens.values_list('tipo', flat=True))
+        self.assertEqual(tipos, {'aluguel', 'iptu'})
+        self.assertEqual(receita.valor_previsto, Decimal('2150.00'))
+
     def test_receita_soma_aluguel_iptu_taxa_manutencao(self):
         EncargoContrato.objects.create(contrato=self.contrato, tipo='aluguel', valor=Decimal('2000.00'))
         EncargoContrato.objects.create(contrato=self.contrato, tipo='iptu', valor=Decimal('150.00'))
@@ -1326,12 +1378,17 @@ class GerarReceitasComEncargosTest(TestCase):
         self.assertEqual(receita_abril.valor_previsto, Decimal('2000.00'))
 
     def test_fallback_valor_aluguel_sem_encargos(self):
-        """Contrato sem nenhum EncargoContrato continua usando valor_aluguel, sem itens."""
+        """
+        Contrato sem nenhum EncargoContrato continua usando valor_aluguel — a
+        geração garante automaticamente um encargo de aluguel (item 1 desta
+        fase), então a receita passa a ter exatamente 1 item (aluguel).
+        """
         gerar_receitas_para_contrato(self.contrato, data_inicio=date(2024, 3, 1), data_fim=date(2024, 3, 31))
 
         receita = ReceitaAluguel.objects.get(contrato=self.contrato, competencia_mes=3, competencia_ano=2024)
         self.assertEqual(receita.valor_previsto, self.contrato.valor_aluguel)
-        self.assertEqual(receita.itens.count(), 0)
+        self.assertEqual(receita.itens.count(), 1)
+        self.assertEqual(receita.itens.first().tipo, 'aluguel')
 
     def test_receitas_ja_existentes_nao_sao_alteradas(self):
         """Gerar novamente não sobrescreve receita/itens já existentes."""
