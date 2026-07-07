@@ -1,16 +1,19 @@
+from datetime import timedelta
+
 from django.contrib.auth.decorators import login_required
+from django.db.models import Sum
 from django.shortcuts import render
 from django.utils import timezone
-from datetime import timedelta
 
 from patrimonio.models import Imovel, Contrato, Manutencao
 from financeiro.models import ReceitaAluguel, Despesa
-from documentos.models import Documento, DocumentoObrigatorio
+from financeiro.services import serie_fluxo_caixa_12m
+from documentos.models import Documento, DocumentoObrigatorio, documentos_vencendo_qs
 
 
 @login_required
 def dashboard(request):
-    hoje = timezone.now().date()
+    hoje = timezone.localdate()
     mes_atual = hoje.month
     ano_atual = hoje.year
     prazo_90 = hoje + timedelta(days=90)
@@ -19,9 +22,19 @@ def dashboard(request):
     imoveis_alugados = Imovel.objects.filter(status='alugado').count()
     imoveis_vagos = Imovel.objects.filter(status='vago').count()
 
+    # Taxa de ocupação considera apenas unidades locáveis não vendidas
+    locaveis = Imovel.objects.filter(unidade_locavel=True).exclude(status='vendido')
+    total_locaveis = locaveis.count()
+    alugados_locaveis = locaveis.filter(status='alugado').count()
+    ocupacao_percentual = (
+        round(alugados_locaveis / total_locaveis * 100, 1) if total_locaveis else None
+    )
+
     receitas_mes = ReceitaAluguel.objects.filter(competencia_mes=mes_atual, competencia_ano=ano_atual)
-    receitas_previstas = sum(r.valor_previsto for r in receitas_mes)
-    receitas_recebidas = sum(r.valor_recebido or 0 for r in receitas_mes.filter(status__in=('recebido', 'parcial')))
+    receitas_previstas = receitas_mes.aggregate(total=Sum('valor_previsto'))['total'] or 0
+    receitas_recebidas = receitas_mes.filter(
+        status__in=('recebido', 'parcial')
+    ).aggregate(total=Sum('valor_recebido'))['total'] or 0
     receitas_atrasadas = receitas_mes.filter(
         data_vencimento__lt=hoje
     ).exclude(
@@ -64,10 +77,19 @@ def dashboard(request):
         obrigatorio=True, documento__isnull=True
     ).count()
 
+    docs_vencendo_qs = documentos_vencendo_qs().select_related('imovel')
+    docs_vencendo_cnt = docs_vencendo_qs.count()
+    docs_vencendo = docs_vencendo_qs[:10]
+
+    fluxo_caixa = serie_fluxo_caixa_12m(hoje)
+
     context = {
         'imoveis_total': imoveis_total,
         'imoveis_alugados': imoveis_alugados,
         'imoveis_vagos': imoveis_vagos,
+        'ocupacao_percentual': ocupacao_percentual,
+        'total_locaveis': total_locaveis,
+        'alugados_locaveis': alugados_locaveis,
         'receitas_previstas': receitas_previstas,
         'receitas_recebidas': receitas_recebidas,
         'receitas_atrasadas': receitas_atrasadas,
@@ -78,6 +100,9 @@ def dashboard(request):
         'manutencoes_abertas': manutencoes_abertas,
         'docs_pendentes_contabilidade': docs_pendentes_contabilidade,
         'docs_obrigatorios_pendentes': docs_obrigatorios_pendentes,
+        'docs_vencendo': docs_vencendo,
+        'docs_vencendo_cnt': docs_vencendo_cnt,
+        'fluxo_caixa': fluxo_caixa,
         'mes_atual': mes_atual,
         'ano_atual': ano_atual,
     }

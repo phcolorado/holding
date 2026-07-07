@@ -40,6 +40,12 @@ def _criar_contrato(imovel, locatario, data_inicio, data_fim, status='ativo', di
     )
 
 
+def _dar_permissoes(user, *codenames):
+    """Concede as permissões (por codename) exigidas pelas ações de escrita das views."""
+    from django.contrib.auth.models import Permission
+    user.user_permissions.add(*Permission.objects.filter(codename__in=codenames))
+
+
 class GerarReceitasParaContratoTest(TestCase):
     """Testa a função gerar_receitas_para_contrato."""
 
@@ -294,8 +300,8 @@ class EstaAtrasadaTest(TestCase):
             data_inicio=date(2020, 1, 1),
             data_fim=date(2030, 12, 31),
         )
-        self.ontem = timezone.now().date() - timedelta(days=1)
-        self.amanha = timezone.now().date() + timedelta(days=1)
+        self.ontem = timezone.localdate() - timedelta(days=1)
+        self.amanha = timezone.localdate() + timedelta(days=1)
 
     def _receita(self, vencimento, status):
         return ReceitaAluguel(
@@ -369,8 +375,8 @@ class ReceitasInadimplentesQsTest(TestCase):
             data_inicio=date(2020, 1, 1),
             data_fim=date(2030, 12, 31),
         )
-        self.ontem = timezone.now().date() - timedelta(days=1)
-        self.amanha = timezone.now().date() + timedelta(days=1)
+        self.ontem = timezone.localdate() - timedelta(days=1)
+        self.amanha = timezone.localdate() + timedelta(days=1)
 
     def _criar_receita(self, vencimento, status, mes=1):
         return ReceitaAluguel.objects.create(
@@ -478,6 +484,7 @@ class GerarReceitasViewTest(TestCase):
     def setUp(self):
         self.client = Client()
         self.user = User.objects.create_user('test', password='test')
+        _dar_permissoes(self.user, 'add_receitaaluguel')
         self.client.login(username='test', password='test')
         self.imovel, self.locatario = _criar_base()
         hoje = date.today()
@@ -590,6 +597,7 @@ class BaixaReceitasViewTest(TestCase):
     def setUp(self):
         self.client = Client()
         self.user = User.objects.create_user('baixa_user', password='pass')
+        _dar_permissoes(self.user, 'add_receitaaluguel', 'change_receitaaluguel')
         self.imovel, self.locatario = _criar_base()
         hoje = date.today()
         self.mes = hoje.month
@@ -694,7 +702,7 @@ class RelatorioContabilidadeTest(TestCase):
             data_inicio=date(2024, 1, 1),
             data_fim=date(2024, 12, 31),
         )
-        self.ontem = timezone.now().date() - timedelta(days=1)
+        self.ontem = timezone.localdate() - timedelta(days=1)
 
     def test_retorna_xlsx_valido(self):
         """GET retorna status 200 e content-type XLSX."""
@@ -845,7 +853,8 @@ class BaixaReceitasFormTest(TestCase):
 
     def setUp(self):
         self.client = Client()
-        User.objects.create_user('form_user', password='pass')
+        user = User.objects.create_user('form_user', password='pass')
+        _dar_permissoes(user, 'add_receitaaluguel', 'change_receitaaluguel')
         self.client.login(username='form_user', password='pass')
 
     def test_get_renderiza_sem_form_aninhado(self):
@@ -1044,6 +1053,7 @@ class ChecklistMensalViewTest(TestCase):
     def setUp(self):
         self.client = Client()
         self.user = User.objects.create_user('chk_user', password='pass')
+        _dar_permissoes(self.user, 'change_fechamentomensal')
         self.imovel, self.locatario = _criar_base()
         hoje = date.today()
         self.mes = hoje.month
@@ -1064,7 +1074,7 @@ class ChecklistMensalViewTest(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertIn('checklist', response.context)
-        self.assertEqual(len(response.context['checklist']), 9)
+        self.assertEqual(len(response.context['checklist']), 10)
 
     def test_post_marcar_enviado_cria_fechamento(self):
         """POST action=marcar_enviado cria FechamentoMensal e redireciona."""
@@ -1166,7 +1176,8 @@ class BaixaReceitasFiltroImovelTest(TestCase):
 
     def setUp(self):
         self.client = Client()
-        User.objects.create_user('filtro_user', password='pass')
+        user = User.objects.create_user('filtro_user', password='pass')
+        _dar_permissoes(user, 'add_receitaaluguel', 'change_receitaaluguel')
         self.client.login(username='filtro_user', password='pass')
         locatario = Pessoa.objects.create(nome='Locatário Filtro', tipo='locatario')
         self.imovel1 = Imovel.objects.create(nome='Apto 1', endereco='Rua A', cidade='SP', estado='SP')
@@ -1578,3 +1589,240 @@ class MigracoesPendentesTest(TestCase):
             call_command('makemigrations', '--check', verbosity=0)
         except SystemExit as e:
             self.fail('Há migrations pendentes não criadas.')
+
+
+# ─── Parâmetros inválidos na URL não podem derrubar as views ──────────────────
+
+class ParametrosInvalidosViewTest(TestCase):
+    def setUp(self):
+        self.client = Client()
+        User.objects.create_user('param_user', password='pass')
+        self.client.login(username='param_user', password='pass')
+
+    def test_receitas_list_mes_nao_numerico_usa_padrao(self):
+        response = self.client.get(reverse('receitas_list'), {'mes': 'abc', 'ano': ''})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context['mes_atual'], timezone.localdate().month)
+
+    def test_receitas_list_mes_fora_da_faixa_usa_padrao(self):
+        response = self.client.get(reverse('receitas_list'), {'mes': '13', 'ano': '2024'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context['mes_atual'], timezone.localdate().month)
+
+    def test_receitas_list_imovel_nao_numerico_ignorado(self):
+        response = self.client.get(reverse('receitas_list'), {'imovel': 'abc'})
+        self.assertEqual(response.status_code, 200)
+
+    def test_despesas_list_parametros_invalidos_nao_quebram(self):
+        response = self.client.get(reverse('despesas_list'), {'mes': 'x', 'ano': 'y', 'imovel': 'z'})
+        self.assertEqual(response.status_code, 200)
+
+    def test_export_receitas_parametros_invalidos_nao_quebram(self):
+        response = self.client.get(reverse('export_receitas', args=['csv']), {'mes': 'abc', 'imovel': 'abc'})
+        self.assertEqual(response.status_code, 200)
+
+    def test_baixa_receitas_parametros_invalidos_nao_quebram(self):
+        response = self.client.get(reverse('baixa_receitas_mes'), {'mes': '99', 'ano': 'abc'})
+        self.assertEqual(response.status_code, 200)
+
+
+# ─── Validação da edição na baixa de receitas ─────────────────────────────────
+
+class BaixaReceitasValidacaoTest(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user('valida_user', password='pass')
+        _dar_permissoes(self.user, 'add_receitaaluguel', 'change_receitaaluguel')
+        self.client.login(username='valida_user', password='pass')
+        self.imovel, self.locatario = _criar_base()
+        hoje = date.today()
+        self.mes, self.ano = hoje.month, hoje.year
+        ultimo_dia = monthrange(self.ano, self.mes)[1]
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(self.ano, self.mes, 1),
+            data_fim=date(self.ano, self.mes, ultimo_dia),
+        )
+        self.receita = ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=self.mes, competencia_ano=self.ano,
+            data_vencimento=date(self.ano, self.mes, 10),
+            valor_previsto=Decimal('2000.00'), status='previsto',
+        )
+
+    def _post_editar(self, **campos):
+        dados = {
+            'mes': self.mes, 'ano': self.ano,
+            'receita_id': self.receita.pk, 'action': 'editar',
+            'status': 'recebido',
+        }
+        dados.update(campos)
+        return self.client.post(reverse('baixa_receitas_mes'), dados)
+
+    def test_valor_invalido_nao_altera_receita(self):
+        response = self._post_editar(valor_recebido='abc')
+        self.assertEqual(response.status_code, 302)
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.status, 'previsto')
+        self.assertIsNone(self.receita.valor_recebido)
+
+    def test_data_invalida_nao_altera_receita(self):
+        response = self._post_editar(valor_recebido='2000.00', data_recebimento='31/31/2024')
+        self.assertEqual(response.status_code, 302)
+        self.receita.refresh_from_db()
+        self.assertIsNone(self.receita.data_recebimento)
+
+    def test_status_invalido_rejeitado(self):
+        self._post_editar(status='status_inexistente')
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.status, 'previsto')
+
+    def test_edicao_valida_atualiza(self):
+        hoje = date.today()
+        self._post_editar(
+            valor_recebido='1980.50', data_recebimento=hoje.isoformat(),
+            multa='10.00', juros='5.25', observacoes='pago com desconto',
+        )
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.valor_recebido, Decimal('1980.50'))
+        self.assertEqual(self.receita.data_recebimento, hoje)
+        self.assertEqual(self.receita.multa, Decimal('10.00'))
+        self.assertEqual(self.receita.juros, Decimal('5.25'))
+        self.assertEqual(self.receita.status, 'recebido')
+        self.assertEqual(self.receita.observacoes, 'pago com desconto')
+
+    def test_marcar_recebida_preserva_valor_zero(self):
+        self.receita.valor_recebido = Decimal('0.00')
+        self.receita.save()
+        self.client.post(reverse('baixa_receitas_mes'), {
+            'mes': self.mes, 'ano': self.ano,
+            'receita_id': self.receita.pk, 'action': 'marcar_recebida',
+        })
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.valor_recebido, Decimal('0.00'))
+        self.assertEqual(self.receita.status, 'recebido')
+
+    def test_post_sem_permissao_retorna_403(self):
+        User.objects.create_user('sem_perm', password='pass')
+        self.client.login(username='sem_perm', password='pass')
+        response = self.client.post(reverse('baixa_receitas_mes'), {
+            'mes': self.mes, 'ano': self.ano,
+            'receita_id': self.receita.pk, 'action': 'marcar_recebida',
+        })
+        self.assertEqual(response.status_code, 403)
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.status, 'previsto')
+
+    def test_gerar_receitas_sem_permissao_retorna_403(self):
+        User.objects.create_user('sem_perm2', password='pass')
+        self.client.login(username='sem_perm2', password='pass')
+        response = self.client.post(reverse('gerar_receitas_mes'), {'mes': self.mes, 'ano': self.ano})
+        self.assertEqual(response.status_code, 403)
+
+
+# ─── Comissão de imobiliária respeita a carência do encargo de aluguel ────────
+
+class ComissaoCarenciaTest(TestCase):
+    def setUp(self):
+        self.imovel, self.locatario = _criar_base()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(2024, 1, 1), data_fim=date(2024, 12, 31),
+            comissao_imobiliaria_percentual=Decimal('10.00'),
+        )
+        EncargoContrato.objects.create(
+            contrato=self.contrato, tipo='aluguel', valor=Decimal('2000.00'),
+            data_inicio_cobranca=date(2024, 6, 1),
+        )
+
+    def test_mes_de_carencia_nao_gera_comissao(self):
+        gerar_receitas_para_contrato(self.contrato, data_inicio=date(2024, 3, 1), data_fim=date(2024, 3, 31))
+        self.assertFalse(
+            Despesa.objects.filter(contrato=self.contrato, categoria='comissao_imobiliaria').exists()
+        )
+
+    def test_mes_com_aluguel_gera_comissao(self):
+        gerar_receitas_para_contrato(self.contrato, data_inicio=date(2024, 6, 1), data_fim=date(2024, 6, 30))
+        despesa = Despesa.objects.get(contrato=self.contrato, categoria='comissao_imobiliaria')
+        self.assertEqual(despesa.valor, Decimal('200.00'))
+
+
+# ─── Comando marcar_atrasados ─────────────────────────────────────────────────
+
+class MarcarAtrasadosCommandTest(TestCase):
+    def setUp(self):
+        self.imovel, self.locatario = _criar_base()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
+        )
+        self.ontem = timezone.localdate() - timedelta(days=1)
+        self.amanha = timezone.localdate() + timedelta(days=1)
+
+    def test_comando_marca_receitas_e_despesas_vencidas(self):
+        from django.core.management import call_command
+
+        vencida = ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=1, competencia_ano=2024,
+            data_vencimento=self.ontem, valor_previsto=Decimal('1000.00'), status='previsto',
+        )
+        futura = ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=2, competencia_ano=2024,
+            data_vencimento=self.amanha, valor_previsto=Decimal('1000.00'), status='previsto',
+        )
+        recebida = ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=3, competencia_ano=2024,
+            data_vencimento=self.ontem, valor_previsto=Decimal('1000.00'), status='recebido',
+        )
+        despesa_vencida = Despesa.objects.create(
+            imovel=self.imovel, descricao='IPTU', data_vencimento=self.ontem,
+            valor=Decimal('500.00'), status='prevista',
+        )
+
+        call_command('marcar_atrasados')
+
+        vencida.refresh_from_db()
+        futura.refresh_from_db()
+        recebida.refresh_from_db()
+        despesa_vencida.refresh_from_db()
+        self.assertEqual(vencida.status, 'atrasado')
+        self.assertEqual(futura.status, 'previsto')
+        self.assertEqual(recebida.status, 'recebido')
+        self.assertEqual(despesa_vencida.status, 'atrasada')
+
+
+# ─── Série de fluxo de caixa de 12 meses ──────────────────────────────────────
+
+class FluxoCaixa12mTest(TestCase):
+    def test_serie_cobre_12_meses_e_soma_valores(self):
+        from financeiro.services import serie_fluxo_caixa_12m
+
+        imovel, locatario = _criar_base()
+        contrato = _criar_contrato(
+            imovel, locatario, data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31)
+        )
+        hoje = timezone.localdate()
+        ReceitaAluguel.objects.create(
+            contrato=contrato, imovel=imovel,
+            competencia_mes=hoje.month, competencia_ano=hoje.year,
+            data_vencimento=hoje, valor_previsto=Decimal('2000.00'),
+            valor_recebido=Decimal('2000.00'), status='recebido',
+        )
+        Despesa.objects.create(
+            imovel=imovel, descricao='Condomínio',
+            competencia_mes=hoje.month, competencia_ano=hoje.year,
+            data_vencimento=hoje, valor=Decimal('300.00'), status='paga',
+        )
+
+        serie = serie_fluxo_caixa_12m(hoje)
+        self.assertEqual(len(serie), 12)
+        atual = serie[-1]
+        self.assertEqual(atual['label'], f'{hoje.month:02d}/{hoje.year}')
+        self.assertEqual(atual['recebido'], 2000.0)
+        self.assertEqual(atual['pago'], 300.0)
+        self.assertEqual(atual['saldo'], 1700.0)
+        # Receita prevista (não recebida) não entra na série
+        self.assertEqual(sum(p['recebido'] for p in serie), 2000.0)

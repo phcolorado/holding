@@ -7,7 +7,7 @@ Construído com Python + Django + Bootstrap 5 + SQLite.
 
 ## Funcionalidades
 
-- **Dashboard** com indicadores em tempo real: receitas, inadimplência, contratos vencendo, reajustes (próximos e pendentes), manutenções e documentos pendentes
+- **Dashboard** com indicadores em tempo real: receitas, inadimplência, contratos vencendo, reajustes (próximos e pendentes), manutenções, documentos pendentes, **taxa de ocupação**, **documentos com validade vencendo** e **gráfico de fluxo de caixa dos últimos 12 meses**
 - **Imóveis**: cadastro completo com matrícula, IPTU, valores, histórico, tipo/uso e hierarquia de prédio/unidades
 - **Pessoas**: cadastro único por pessoa, com categoria preferencial apenas para busca — o mesmo cadastro pode assumir papéis diferentes (locatário, fiador, imobiliária etc.) em contratos diferentes
 - **Contratos**: vigência (determinada ou por prazo indeterminado), múltiplos locatários e fiadores, reajuste por índice (IPCA/IGP-M/INPC), garantias, taxa de administração, multa e juros por atraso
@@ -20,7 +20,11 @@ Construído com Python + Django + Bootstrap 5 + SQLite.
 - **Geração automática de receitas**: gera `ReceitaAluguel` (com itens e despesa de administração, se configurada) para todos os contratos ativos de um mês via interface web ou Admin; idempotente (sem duplicatas); respeita prazo indeterminado e encerramento real
 - **Baixa de aluguéis**: tela de conferência mensal com marcação rápida de recebimento, composição da receita, sugestão de multa/juros e edição inline de cada receita
 - **Inadimplência por vencimento**: regra baseada em `data_vencimento`, independente do campo de status — a aba "Inadimplência Aberta" do relatório para contabilidade lista **todas** as receitas vencidas e não quitadas, sem filtro de mês de competência
-- **Checklist Mensal**: tela `/financeiro/checklist-mensal/` com 9 etapas de fechamento (incluindo reajustes pendentes) e ação de marcar envio à contabilidade via `FechamentoMensal`
+- **Checklist Mensal**: tela `/financeiro/checklist-mensal/` com 10 etapas de fechamento (incluindo reajustes pendentes e validade de documentos) e ação de marcar envio à contabilidade via `FechamentoMensal`
+- **Alertas de validade de documentos**: documentos com `data_validade` vencida ou vencendo em 30 dias aparecem no Dashboard, no Checklist Mensal e no filtro "Vencendo/vencidos" da lista de documentos
+- **Sugestão de reajuste pelo Banco Central**: action no Admin de Contratos que consulta o acumulado de 12 meses do IPCA/IGP-M/INPC na API SGS do BCB e cria um reajuste pendente para revisão
+- **Indicadores por imóvel**: yield bruto/líquido anual, receita/despesa/resultado de 12 meses e taxa de ocupação na tela de detalhe do imóvel
+- **Auditoria de alterações** (django-simple-history): histórico de quem alterou o quê em imóveis, pessoas, contratos, encargos, reajustes, receitas, despesas e documentos — visível no botão "Histórico" de cada registro no Admin
 - **Relatório para contabilidade** em XLSX (6 abas: resumo, receitas, despesas, inadimplência aberta, documentos pendentes, resultado por imóvel)
 - **Documentos obrigatórios por imóvel**: controle de documentos esperados por imóvel com indicador de pendência
 - **Exportações** em CSV e XLSX (imóveis com tipo/uso, contratos com locatários/fiadores/imobiliária e filtro de status/imóvel/imobiliária, receitas, despesas, inadimplência, relatório mensal)
@@ -165,9 +169,29 @@ O backup é salvo como `backups/backup_<timestamp>.zip` contendo:
 ```
 python manage.py backup_local --destino /caminho/personalizado
 python manage.py backup_local --manter 10   # mantém apenas os 10 mais recentes
+python manage.py backup_local --copia-extra "G:\Meu Drive\backups-holding"   # cópia p/ pasta sincronizada com a nuvem
 ```
 
 A pasta `backups/` está no `.gitignore` e não é versionada.
+
+### Agendando o backup (e a marcação de atrasados)
+
+**Windows (Agendador de Tarefas):** crie uma tarefa diária executando:
+
+```
+C:\caminho\holding\venv\Scripts\python.exe C:\caminho\holding\manage.py backup_local --manter 30 --copia-extra "G:\Meu Drive\backups-holding"
+```
+
+**Linux/macOS (cron):** `crontab -e` e adicione:
+
+```
+# backup diário às 2h, mantendo 30 e copiando para pasta sincronizada com a nuvem
+0 2 * * * /caminho/holding/venv/bin/python /caminho/holding/manage.py backup_local --manter 30 --copia-extra /caminho/nuvem/backups
+# marca receitas/despesas vencidas como atrasadas todo dia às 6h
+0 6 * * * /caminho/holding/venv/bin/python /caminho/holding/manage.py marcar_atrasados
+```
+
+> Aponte `--copia-extra` para uma pasta sincronizada (Google Drive, Dropbox, OneDrive) para ter backup fora da máquina sem nenhuma configuração adicional.
 
 ---
 
@@ -204,7 +228,7 @@ A operação é idempotente — chamar múltiplas vezes não cria duplicatas.
 
 Acesse `/financeiro/checklist-mensal/` (menu lateral: "Checklist Mensal") ou clique em **"Checklist Mensal"** no Dashboard.
 
-A tela exibe 9 etapas com indicador visual (✓ verde / ! amarelo / ↓ azul para ações):
+A tela exibe 10 etapas com indicador visual (✓ verde / ! amarelo / ↓ azul para ações):
 
 | Etapa | Critério de conclusão |
 |---|---|
@@ -215,6 +239,7 @@ A tela exibe 9 etapas com indicador visual (✓ verde / ! amarelo / ↓ azul par
 | Despesas pagas | Todas as despesas do mês estão pagas |
 | Documentos enviados à contabilidade | Nenhum documento pendente para contabilidade |
 | Documentos obrigatórios revisados | Todos os `DocumentoObrigatorio` com documento vinculado |
+| Validade dos documentos em dia | Nenhum documento com `data_validade` vencida ou vencendo em 30 dias |
 | Relatório contábil exportado | Etapa informativa com botão de download direto |
 | Fechamento registrado e enviado | `FechamentoMensal` marcado como enviado |
 
@@ -368,44 +393,51 @@ python manage.py migrate
 
 ---
 
-## Migração futura para PostgreSQL
+## Sugestão automática de reajuste (Banco Central)
 
-Quando quiser migrar, altere `settings.py`:
+No Admin → Contratos, selecione contratos e use a action **"Sugerir reajuste pelo índice acumulado 12m (Banco Central)"**. O sistema:
 
-```python
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'nome_do_banco',
-        'USER': 'usuario',
-        'PASSWORD': 'senha',
-        'HOST': 'localhost',
-        'PORT': '5432',
-    }
-}
-```
+1. Consulta a API pública SGS do Banco Central (IPCA = série 433, IGP-M = 189, INPC = 188) — resultado fica em cache por 12h.
+2. Calcula o acumulado de 12 meses por juros compostos.
+3. Cria um `ReajusteContrato` **pendente** (`aplicado=False`) com percentual, valor anterior e valor novo calculados.
+4. Você revisa e marca "Aplicado" para efetivar (o fluxo normal de reajuste).
 
-E instale: `pip install psycopg2-binary`
+Contratos com índice "Fixo"/"Outro", inativos ou que já têm reajuste pendente são ignorados (sem duplicação). Requer conexão com a internet.
 
 ---
 
-## Variáveis importantes em produção
+## Configuração por variáveis de ambiente
 
-Em produção, substitua no `settings.py`:
+O `settings.py` lê tudo do ambiente, com padrões de desenvolvimento:
 
-```python
-SECRET_KEY = 'gerar-chave-com-python-secrets'   # python -c "import secrets; print(secrets.token_hex(50))"
-DEBUG = False
-ALLOWED_HOSTS = ['seu-dominio.com']
+| Variável | Padrão | Uso |
+|---|---|---|
+| `DJANGO_SECRET_KEY` | chave insegura de dev | **Obrigatória em produção** — gere com `python -c "import secrets; print(secrets.token_hex(50))"` |
+| `DJANGO_DEBUG` | `1` | Use `0` em produção (ativa cookies seguros automaticamente) |
+| `DJANGO_ALLOWED_HOSTS` | `localhost,127.0.0.1` | Lista separada por vírgula |
+| `DB_ENGINE` | sqlite3 | `django.db.backends.postgresql` para Postgres |
+| `DB_NAME` / `DB_USER` / `DB_PASSWORD` / `DB_HOST` / `DB_PORT` | — | Credenciais do Postgres |
+
+### Migração para PostgreSQL
+
 ```
+pip install psycopg2-binary
+export DB_ENGINE=django.db.backends.postgresql
+export DB_NAME=holding DB_USER=holding DB_PASSWORD=senha DB_HOST=localhost DB_PORT=5432
+python manage.py migrate
+```
+
+Para migrar os dados do SQLite: `python manage.py dumpdata --natural-foreign --natural-primary -e contenttypes -e auth.permission -o dados.json` no banco antigo e `python manage.py loaddata dados.json` no novo.
 
 ---
 
 ## Dependências principais
 
-| Pacote              | Versão  | Finalidade                      |
-|---------------------|---------|---------------------------------|
-| Django              | >=4.2   | Framework web                   |
-| openpyxl            | >=3.1   | Exportação XLSX                 |
-| Pillow              | >=10.0  | Processamento de imagens        |
-| django-widget-tweaks| >=1.5   | Templates de formulários        |
+| Pacote                | Versão  | Finalidade                      |
+|-----------------------|---------|---------------------------------|
+| Django                | >=4.2   | Framework web                   |
+| openpyxl              | >=3.1   | Exportação XLSX                 |
+| Pillow                | >=10.0  | Processamento de imagens        |
+| django-widget-tweaks  | >=1.5   | Templates de formulários        |
+| django-simple-history | >=3.7   | Auditoria de alterações         |
+| psycopg2-binary       | >=2.9   | Driver Postgres (opcional)      |

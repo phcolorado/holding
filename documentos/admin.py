@@ -1,9 +1,10 @@
 from django.contrib import admin
+from simple_history.admin import SimpleHistoryAdmin
 from .models import Documento, DocumentoObrigatorio
 
 
 @admin.register(Documento)
-class DocumentoAdmin(admin.ModelAdmin):
+class DocumentoAdmin(SimpleHistoryAdmin):
     list_display = ('titulo', 'tipo', 'imovel', 'data_documento', 'data_validade', 'enviado_contabilidade')
     list_filter = ('tipo', 'enviado_contabilidade', 'imovel')
     search_fields = ('titulo', 'imovel__nome', 'pessoa__nome', 'observacoes')
@@ -34,7 +35,7 @@ class DocumentoAdmin(admin.ModelAdmin):
 
 
 @admin.register(DocumentoObrigatorio)
-class DocumentoObrigatorioAdmin(admin.ModelAdmin):
+class DocumentoObrigatorioAdmin(SimpleHistoryAdmin):
     list_display = ('imovel', 'tipo', 'descricao', 'obrigatorio', 'documento', 'pendente')
     list_filter = ('tipo', 'obrigatorio', 'imovel')
     search_fields = ('imovel__nome', 'descricao', 'observacoes')

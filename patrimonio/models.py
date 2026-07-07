@@ -4,7 +4,9 @@ from datetime import date
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+from django.db.models import Q
 from django.utils import timezone
+from simple_history.models import HistoricalRecords
 
 
 def _avancar_12_meses(d):
@@ -69,6 +71,7 @@ class Imovel(models.Model):
     observacoes = models.TextField('Observações', blank=True)
     criado_em = models.DateTimeField('Criado em', auto_now_add=True)
     atualizado_em = models.DateTimeField('Atualizado em', auto_now=True)
+    history = HistoricalRecords()
 
     class Meta:
         verbose_name = 'Imóvel'
@@ -110,6 +113,7 @@ class Pessoa(models.Model):
     observacoes = models.TextField('Observações', blank=True)
     criado_em = models.DateTimeField('Criado em', auto_now_add=True)
     atualizado_em = models.DateTimeField('Atualizado em', auto_now=True)
+    history = HistoricalRecords()
 
     class Meta:
         verbose_name = 'Pessoa'
@@ -208,6 +212,7 @@ class Contrato(models.Model):
     observacoes = models.TextField('Observações', blank=True)
     criado_em = models.DateTimeField('Criado em', auto_now_add=True)
     atualizado_em = models.DateTimeField('Atualizado em', auto_now=True)
+    history = HistoricalRecords()
 
     class Meta:
         verbose_name = 'Contrato'
@@ -253,7 +258,7 @@ class Contrato(models.Model):
         if self.prazo_indeterminado and not self.data_encerramento_real:
             return False
         fim = self.data_fim_efetiva
-        return fim is not None and fim < timezone.now().date()
+        return fim is not None and fim < timezone.localdate()
 
     @property
     def vigencia_display(self):
@@ -337,6 +342,7 @@ class ContratoParte(models.Model):
     observacoes = models.TextField('Observações', blank=True)
     criado_em = models.DateTimeField('Criado em', auto_now_add=True)
     atualizado_em = models.DateTimeField('Atualizado em', auto_now=True)
+    history = HistoricalRecords()
 
     class Meta:
         verbose_name = 'Parte do Contrato'
@@ -381,11 +387,19 @@ class EncargoContrato(models.Model):
     observacoes = models.TextField('Observações', blank=True)
     criado_em = models.DateTimeField('Criado em', auto_now_add=True)
     atualizado_em = models.DateTimeField('Atualizado em', auto_now=True)
+    history = HistoricalRecords()
 
     class Meta:
         verbose_name = 'Encargo do Contrato'
         verbose_name_plural = 'Encargos do Contrato'
         ordering = ['contrato', 'tipo']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['contrato'],
+                condition=Q(tipo='aluguel', ativo=True),
+                name='unico_encargo_aluguel_ativo_por_contrato',
+            ),
+        ]
 
     def __str__(self):
         return f'{self.get_tipo_display()} — {self.contrato} (R$ {self.valor})'
@@ -393,6 +407,16 @@ class EncargoContrato(models.Model):
     def clean(self):
         if self.tipo == 'aluguel' and self.periodicidade != 'mensal':
             raise ValidationError({'periodicidade': 'O encargo de aluguel deve ser mensal.'})
+        if self.tipo == 'aluguel' and self.ativo and self.contrato_id:
+            duplicados = EncargoContrato.objects.filter(
+                contrato_id=self.contrato_id, tipo='aluguel', ativo=True
+            )
+            if self.pk:
+                duplicados = duplicados.exclude(pk=self.pk)
+            if duplicados.exists():
+                raise ValidationError(
+                    {'tipo': 'Já existe um encargo de aluguel ativo para este contrato.'}
+                )
 
     def aplica_em(self, ano, mes):
         """Indica se este encargo deve ser cobrado na competência informada."""
@@ -442,6 +466,7 @@ class ReajusteContrato(models.Model):
     observacoes = models.TextField('Observações', blank=True)
     criado_em = models.DateTimeField('Criado em', auto_now_add=True)
     atualizado_em = models.DateTimeField('Atualizado em', auto_now=True)
+    history = HistoricalRecords()
 
     class Meta:
         verbose_name = 'Reajuste de Contrato'
@@ -506,6 +531,7 @@ class Manutencao(models.Model):
     observacoes = models.TextField('Observações', blank=True)
     criado_em = models.DateTimeField('Criado em', auto_now_add=True)
     atualizado_em = models.DateTimeField('Atualizado em', auto_now=True)
+    history = HistoricalRecords()
 
     class Meta:
         verbose_name = 'Manutenção'
@@ -514,3 +540,18 @@ class Manutencao(models.Model):
 
     def __str__(self):
         return f'{self.descricao} — {self.imovel.nome} ({self.get_status_display()})'
+
+
+def imobiliarias_queryset():
+    """
+    Pessoas que atuam como imobiliária: categoria preferencial 'imobiliaria',
+    vínculo legado em Contrato.imobiliaria ou papel imobiliária em ContratoParte.
+    Compartilhada pelas telas de contratos e relatórios.
+    """
+    ids = set(
+        Contrato.objects.exclude(imobiliaria__isnull=True).values_list('imobiliaria_id', flat=True)
+    )
+    ids |= set(
+        ContratoParte.objects.filter(papel='imobiliaria').values_list('pessoa_id', flat=True)
+    )
+    return Pessoa.objects.filter(Q(pk__in=ids) | Q(tipo='imobiliaria')).distinct().order_by('nome')

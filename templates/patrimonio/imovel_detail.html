@@ -114,6 +114,53 @@
             </div>
         </div>
 
+        <div class="card shadow-sm mt-3">
+            <div class="card-header fw-semibold bg-white">
+                <i class="bi bi-graph-up-arrow me-1 text-primary"></i>Indicadores — últimos 12 meses
+            </div>
+            <div class="card-body small">
+                <div class="d-flex justify-content-between mb-1">
+                    <span class="text-muted">Receita recebida</span>
+                    <span class="fw-semibold">R$ {{ indicadores.receita_12m|floatformat:2|intcomma }}</span>
+                </div>
+                <div class="d-flex justify-content-between mb-1">
+                    <span class="text-muted">Despesas pagas</span>
+                    <span class="fw-semibold">R$ {{ indicadores.despesa_12m|floatformat:2|intcomma }}</span>
+                </div>
+                <div class="d-flex justify-content-between mb-1">
+                    <span class="text-muted">Resultado</span>
+                    <span class="fw-semibold {% if indicadores.resultado_12m < 0 %}text-danger{% else %}text-success{% endif %}">
+                        R$ {{ indicadores.resultado_12m|floatformat:2|intcomma }}
+                    </span>
+                </div>
+                <hr class="my-2">
+                <div class="d-flex justify-content-between mb-1">
+                    <span class="text-muted">Yield bruto (a.a.)</span>
+                    <span class="fw-semibold">
+                        {% if indicadores.yield_bruto is not None %}{{ indicadores.yield_bruto }}%{% else %}<span class="text-muted" title="Informe o valor estimado ou de aquisição do imóvel">—</span>{% endif %}
+                    </span>
+                </div>
+                <div class="d-flex justify-content-between mb-1">
+                    <span class="text-muted">Yield líquido (a.a.)</span>
+                    <span class="fw-semibold">
+                        {% if indicadores.yield_liquido is not None %}{{ indicadores.yield_liquido }}%{% else %}<span class="text-muted">—</span>{% endif %}
+                    </span>
+                </div>
+                <div class="d-flex justify-content-between">
+                    <span class="text-muted">Ocupação</span>
+                    <span class="fw-semibold">
+                        {% if indicadores.ocupacao is not None %}{{ indicadores.ocupacao }}% ({{ indicadores.meses_ocupados }}/{{ indicadores.meses_periodo }} meses){% else %}—{% endif %}
+                    </span>
+                </div>
+                {% if indicadores.valor_base %}
+                <div class="text-muted mt-2" style="font-size: .75rem;">
+                    Yield calculado sobre {% if imovel.valor_estimado %}o valor estimado{% else %}o valor de aquisição{% endif %}
+                    (R$ {{ indicadores.valor_base|floatformat:2|intcomma }}).
+                </div>
+                {% endif %}
+            </div>
+        </div>
+
         {% if contrato_ativo %}
         <div class="card shadow-sm mt-3">
             <div class="card-header fw-semibold bg-white">Contrato Ativo</div>

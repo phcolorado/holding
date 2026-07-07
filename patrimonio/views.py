@@ -3,7 +3,9 @@ from django.shortcuts import render, get_object_or_404
 from django.db.models import Sum, Q
 from django.utils import timezone
 
-from .models import Imovel, Pessoa, Contrato, Manutencao, ContratoParte
+from .models import Imovel, Pessoa, Contrato, Manutencao, imobiliarias_queryset
+from .indicadores import indicadores_do_imovel
+from core.utils import pk_param
 from financeiro.models import ReceitaAluguel, Despesa
 from documentos.models import Documento, DocumentoObrigatorio
 
@@ -58,7 +60,10 @@ def imovel_detail(request, pk):
     ).aggregate(total=Sum('valor'))['total'] or 0
     resultado = total_recebido - total_despesas
 
+    indicadores = indicadores_do_imovel(imovel)
+
     context = {
+        'indicadores': indicadores,
         'imovel': imovel,
         'contrato_ativo': contrato_ativo,
         'receitas': receitas,
@@ -97,11 +102,11 @@ def pessoa_list(request):
 @login_required
 def contrato_list(request):
     status = request.GET.get('status', '')
-    imovel_id = request.GET.get('imovel', '')
-    imobiliaria_id = request.GET.get('imobiliaria', '')
+    imovel_id = pk_param(request.GET.get('imovel'))
+    imobiliaria_id = pk_param(request.GET.get('imobiliaria'))
     reajuste_pendente = request.GET.get('reajuste_pendente', '')
 
-    hoje = timezone.now().date()
+    hoje = timezone.localdate()
 
     contratos = (
         Contrato.objects
@@ -123,16 +128,7 @@ def contrato_list(request):
         )
 
     imoveis = Imovel.objects.all()
-
-    imobiliarias_ids = set(
-        Contrato.objects.exclude(imobiliaria__isnull=True).values_list('imobiliaria_id', flat=True)
-    )
-    imobiliarias_ids |= set(
-        ContratoParte.objects.filter(papel='imobiliaria').values_list('pessoa_id', flat=True)
-    )
-    imobiliarias = Pessoa.objects.filter(
-        Q(pk__in=imobiliarias_ids) | Q(tipo='imobiliaria')
-    ).distinct().order_by('nome')
+    imobiliarias = imobiliarias_queryset()
 
     context = {
         'contratos': contratos,

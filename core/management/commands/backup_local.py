@@ -1,4 +1,5 @@
 import os
+import shutil
 import zipfile
 from datetime import datetime
 
@@ -21,6 +22,16 @@ class Command(BaseCommand):
             type=int,
             default=0,
             help='Manter apenas os N backups mais recentes (0 = manter todos)',
+        )
+        parser.add_argument(
+            '--copia-extra',
+            type=str,
+            default='',
+            help=(
+                'Pasta adicional para onde copiar o ZIP gerado — aponte para uma pasta '
+                'sincronizada com a nuvem (Google Drive, Dropbox, OneDrive) para ter '
+                'backup externo automático.'
+            ),
         )
 
     def handle(self, *args, **options):
@@ -67,6 +78,16 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING('Nenhum arquivo de mídia encontrado — omitido do backup.'))
 
         self.stdout.write(self.style.SUCCESS(f'Backup criado: {zip_path}'))
+
+        copia_extra = options['copia_extra']
+        if copia_extra:
+            try:
+                os.makedirs(copia_extra, exist_ok=True)
+                destino_extra = os.path.join(copia_extra, os.path.basename(zip_path))
+                shutil.copy2(zip_path, destino_extra)
+                self.stdout.write(self.style.SUCCESS(f'Cópia extra criada: {destino_extra}'))
+            except OSError as exc:
+                self.stderr.write(self.style.ERROR(f'Falha ao criar cópia extra em {copia_extra}: {exc}'))
 
         if manter:
             zips = sorted(

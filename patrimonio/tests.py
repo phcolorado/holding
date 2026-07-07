@@ -635,11 +635,15 @@ class GarantirEncargoAluguelTest(TestCase):
         save_related(), depois que o inline de encargos salva).
         """
         from django.contrib import admin as django_admin
+        from django.contrib.auth.models import User
+        from django.test import RequestFactory
         from patrimonio.admin import ContratoAdmin
 
         contrato = _criar_contrato(self.imovel, self.locatario, date(2024, 1, 1), date(2024, 12, 31))
         admin_instance = ContratoAdmin(Contrato, django_admin.site)
-        admin_instance.save_model(request=None, obj=contrato, form=None, change=False)
+        request = RequestFactory().post('/admin/patrimonio/contrato/add/')
+        request.user = User.objects.create_user('admin_encargo', password='pass')
+        admin_instance.save_model(request=request, obj=contrato, form=None, change=False)
 
         self.assertFalse(contrato.encargos.filter(tipo='aluguel').exists())
 
@@ -860,3 +864,165 @@ class DashboardContratosVencendoTest(TestCase):
         )
         response = self.client.get(reverse('dashboard'))
         self.assertNotIn(contrato, list(response.context['contratos_vencendo']))
+
+
+# ─── Encargo de aluguel ativo único por contrato ──────────────────────────────
+
+class EncargoAluguelUnicoTest(TestCase):
+    def setUp(self):
+        self.imovel = _criar_imovel()
+        self.locatario = _criar_pessoa('Locatário', tipo='locatario')
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, date(2024, 1, 1), date(2024, 12, 31)
+        )
+
+    def test_segundo_encargo_aluguel_ativo_rejeitado_no_clean(self):
+        self.contrato.garantir_encargo_aluguel()
+        duplicado = EncargoContrato(
+            contrato=self.contrato, tipo='aluguel', valor=Decimal('1500.00'),
+            periodicidade='mensal', ativo=True,
+        )
+        with self.assertRaises(ValidationError):
+            duplicado.full_clean()
+
+    def test_segundo_encargo_aluguel_ativo_rejeitado_no_banco(self):
+        self.contrato.garantir_encargo_aluguel()
+        with self.assertRaises(IntegrityError):
+            EncargoContrato.objects.create(
+                contrato=self.contrato, tipo='aluguel', valor=Decimal('1500.00'),
+                periodicidade='mensal', ativo=True,
+            )
+
+    def test_encargo_aluguel_inativo_adicional_permitido(self):
+        self.contrato.garantir_encargo_aluguel()
+        historico = EncargoContrato(
+            contrato=self.contrato, tipo='aluguel', valor=Decimal('1800.00'),
+            periodicidade='mensal', ativo=False,
+        )
+        historico.full_clean()  # não deve levantar
+        historico.save()
+        self.assertEqual(self.contrato.encargos.filter(tipo='aluguel').count(), 2)
+
+
+# ─── Índices do Banco Central (API SGS mockada) ───────────────────────────────
+
+class IndicesBCBTest(TestCase):
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+
+    def _resposta_sgs(self, valores):
+        import io
+        import json
+        dados = [
+            {'data': f'01/{(i % 12) + 1:02d}/2025', 'valor': str(v)}
+            for i, v in enumerate(valores)
+        ]
+        return io.BytesIO(json.dumps(dados).encode('utf-8'))
+
+    def test_acumulado_12m_calculado_por_juros_compostos(self):
+        from unittest.mock import patch
+        from patrimonio.indices import variacao_acumulada_12m
+
+        # BytesIO é um context manager que retorna a si mesmo — serve como
+        # substituto direto da resposta de urlopen().
+        with patch('patrimonio.indices.urlopen', return_value=self._resposta_sgs(['1.0'] * 12)):
+            resultado = variacao_acumulada_12m('ipca')
+
+        # (1.01^12 - 1) * 100 ≈ 12.6825%
+        self.assertAlmostEqual(float(resultado['percentual']), 12.6825, places=3)
+
+    def test_indice_sem_serie_levanta_erro(self):
+        from patrimonio.indices import variacao_acumulada_12m, IndiceIndisponivelError
+        with self.assertRaises(IndiceIndisponivelError):
+            variacao_acumulada_12m('fixo')
+
+    def test_falha_de_rede_levanta_erro_amigavel(self):
+        from unittest.mock import patch
+        from urllib.error import URLError
+        from patrimonio.indices import variacao_acumulada_12m, IndiceIndisponivelError
+
+        with patch('patrimonio.indices.urlopen', side_effect=URLError('offline')):
+            with self.assertRaises(IndiceIndisponivelError):
+                variacao_acumulada_12m('igpm')
+
+    def test_admin_action_cria_reajuste_pendente(self):
+        from unittest.mock import patch
+        from django.contrib import admin as django_admin
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+        from patrimonio.admin import ContratoAdmin
+
+        imovel = _criar_imovel('Imóvel Reajuste')
+        locatario = _criar_pessoa('Locatário R', tipo='locatario')
+        contrato = _criar_contrato(
+            imovel, locatario, date(2024, 1, 1), date(2030, 12, 31),
+            indice_reajuste='ipca', data_proximo_reajuste=date(2026, 1, 1),
+        )
+
+        admin_instance = ContratoAdmin(Contrato, django_admin.site)
+        request = RequestFactory().post('/admin/patrimonio/contrato/')
+        request.user = User.objects.create_user('reajuste_admin', password='pass')
+        request.session = {}
+        request._messages = FallbackStorage(request)
+
+        resultado_mock = {'percentual': Decimal('5.0000'), 'inicio': '01/2025', 'fim': '12/2025'}
+        with patch('patrimonio.indices.variacao_acumulada_12m', return_value=resultado_mock):
+            admin_instance.sugerir_reajuste_indice(request, Contrato.objects.filter(pk=contrato.pk))
+
+        reajuste = ReajusteContrato.objects.get(contrato=contrato)
+        self.assertFalse(reajuste.aplicado)
+        self.assertEqual(reajuste.percentual_aplicado, Decimal('5.0000'))
+        self.assertEqual(reajuste.valor_anterior, Decimal('2000.00'))
+        self.assertEqual(reajuste.valor_novo, Decimal('2100.00'))
+        self.assertEqual(reajuste.data_reajuste, date(2026, 1, 1))
+        # Rodar de novo não duplica: contrato já tem reajuste pendente
+        with patch('patrimonio.indices.variacao_acumulada_12m', return_value=resultado_mock):
+            admin_instance.sugerir_reajuste_indice(request, Contrato.objects.filter(pk=contrato.pk))
+        self.assertEqual(ReajusteContrato.objects.filter(contrato=contrato).count(), 1)
+
+
+# ─── Indicadores patrimoniais ─────────────────────────────────────────────────
+
+class IndicadoresImovelTest(TestCase):
+    def setUp(self):
+        self.imovel = _criar_imovel('Imóvel Indicadores', valor_estimado=Decimal('240000.00'))
+        self.locatario = _criar_pessoa('Locatário I', tipo='locatario')
+        hoje = timezone.localdate()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario,
+            hoje.replace(day=1) - timedelta(days=400), hoje + timedelta(days=365),
+        )
+
+    def test_indicadores_com_receita_recebida(self):
+        from financeiro.models import ReceitaAluguel
+        from patrimonio.indicadores import indicadores_do_imovel
+
+        hoje = timezone.localdate()
+        ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=hoje.month, competencia_ano=hoje.year,
+            data_vencimento=hoje, valor_previsto=Decimal('2000.00'),
+            valor_recebido=Decimal('2000.00'), status='recebido',
+        )
+        ind = indicadores_do_imovel(self.imovel)
+        self.assertEqual(ind['receita_12m'], Decimal('2000.00'))
+        self.assertEqual(ind['resultado_12m'], Decimal('2000.00'))
+        # 2000 / 240000 * 100 = 0.83%
+        self.assertEqual(ind['yield_bruto'], Decimal('0.83'))
+        self.assertEqual(ind['meses_ocupados'], 12)
+        self.assertEqual(ind['ocupacao'], Decimal('100.00'))
+
+    def test_yield_none_sem_valor_de_referencia(self):
+        from patrimonio.indicadores import indicadores_do_imovel
+        self.imovel.valor_estimado = None
+        self.imovel.save()
+        ind = indicadores_do_imovel(self.imovel)
+        self.assertIsNone(ind['yield_bruto'])
+        self.assertIsNone(ind['yield_liquido'])
+
+    def test_imovel_sem_contrato_tem_ocupacao_zero(self):
+        from patrimonio.indicadores import indicadores_do_imovel
+        vazio = _criar_imovel('Imóvel Vazio')
+        ind = indicadores_do_imovel(vazio)
+        self.assertEqual(ind['meses_ocupados'], 0)

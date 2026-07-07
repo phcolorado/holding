@@ -1,4 +1,5 @@
 from django.contrib import admin
+from simple_history.admin import SimpleHistoryAdmin
 from .models import ReceitaAluguel, ReceitaAluguelItem, Despesa, FechamentoMensal
 
 
@@ -9,7 +10,7 @@ class ReceitaAluguelItemInline(admin.TabularInline):
 
 
 @admin.register(ReceitaAluguel)
-class ReceitaAluguelAdmin(admin.ModelAdmin):
+class ReceitaAluguelAdmin(SimpleHistoryAdmin):
     list_display = (
         'imovel', 'competencia_mes', 'competencia_ano',
         'valor_previsto', 'valor_recebido', 'data_vencimento', 'status',
@@ -47,7 +48,7 @@ class ReceitaAluguelAdmin(admin.ModelAdmin):
 
 
 @admin.register(Despesa)
-class DespesaAdmin(admin.ModelAdmin):
+class DespesaAdmin(SimpleHistoryAdmin):
     list_display = (
         'descricao', 'imovel', 'categoria', 'valor', 'data_vencimento',
         'status', 'origem_automatica',
@@ -83,7 +84,7 @@ class DespesaAdmin(admin.ModelAdmin):
 
 
 @admin.register(FechamentoMensal)
-class FechamentoMensalAdmin(admin.ModelAdmin):
+class FechamentoMensalAdmin(SimpleHistoryAdmin):
     list_display = ('mes', 'ano', 'data_fechamento', 'enviado_contabilidade', 'data_envio_contabilidade')
     list_filter = ('enviado_contabilidade', 'ano')
     readonly_fields = ('criado_em', 'atualizado_em')

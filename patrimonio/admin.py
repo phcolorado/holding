@@ -1,4 +1,9 @@
+from decimal import Decimal
+
 from django.contrib import admin, messages
+from django.utils import timezone
+from simple_history.admin import SimpleHistoryAdmin
+
 from .models import (
     Imovel, Pessoa, Contrato, Manutencao,
     ContratoParte, EncargoContrato, ReajusteContrato,
@@ -7,7 +12,7 @@ from documentos.models import Documento
 
 
 @admin.register(Imovel)
-class ImovelAdmin(admin.ModelAdmin):
+class ImovelAdmin(SimpleHistoryAdmin):
     list_display = (
         'nome', 'cidade', 'estado', 'tipo_imovel', 'uso', 'status',
         'imovel_pai', 'proprietario', 'valor_estimado', 'criado_em',
@@ -46,7 +51,7 @@ class ImovelAdmin(admin.ModelAdmin):
 
 
 @admin.register(Pessoa)
-class PessoaAdmin(admin.ModelAdmin):
+class PessoaAdmin(SimpleHistoryAdmin):
     list_display = ('nome', 'tipo', 'cpf_cnpj', 'email', 'telefone', 'criado_em')
     list_filter = ('tipo',)
     search_fields = ('nome', 'cpf_cnpj', 'email', 'telefone')
@@ -104,7 +109,7 @@ class DocumentoContratoInline(admin.TabularInline):
 
 
 @admin.register(Contrato)
-class ContratoAdmin(admin.ModelAdmin):
+class ContratoAdmin(SimpleHistoryAdmin):
     list_display = (
         'imovel', 'locatarios_display', 'vigencia_display', 'valor_aluguel',
         'status', 'indice_reajuste',
@@ -118,7 +123,7 @@ class ContratoAdmin(admin.ModelAdmin):
     readonly_fields = ('criado_em', 'atualizado_em')
     ordering = ('-data_inicio',)
     raw_id_fields = ('imovel', 'locatario', 'fiador', 'imobiliaria')
-    actions = ['gerar_receitas_esperadas', 'garantir_encargo_aluguel_action']
+    actions = ['gerar_receitas_esperadas', 'garantir_encargo_aluguel_action', 'sugerir_reajuste_indice']
     inlines = [ContratoParteInline, EncargoContratoInline, ReajusteContratoInline, DocumentoContratoInline]
 
     @admin.action(description='Garantir encargo de aluguel')
@@ -131,6 +136,81 @@ class ContratoAdmin(admin.ModelAdmin):
             self.message_user(request, f'{total} encargo(s) de aluguel criado(s).', messages.SUCCESS)
         else:
             self.message_user(request, 'Nenhum encargo de aluguel precisou ser criado.', messages.WARNING)
+
+    @admin.action(description='Sugerir reajuste pelo índice acumulado 12m (Banco Central)')
+    def sugerir_reajuste_indice(self, request, queryset):
+        """
+        Consulta o acumulado de 12 meses do índice do contrato na API do
+        Banco Central e cria um ReajusteContrato pendente (aplicado=False)
+        para revisão. Não altera valores vigentes.
+        """
+        from .indices import variacao_acumulada_12m, IndiceIndisponivelError, SERIES_SGS
+
+        hoje = timezone.localdate()
+        criados = 0
+        sem_indice = 0
+        ja_pendentes = 0
+        inativos = 0
+
+        for contrato in queryset:
+            if contrato.status != 'ativo':
+                inativos += 1
+                continue
+            if contrato.indice_reajuste not in SERIES_SGS:
+                sem_indice += 1
+                continue
+            if contrato.reajustes.filter(aplicado=False).exists():
+                ja_pendentes += 1
+                continue
+
+            try:
+                resultado = variacao_acumulada_12m(contrato.indice_reajuste)
+            except IndiceIndisponivelError as exc:
+                self.message_user(request, str(exc), messages.ERROR)
+                return
+
+            percentual = resultado['percentual']
+            valor_novo = (
+                contrato.valor_aluguel * (Decimal('1') + percentual / Decimal('100'))
+            ).quantize(Decimal('0.01'))
+
+            ReajusteContrato.objects.create(
+                contrato=contrato,
+                data_reajuste=contrato.data_proximo_reajuste or hoje,
+                indice=contrato.indice_reajuste,
+                percentual_aplicado=percentual,
+                valor_anterior=contrato.valor_aluguel,
+                valor_novo=valor_novo,
+                aplicado=False,
+                observacoes=(
+                    f'Sugestão automática — {contrato.get_indice_reajuste_display()} acumulado '
+                    f'{resultado["inicio"]} a {resultado["fim"]}: {percentual}% (fonte: Banco Central/SGS). '
+                    'Revise e marque "Aplicado" para efetivar.'
+                ),
+            )
+            criados += 1
+
+        if criados:
+            self.message_user(
+                request,
+                f'{criados} sugestão(ões) de reajuste criada(s) — revise na seção '
+                '"Reajustes de Contrato" e marque "Aplicado" para efetivar.',
+                messages.SUCCESS,
+            )
+        if ja_pendentes:
+            self.message_user(
+                request,
+                f'{ja_pendentes} contrato(s) ignorado(s): já possuem reajuste pendente de aplicação.',
+                messages.WARNING,
+            )
+        if sem_indice:
+            self.message_user(
+                request,
+                f'{sem_indice} contrato(s) ignorado(s): índice sem série no Banco Central (fixo/outro).',
+                messages.WARNING,
+            )
+        if inativos:
+            self.message_user(request, f'{inativos} contrato(s) ignorado(s) por não estarem ativos.', messages.WARNING)
 
     @admin.action(description='Gerar receitas esperadas')
     def gerar_receitas_esperadas(self, request, queryset):
@@ -234,7 +314,7 @@ class ContratoAdmin(admin.ModelAdmin):
 
 
 @admin.register(Manutencao)
-class ManutencaoAdmin(admin.ModelAdmin):
+class ManutencaoAdmin(SimpleHistoryAdmin):
     list_display = ('descricao', 'imovel', 'categoria', 'fornecedor', 'status', 'data_solicitacao', 'valor_final')
     list_filter = ('status', 'categoria', 'imovel')
     search_fields = ('descricao', 'imovel__nome', 'fornecedor__nome')

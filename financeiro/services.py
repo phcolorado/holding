@@ -2,6 +2,7 @@ from calendar import monthrange
 from datetime import date
 from decimal import Decimal
 
+from django.db import transaction
 from django.db.models import Q
 
 from .models import ReceitaAluguel, ReceitaAluguelItem, Despesa
@@ -40,7 +41,12 @@ def _criar_despesa_administracao(contrato, receita, ano, mes):
         return None
 
     encargo_aluguel = contrato.encargos.filter(tipo='aluguel', ativo=True).first()
-    if encargo_aluguel and encargo_aluguel.aplica_em(ano, mes):
+    if encargo_aluguel:
+        # Quando o encargo de aluguel existe mas não se aplica à competência
+        # (ex.: carência via data_inicio_cobranca), nenhum aluguel é cobrado
+        # no mês — logo não há base para a taxa de administração.
+        if not encargo_aluguel.aplica_em(ano, mes):
+            return None
         base = encargo_aluguel.valor
     else:
         base = contrato.valor_aluguel
@@ -65,6 +71,7 @@ def _criar_despesa_administracao(contrato, receita, ano, mes):
     return despesa
 
 
+@transaction.atomic
 def gerar_receitas_para_contrato(contrato, data_inicio=None, data_fim=None):
     """
     Gera ReceitaAluguel para cada mês da vigência do contrato.
@@ -159,6 +166,44 @@ def gerar_receitas_para_contrato(contrato, data_inicio=None, data_fim=None):
             mes += 1
 
     return criadas, ja_existiam
+
+
+def serie_fluxo_caixa_12m(referencia=None):
+    """
+    Série mensal (últimos 12 meses de competência) de receitas recebidas e
+    despesas pagas, para o gráfico de fluxo de caixa do dashboard.
+    Retorna lista cronológica de dicts: {'label': 'mm/aaaa', 'recebido': float, 'pago': float}.
+    """
+    from django.db.models import Sum
+    from patrimonio.indicadores import competencias_ultimos_12_meses, filtro_competencias
+
+    competencias = competencias_ultimos_12_meses(referencia)
+    filtro = filtro_competencias(competencias)
+
+    recebidos = {
+        (r['competencia_ano'], r['competencia_mes']): r['total']
+        for r in ReceitaAluguel.objects.filter(filtro, status__in=('recebido', 'parcial'))
+        .values('competencia_ano', 'competencia_mes')
+        .annotate(total=Sum('valor_recebido'))
+    }
+    pagos = {
+        (d['competencia_ano'], d['competencia_mes']): d['total']
+        for d in Despesa.objects.filter(filtro, status='paga')
+        .values('competencia_ano', 'competencia_mes')
+        .annotate(total=Sum('valor'))
+    }
+
+    serie = []
+    for ano, mes in competencias:
+        recebido = float(recebidos.get((ano, mes)) or 0)
+        pago = float(pagos.get((ano, mes)) or 0)
+        serie.append({
+            'label': f'{mes:02d}/{ano}',
+            'recebido': recebido,
+            'pago': pago,
+            'saldo': recebido - pago,
+        })
+    return serie
 
 
 def contratos_para_geracao_mes(mes, ano):

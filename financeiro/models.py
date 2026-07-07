@@ -3,7 +3,14 @@ from decimal import Decimal
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
+from simple_history.models import HistoricalRecords
 from patrimonio.models import Imovel, Pessoa, Contrato
+
+MESES = [
+    (1, 'Janeiro'), (2, 'Fevereiro'), (3, 'Março'), (4, 'Abril'),
+    (5, 'Maio'), (6, 'Junho'), (7, 'Julho'), (8, 'Agosto'),
+    (9, 'Setembro'), (10, 'Outubro'), (11, 'Novembro'), (12, 'Dezembro'),
+]
 
 
 class ReceitaAluguel(models.Model):
@@ -17,11 +24,7 @@ class ReceitaAluguel(models.Model):
     # Statuses that indicate the receipt is settled (not considered overdue)
     STATUS_QUITADOS = frozenset({'recebido', 'parcial', 'cancelado'})
 
-    MESES = [
-        (1, 'Janeiro'), (2, 'Fevereiro'), (3, 'Março'), (4, 'Abril'),
-        (5, 'Maio'), (6, 'Junho'), (7, 'Julho'), (8, 'Agosto'),
-        (9, 'Setembro'), (10, 'Outubro'), (11, 'Novembro'), (12, 'Dezembro'),
-    ]
+    MESES = MESES
 
     contrato = models.ForeignKey(Contrato, on_delete=models.PROTECT, verbose_name='Contrato')
     imovel = models.ForeignKey(
@@ -41,6 +44,7 @@ class ReceitaAluguel(models.Model):
     observacoes = models.TextField('Observações', blank=True)
     criado_em = models.DateTimeField('Criado em', auto_now_add=True)
     atualizado_em = models.DateTimeField('Atualizado em', auto_now=True)
+    history = HistoricalRecords()
 
     class Meta:
         verbose_name = 'Receita de Aluguel'
@@ -59,7 +63,7 @@ class ReceitaAluguel(models.Model):
         """
         return (
             self.status not in self.STATUS_QUITADOS
-            and self.data_vencimento < timezone.now().date()
+            and self.data_vencimento < timezone.localdate()
         )
 
     def clean(self):
@@ -84,7 +88,7 @@ class ReceitaAluguel(models.Model):
         Sugestão de multa/juros por atraso com base nas regras do contrato.
         Apenas calcula e retorna — nunca altera o registro automaticamente.
         """
-        data_ref = data_recebimento or timezone.now().date()
+        data_ref = data_recebimento or timezone.localdate()
         contrato = self.contrato
         dias_atraso = (data_ref - self.data_vencimento).days
 
@@ -136,11 +140,7 @@ class Despesa(models.Model):
     # Statuses that indicate the expense is settled
     STATUS_ENCERRADOS = frozenset({'paga', 'cancelada'})
 
-    MESES = [
-        (1, 'Janeiro'), (2, 'Fevereiro'), (3, 'Março'), (4, 'Abril'),
-        (5, 'Maio'), (6, 'Junho'), (7, 'Julho'), (8, 'Agosto'),
-        (9, 'Setembro'), (10, 'Outubro'), (11, 'Novembro'), (12, 'Dezembro'),
-    ]
+    MESES = MESES
 
     imovel = models.ForeignKey(Imovel, on_delete=models.PROTECT, null=True, blank=True, verbose_name='Imóvel')
     contrato = models.ForeignKey(
@@ -169,6 +169,7 @@ class Despesa(models.Model):
     observacoes = models.TextField('Observações', blank=True)
     criado_em = models.DateTimeField('Criado em', auto_now_add=True)
     atualizado_em = models.DateTimeField('Atualizado em', auto_now=True)
+    history = HistoricalRecords()
 
     class Meta:
         verbose_name = 'Despesa'
@@ -187,7 +188,7 @@ class Despesa(models.Model):
         """
         return (
             self.status not in self.STATUS_ENCERRADOS
-            and self.data_vencimento < timezone.now().date()
+            and self.data_vencimento < timezone.localdate()
         )
 
     def verificar_atraso(self):
@@ -198,11 +199,7 @@ class Despesa(models.Model):
 
 
 class FechamentoMensal(models.Model):
-    MESES = [
-        (1, 'Janeiro'), (2, 'Fevereiro'), (3, 'Março'), (4, 'Abril'),
-        (5, 'Maio'), (6, 'Junho'), (7, 'Julho'), (8, 'Agosto'),
-        (9, 'Setembro'), (10, 'Outubro'), (11, 'Novembro'), (12, 'Dezembro'),
-    ]
+    MESES = MESES
 
     mes = models.PositiveSmallIntegerField('Mês', choices=MESES)
     ano = models.PositiveSmallIntegerField('Ano')
@@ -212,6 +209,7 @@ class FechamentoMensal(models.Model):
     data_envio_contabilidade = models.DateField('Data de Envio à Contabilidade', null=True, blank=True)
     criado_em = models.DateTimeField('Criado em', auto_now_add=True)
     atualizado_em = models.DateTimeField('Atualizado em', auto_now=True)
+    history = HistoricalRecords()
 
     class Meta:
         verbose_name = 'Fechamento Mensal'
@@ -229,7 +227,7 @@ def receitas_inadimplentes_qs():
     Usa regra de vencimento — independe do campo status.
     """
     return ReceitaAluguel.objects.filter(
-        data_vencimento__lt=timezone.now().date()
+        data_vencimento__lt=timezone.localdate()
     ).exclude(
         status__in=ReceitaAluguel.STATUS_QUITADOS
     )

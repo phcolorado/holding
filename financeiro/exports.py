@@ -1,6 +1,4 @@
 import csv
-import io
-from datetime import date
 
 from django.http import HttpResponse
 from django.utils import timezone
@@ -14,7 +12,6 @@ except ImportError:
     OPENPYXL_AVAILABLE = False
 
 from .models import ReceitaAluguel, Despesa, receitas_inadimplentes_qs
-from patrimonio.models import Imovel, Contrato
 
 
 # ─── helpers ───────────────────────────────────────────────────────────────────
@@ -240,7 +237,7 @@ CABECALHO_INADIMPLENCIA = [
 
 
 def _linhas_inadimplencia(receitas_atrasadas):
-    hoje = date.today()
+    hoje = timezone.localdate()
     for r in receitas_atrasadas:
         dias = (hoje - r.data_vencimento).days
         locatario = r.contrato.locatario.nome if r.contrato else ''
@@ -275,6 +272,38 @@ def exportar_inadimplencia_xlsx(request, receitas_atrasadas):
     return response
 
 
+# ─── resumo por imóvel (agrupamento em memória, uma passada) ───────────────────
+
+def _resumo_por_imovel(receitas, despesas):
+    """
+    Agrupa receitas/despesas por imóvel em uma única passada.
+    Retorna lista ordenada por nome: [(nome, {rec_prev, rec_rec, desp_pagas, em_aberto}), ...],
+    omitindo imóveis sem nenhum valor no período.
+    """
+    from collections import defaultdict
+    from decimal import Decimal
+
+    dados = defaultdict(lambda: {
+        'rec_prev': Decimal('0.00'), 'rec_rec': Decimal('0.00'),
+        'desp_pagas': Decimal('0.00'), 'em_aberto': 0,
+    })
+    for r in receitas:
+        item = dados[r.imovel.nome]
+        item['rec_prev'] += r.valor_previsto
+        if r.status in ('recebido', 'parcial'):
+            item['rec_rec'] += r.valor_recebido or Decimal('0.00')
+        if r.status not in ReceitaAluguel.STATUS_QUITADOS:
+            item['em_aberto'] += 1
+    for d in despesas:
+        if d.imovel_id and d.status == 'paga':
+            dados[d.imovel.nome]['desp_pagas'] += d.valor
+
+    return sorted(
+        (nome, item) for nome, item in dados.items()
+        if item['rec_prev'] or item['rec_rec'] or item['desp_pagas']
+    )
+
+
 # ─── relatório mensal ──────────────────────────────────────────────────────────
 
 def exportar_relatorio_mensal_xlsx(request, mes, ano):
@@ -304,16 +333,16 @@ def exportar_relatorio_mensal_xlsx(request, mes, ano):
         ws_desp.append(linha)
     _estilizar_cabecalho(ws_desp, len(CABECALHO_DESPESAS))
 
-    # Aba resumo por imóvel
+    # Aba resumo por imóvel — agrupamento em uma passada só
     ws_res = wb.create_sheet('Resumo por Imóvel')
     ws_res.append(['Imóvel', 'Receita Prevista', 'Receita Recebida', 'Despesas Pagas', 'Resultado'])
     _estilizar_cabecalho(ws_res, 5)
-    for imovel in Imovel.objects.all():
-        rec_prev = sum(r.valor_previsto for r in receitas if r.imovel_id == imovel.pk)
-        rec_rec = sum(r.valor_recebido or 0 for r in receitas if r.imovel_id == imovel.pk and r.status in ('recebido', 'parcial'))
-        desp_pagas = sum(d.valor for d in despesas if d.imovel_id == imovel.pk and d.status == 'paga')
-        if rec_prev or rec_rec or desp_pagas:
-            ws_res.append([imovel.nome, rec_prev, rec_rec, desp_pagas, rec_rec - desp_pagas])
+    resumo = _resumo_por_imovel(receitas, despesas)
+    for nome, dados in resumo:
+        ws_res.append([
+            nome, dados['rec_prev'], dados['rec_rec'], dados['desp_pagas'],
+            dados['rec_rec'] - dados['desp_pagas'],
+        ])
 
     response = _response_xlsx(f'relatorio_{mes:02d}_{ano}.xlsx')
     wb.save(response)
@@ -457,19 +486,12 @@ def exportar_relatorio_contabilidade_xlsx(request, mes, ano):
     cab_im = ['Imóvel', 'Rec. Prevista', 'Rec. Recebida', 'Desp. Pagas', 'Resultado', 'Em Aberto']
     ws_por_im.append(cab_im)
     _estilizar_cabecalho(ws_por_im, len(cab_im))
-    for imovel in Imovel.objects.all():
-        rec_prev = sum(r.valor_previsto for r in receitas if r.imovel_id == imovel.pk)
-        rec_rec = sum(
-            r.valor_recebido or 0 for r in receitas
-            if r.imovel_id == imovel.pk and r.status in ('recebido', 'parcial')
-        )
-        desp_p = sum(d.valor for d in despesas if d.imovel_id == imovel.pk and d.status == 'paga')
-        em_aberto = sum(1 for r in receitas if r.imovel_id == imovel.pk and r.status not in ReceitaAluguel.STATUS_QUITADOS)
-        if rec_prev or rec_rec or desp_p:
-            ws_por_im.append([
-                imovel.nome, float(rec_prev), float(rec_rec),
-                float(desp_p), float(rec_rec - desp_p), em_aberto,
-            ])
+    for nome, dados in _resumo_por_imovel(receitas, despesas):
+        ws_por_im.append([
+            nome, float(dados['rec_prev']), float(dados['rec_rec']),
+            float(dados['desp_pagas']), float(dados['rec_rec'] - dados['desp_pagas']),
+            dados['em_aberto'],
+        ])
 
     response = _response_xlsx(f'contabilidade_{mes:02d}_{ano}.xlsx')
     wb.save(response)

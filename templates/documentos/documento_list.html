@@ -29,10 +29,16 @@
                     {% endfor %}
                 </select>
             </div>
-            <div class="col-md-3">
+            <div class="col-md-2">
                 <select name="pendente" class="form-select form-select-sm">
                     <option value="">Todos</option>
                     <option value="1" {% if pendente_atual == '1' %}selected{% endif %}>Pendentes p/ contabilidade</option>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <select name="vencendo" class="form-select form-select-sm">
+                    <option value="">Qualquer validade</option>
+                    <option value="1" {% if vencendo_atual == '1' %}selected{% endif %}>Vencendo/vencidos (30 dias)</option>
                 </select>
             </div>
             <div class="col-auto">
@@ -63,9 +69,11 @@
                     <td>{{ doc.data_documento|date:"d/m/Y"|default:"—" }}</td>
                     <td>
                         {% if doc.data_validade %}
-                            <span class="{% if doc.data_validade < hoje %}text-danger fw-semibold{% endif %}">
+                            <span class="{% if doc.vencido %}text-danger fw-semibold{% elif doc.vence_em_breve %}text-warning fw-semibold{% endif %}">
                                 {{ doc.data_validade|date:"d/m/Y" }}
                             </span>
+                            {% if doc.vencido %}<span class="badge bg-danger ms-1">Vencido</span>
+                            {% elif doc.vence_em_breve %}<span class="badge bg-warning text-dark ms-1">Vence em breve</span>{% endif %}
                         {% else %}—{% endif %}
                     </td>
                     <td>
@@ -78,7 +86,7 @@
                         {% endif %}
                     </td>
                     <td>
-                        <a href="{{ doc.arquivo.url }}" target="_blank" class="btn btn-sm btn-outline-primary me-1"
+                        <a href="{% url 'documento_download' doc.pk %}" target="_blank" class="btn btn-sm btn-outline-primary me-1"
                            title="Baixar">
                             <i class="bi bi-download"></i>
                         </a>

@@ -1,5 +1,7 @@
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
+from django.core.exceptions import PermissionDenied
+from django.core.paginator import Paginator
 from django.db.models import Q
 from django.http import HttpResponseRedirect
 from django.shortcuts import get_object_or_404, render
@@ -7,6 +9,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from .models import ReceitaAluguel, Despesa, FechamentoMensal
+from .forms import BaixaReceitaForm
 from .exports import (
     exportar_imoveis_csv, exportar_imoveis_xlsx,
     exportar_contratos_csv, exportar_contratos_xlsx,
@@ -16,17 +19,36 @@ from .exports import (
     exportar_relatorio_mensal_xlsx,
     exportar_relatorio_contabilidade_xlsx,
 )
-from patrimonio.models import Imovel, Contrato
+from core.utils import anos_para_filtro, int_param, mes_ano_da_request, pk_param
+from patrimonio.models import Imovel, Contrato, imobiliarias_queryset
+
+ITENS_POR_PAGINA = 50
 
 
 def _filtros_periodo(request):
-    hoje = timezone.now().date()
-    mes = int(request.GET.get('mes', hoje.month))
-    ano = int(request.GET.get('ano', hoje.year))
-    imovel_id = request.GET.get('imovel', '')
+    mes, ano = mes_ano_da_request(request)
+    imovel_id = pk_param(request.GET.get('imovel'))
     status = request.GET.get('status', '')
     categoria = request.GET.get('categoria', '')
     return mes, ano, imovel_id, status, categoria
+
+
+def _paginar(request, queryset):
+    paginator = Paginator(queryset, ITENS_POR_PAGINA)
+    numero = int_param(request.GET.get('page'), 1, minimo=1)
+    return paginator.get_page(numero)
+
+
+def _query_string_sem_page(request):
+    """Query string atual sem o parâmetro page — usada nos links de paginação."""
+    params = request.GET.copy()
+    params.pop('page', None)
+    return params.urlencode()
+
+
+def _exigir_permissao(request, perm):
+    if not request.user.has_perm(perm):
+        raise PermissionDenied
 
 
 @login_required
@@ -41,20 +63,20 @@ def receitas_list(request):
     if status:
         receitas = receitas.filter(status=status)
 
-    imoveis = Imovel.objects.all()
-    anos = range(2020, timezone.now().year + 2)
-    meses = ReceitaAluguel.MESES
+    pagina = _paginar(request, receitas)
 
     context = {
-        'receitas': receitas,
-        'imoveis': imoveis,
+        'receitas': pagina,
+        'pagina': pagina,
+        'query_string': _query_string_sem_page(request),
+        'imoveis': Imovel.objects.all(),
         'mes_atual': mes,
         'ano_atual': ano,
         'status_atual': status,
         'imovel_atual': imovel_id,
         'status_choices': ReceitaAluguel.STATUS_CHOICES,
-        'meses': meses,
-        'anos': anos,
+        'meses': ReceitaAluguel.MESES,
+        'anos': anos_para_filtro(),
     }
     return render(request, 'financeiro/receitas_list.html', context)
 
@@ -63,9 +85,9 @@ def receitas_list(request):
 def despesas_list(request):
     mes, ano, imovel_id, status, categoria = _filtros_periodo(request)
 
-    despesas = Despesa.objects.select_related('imovel', 'fornecedor').all()
-    if mes and ano:
-        despesas = despesas.filter(competencia_mes=mes, competencia_ano=ano)
+    despesas = Despesa.objects.select_related('imovel', 'fornecedor').filter(
+        competencia_mes=mes, competencia_ano=ano
+    )
     if imovel_id:
         despesas = despesas.filter(imovel_id=imovel_id)
     if status:
@@ -73,13 +95,13 @@ def despesas_list(request):
     if categoria:
         despesas = despesas.filter(categoria=categoria)
 
-    imoveis = Imovel.objects.all()
-    anos = range(2020, timezone.now().year + 2)
-    meses = Despesa.MESES
+    pagina = _paginar(request, despesas)
 
     context = {
-        'despesas': despesas,
-        'imoveis': imoveis,
+        'despesas': pagina,
+        'pagina': pagina,
+        'query_string': _query_string_sem_page(request),
+        'imoveis': Imovel.objects.all(),
         'mes_atual': mes,
         'ano_atual': ano,
         'status_atual': status,
@@ -87,35 +109,23 @@ def despesas_list(request):
         'categoria_atual': categoria,
         'status_choices': Despesa.STATUS_CHOICES,
         'categoria_choices': Despesa.CATEGORIA_CHOICES,
-        'meses': meses,
-        'anos': anos,
+        'meses': Despesa.MESES,
+        'anos': anos_para_filtro(),
     }
     return render(request, 'financeiro/despesas_list.html', context)
 
 
 @login_required
 def relatorios(request):
-    from patrimonio.models import Pessoa, ContratoParte
-
-    hoje = timezone.now().date()
-
-    imobiliarias_ids = set(
-        Contrato.objects.exclude(imobiliaria__isnull=True).values_list('imobiliaria_id', flat=True)
-    )
-    imobiliarias_ids |= set(
-        ContratoParte.objects.filter(papel='imobiliaria').values_list('pessoa_id', flat=True)
-    )
-    imobiliarias = Pessoa.objects.filter(
-        Q(pk__in=imobiliarias_ids) | Q(tipo='imobiliaria')
-    ).distinct().order_by('nome')
+    hoje = timezone.localdate()
 
     context = {
         'imoveis': Imovel.objects.all(),
-        'imobiliarias': imobiliarias,
+        'imobiliarias': imobiliarias_queryset(),
         'mes_atual': hoje.month,
         'ano_atual': hoje.year,
         'meses': ReceitaAluguel.MESES,
-        'anos': range(2020, hoje.year + 2),
+        'anos': anos_para_filtro(),
         'status_receita': ReceitaAluguel.STATUS_CHOICES,
         'status_despesa': Despesa.STATUS_CHOICES,
         'categoria_despesa': Despesa.CATEGORIA_CHOICES,
@@ -127,7 +137,8 @@ def relatorios(request):
 
 @login_required
 def export_imoveis(request, formato):
-    imoveis = Imovel.objects.filter(status=request.GET.get('status')) if request.GET.get('status') else Imovel.objects.all()
+    status = request.GET.get('status', '')
+    imoveis = Imovel.objects.filter(status=status) if status else Imovel.objects.all()
     if formato == 'csv':
         return exportar_imoveis_csv(request, imoveis)
     return exportar_imoveis_xlsx(request, imoveis)
@@ -136,8 +147,8 @@ def export_imoveis(request, formato):
 @login_required
 def export_contratos(request, formato):
     status = request.GET.get('status', '')
-    imovel_id = request.GET.get('imovel', '')
-    imobiliaria_id = request.GET.get('imobiliaria', '')
+    imovel_id = pk_param(request.GET.get('imovel'))
+    imobiliaria_id = pk_param(request.GET.get('imobiliaria'))
     contratos = Contrato.objects.select_related('imovel', 'locatario', 'fiador', 'imobiliaria')
     if status:
         contratos = contratos.filter(status=status)
@@ -189,7 +200,7 @@ def export_despesas(request, formato):
 @login_required
 def export_inadimplencia(request, formato):
     from .models import receitas_inadimplentes_qs
-    imovel_id = request.GET.get('imovel', '')
+    imovel_id = pk_param(request.GET.get('imovel'))
     receitas = receitas_inadimplentes_qs().select_related('imovel', 'contrato__locatario')
     if imovel_id:
         receitas = receitas.filter(imovel_id=imovel_id)
@@ -206,9 +217,7 @@ def export_relatorio_mensal(request, formato):
 
 @login_required
 def export_relatorio_contabilidade(request):
-    hoje = timezone.now().date()
-    mes = int(request.GET.get('mes', hoje.month))
-    ano = int(request.GET.get('ano', hoje.year))
+    mes, ano = mes_ano_da_request(request)
     return exportar_relatorio_contabilidade_xlsx(request, mes, ano)
 
 
@@ -218,20 +227,16 @@ def baixa_receitas_mes_view(request):
     GET: lista as receitas do mês para conferência.
     POST: atualiza individualmente (marcar_recebida ou editar).
     """
-    hoje = timezone.now().date()
-    try:
-        mes = int(request.GET.get('mes') or request.POST.get('mes') or hoje.month)
-        ano = int(request.GET.get('ano') or request.POST.get('ano') or hoje.year)
-    except (ValueError, TypeError):
-        mes, ano = hoje.month, hoje.year
-
-    imovel_id = request.GET.get('imovel') or request.POST.get('imovel') or ''
+    hoje = timezone.localdate()
+    mes, ano = mes_ano_da_request(request)
+    imovel_id = pk_param(request.GET.get('imovel') or request.POST.get('imovel'))
 
     if request.method == 'POST':
         action = request.POST.get('action', '')
-        receita_id = request.POST.get('receita_id')
+        receita_id = pk_param(request.POST.get('receita_id'))
 
         if action == 'gerar_receitas':
+            _exigir_permissao(request, 'financeiro.add_receitaaluguel')
             from .services import gerar_receitas_mes
             criadas, existiam = gerar_receitas_mes(mes, ano)
             if criadas:
@@ -242,10 +247,11 @@ def baixa_receitas_mes_view(request):
                 messages.warning(request, f'Nenhum contrato ativo para {mes:02d}/{ano}.')
 
         elif receita_id:
+            _exigir_permissao(request, 'financeiro.change_receitaaluguel')
             receita = get_object_or_404(ReceitaAluguel, pk=receita_id)
 
             if action == 'marcar_recebida':
-                if not receita.valor_recebido:
+                if receita.valor_recebido is None:
                     receita.valor_recebido = receita.valor_previsto
                 if not receita.data_recebimento:
                     receita.data_recebimento = hoje
@@ -254,20 +260,16 @@ def baixa_receitas_mes_view(request):
                 messages.success(request, f'{receita.imovel.nome} marcado como recebido.')
 
             elif action == 'editar':
-                valor = request.POST.get('valor_recebido', '').strip()
-                data = request.POST.get('data_recebimento', '').strip()
-                multa = request.POST.get('multa', '').strip()
-                juros = request.POST.get('juros', '').strip()
-                receita.valor_recebido = valor if valor else None
-                receita.data_recebimento = data if data else None
-                if multa:
-                    receita.multa = multa
-                if juros:
-                    receita.juros = juros
-                receita.status = request.POST.get('status', receita.status)
-                receita.observacoes = request.POST.get('observacoes', '')
-                receita.save()
-                messages.success(request, f'{receita.imovel.nome} atualizado.')
+                form = BaixaReceitaForm(request.POST)
+                if form.is_valid():
+                    form.aplicar(receita)
+                    receita.save()
+                    messages.success(request, f'{receita.imovel.nome} atualizado.')
+                else:
+                    erros = '; '.join(
+                        erro for lista in form.errors.values() for erro in lista
+                    )
+                    messages.error(request, f'{receita.imovel.nome} não foi atualizado: {erros}')
 
         url = f"{reverse('baixa_receitas_mes')}?mes={mes}&ano={ano}"
         if imovel_id:
@@ -295,7 +297,7 @@ def baixa_receitas_mes_view(request):
         'imovel_atual': imovel_id,
         'imoveis': Imovel.objects.all(),
         'meses': ReceitaAluguel.MESES,
-        'anos': range(2020, hoje.year + 2),
+        'anos': anos_para_filtro(),
         'hoje': hoje,
         'status_choices': ReceitaAluguel.STATUS_CHOICES,
     }
@@ -309,18 +311,15 @@ def checklist_mensal_view(request):
     POST action=marcar_enviado: registra envio à contabilidade no FechamentoMensal.
     """
     from .models import receitas_inadimplentes_qs
-    from documentos.models import Documento, DocumentoObrigatorio
+    from documentos.models import Documento, DocumentoObrigatorio, documentos_vencendo_qs
 
-    hoje = timezone.now().date()
-    try:
-        mes = int(request.GET.get('mes') or request.POST.get('mes') or hoje.month)
-        ano = int(request.GET.get('ano') or request.POST.get('ano') or hoje.year)
-    except (ValueError, TypeError):
-        mes, ano = hoje.month, hoje.year
+    hoje = timezone.localdate()
+    mes, ano = mes_ano_da_request(request)
 
     if request.method == 'POST':
         action = request.POST.get('action', '')
         if action == 'marcar_enviado':
+            _exigir_permissao(request, 'financeiro.change_fechamentomensal')
             fechamento, _ = FechamentoMensal.objects.get_or_create(mes=mes, ano=ano)
             fechamento.enviado_contabilidade = True
             fechamento.data_envio_contabilidade = hoje
@@ -348,6 +347,8 @@ def checklist_mensal_view(request):
     docs_obrigatorios_pendentes = DocumentoObrigatorio.objects.filter(
         obrigatorio=True, documento__isnull=True
     ).count()
+
+    docs_validade_cnt = documentos_vencendo_qs().count()
 
     reajustes_pendentes = Contrato.objects.filter(
         status='ativo', data_proximo_reajuste__isnull=False, data_proximo_reajuste__lte=hoje,
@@ -411,6 +412,15 @@ def checklist_mensal_view(request):
             'link': reverse('admin:documentos_documentoobrigatorio_changelist'),
         },
         {
+            'item': 'Validade dos documentos em dia',
+            'ok': docs_validade_cnt == 0,
+            'detalhe': (
+                f'{docs_validade_cnt} documento(s) vencido(s) ou vencendo em 30 dias'
+                if docs_validade_cnt else 'Nenhum documento com validade vencendo'
+            ),
+            'link': reverse('documento_list') + '?vencendo=1',
+        },
+        {
             'item': 'Relatório contábil exportado',
             'ok': False,
             'informativa': True,
@@ -434,7 +444,7 @@ def checklist_mensal_view(request):
         'ano_atual': ano,
         'nome_mes': nome_mes,
         'meses': ReceitaAluguel.MESES,
-        'anos': range(2020, hoje.year + 2),
+        'anos': anos_para_filtro(),
         'checklist': checklist,
         'fechamento': fechamento,
         'total_receitas': total_receitas,
@@ -445,6 +455,7 @@ def checklist_mensal_view(request):
         'inadimplentes': inadimplentes,
         'docs_pendentes_cnt': docs_pendentes_cnt,
         'docs_obrigatorios_pendentes': docs_obrigatorios_pendentes,
+        'docs_validade_cnt': docs_validade_cnt,
         'reajustes_pendentes': reajustes_pendentes,
     }
     return render(request, 'financeiro/checklist_mensal.html', context)
@@ -458,15 +469,10 @@ def gerar_receitas_mes_view(request):
     """
     from .services import gerar_receitas_mes, contratos_para_geracao_mes
 
-    hoje = timezone.now().date()
-
-    try:
-        mes = int(request.POST.get('mes') or request.GET.get('mes') or hoje.month)
-        ano = int(request.POST.get('ano') or request.GET.get('ano') or hoje.year)
-    except (ValueError, TypeError):
-        mes, ano = hoje.month, hoje.year
+    mes, ano = mes_ano_da_request(request)
 
     if request.method == 'POST':
+        _exigir_permissao(request, 'financeiro.add_receitaaluguel')
         criadas, existiam = gerar_receitas_mes(mes, ano)
 
         if criadas:
@@ -486,6 +492,6 @@ def gerar_receitas_mes_view(request):
         'ano_atual': ano,
         'contratos_ativos': contratos_ativos,
         'meses': ReceitaAluguel.MESES,
-        'anos': range(2020, hoje.year + 2),
+        'anos': anos_para_filtro(),
     }
     return render(request, 'financeiro/gerar_receitas.html', context)

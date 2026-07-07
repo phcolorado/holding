@@ -101,7 +101,7 @@
         </table>
     </div>
     <div class="card-footer text-muted small d-flex justify-content-between">
-        <span>{{ despesas|length }} despesa(s)</span>
+        <span>{{ pagina.paginator.count }} despesa(s)</span>
         <div>
             <a href="{% url 'export_despesas' 'csv' %}?mes={{ mes_atual }}&ano={{ ano_atual }}&status={{ status_atual }}&imovel={{ imovel_atual }}&categoria={{ categoria_atual }}"
                class="btn btn-sm btn-outline-secondary me-1">
@@ -114,4 +114,5 @@
         </div>
     </div>
 </div>
+{% include "includes/paginacao.html" %}
 {% endblock %}

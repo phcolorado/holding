@@ -1,12 +1,28 @@
+import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = 'django-insecure-trocar-em-producao-gerar-chave-segura'
 
-DEBUG = True
+def _env_bool(nome, padrao):
+    valor = os.environ.get(nome)
+    if valor is None:
+        return padrao
+    return valor.strip().lower() in ('1', 'true', 'yes', 'sim')
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1']
+
+# Em produção, defina DJANGO_SECRET_KEY e DJANGO_DEBUG=0 no ambiente.
+SECRET_KEY = os.environ.get(
+    'DJANGO_SECRET_KEY',
+    'django-insecure-trocar-em-producao-gerar-chave-segura',
+)
+
+DEBUG = _env_bool('DJANGO_DEBUG', True)
+
+ALLOWED_HOSTS = [
+    h.strip() for h in os.environ.get('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
+    if h.strip()
+]
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -17,6 +33,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'django.contrib.humanize',
     'widget_tweaks',
+    'simple_history',
     'core',
     'patrimonio',
     'financeiro',
@@ -31,6 +48,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'simple_history.middleware.HistoryRequestMiddleware',
 ]
 
 ROOT_URLCONF = 'gestao_patrimonial.urls'
@@ -53,12 +71,30 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'gestao_patrimonial.wsgi.application'
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+# Banco de dados: SQLite por padrão. Para Postgres, defina no ambiente:
+#   DB_ENGINE=django.db.backends.postgresql
+#   DB_NAME=holding DB_USER=... DB_PASSWORD=... DB_HOST=... DB_PORT=5432
+# e instale o driver (pip install psycopg2-binary).
+_db_engine = os.environ.get('DB_ENGINE', 'django.db.backends.sqlite3')
+if _db_engine == 'django.db.backends.sqlite3':
+    DATABASES = {
+        'default': {
+            'ENGINE': _db_engine,
+            'NAME': os.environ.get('DB_NAME', BASE_DIR / 'db.sqlite3'),
+        }
     }
-}
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': _db_engine,
+            'NAME': os.environ.get('DB_NAME', 'holding'),
+            'USER': os.environ.get('DB_USER', ''),
+            'PASSWORD': os.environ.get('DB_PASSWORD', ''),
+            'HOST': os.environ.get('DB_HOST', 'localhost'),
+            'PORT': os.environ.get('DB_PORT', '5432'),
+            'CONN_MAX_AGE': 60,
+        }
+    }
 
 AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
@@ -85,7 +121,9 @@ LOGIN_URL = '/login/'
 LOGIN_REDIRECT_URL = '/'
 LOGOUT_REDIRECT_URL = '/login/'
 
-def upload_documento(instance, filename):
-    imovel_id = getattr(instance.imovel, 'pk', 'sem_imovel') if instance.imovel else 'sem_imovel'
-    tipo = instance.tipo or 'outro'
-    return f'documentos/imovel_{imovel_id}/{tipo}/{filename}'
+# Endurecimento aplicado automaticamente quando DEBUG=0 (produção)
+if not DEBUG:
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    SECURE_REFERRER_POLICY = 'same-origin'

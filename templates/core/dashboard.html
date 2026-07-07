@@ -23,6 +23,11 @@
             <div class="small mt-1">
                 <span class="badge bg-white text-success">{{ imoveis_alugados }} alugados</span>
                 <span class="badge bg-white text-secondary ms-1">{{ imoveis_vagos }} vagos</span>
+                {% if ocupacao_percentual is not None %}
+                <span class="badge bg-white text-primary ms-1" title="{{ alugados_locaveis }} de {{ total_locaveis }} unidades locáveis alugadas">
+                    {{ ocupacao_percentual }}% ocupação
+                </span>
+                {% endif %}
             </div>
         </div>
     </div>
@@ -68,6 +73,43 @@
         </div>
     </div>
 </div>
+
+<!-- Fluxo de caixa 12 meses -->
+<div class="card shadow-sm mb-4">
+    <div class="card-header bg-white fw-semibold border-bottom d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-bar-chart-line me-2 text-primary"></i>Fluxo de Caixa — últimos 12 meses</span>
+        <button class="btn btn-sm btn-outline-secondary" type="button"
+                data-bs-toggle="collapse" data-bs-target="#tabela-fluxo" aria-expanded="false" aria-controls="tabela-fluxo">
+            <i class="bi bi-table me-1"></i>Ver tabela
+        </button>
+    </div>
+    <div class="card-body">
+        <div style="height: 280px;">
+            <canvas id="grafico-fluxo" role="img"
+                    aria-label="Gráfico de barras com receitas recebidas e despesas pagas por mês nos últimos 12 meses"></canvas>
+        </div>
+        <div class="collapse mt-3" id="tabela-fluxo">
+            <div class="table-responsive">
+                <table class="table table-sm mb-0">
+                    <thead class="table-light">
+                        <tr><th>Competência</th><th class="text-end">Recebido (R$)</th><th class="text-end">Pago (R$)</th><th class="text-end">Resultado (R$)</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for p in fluxo_caixa %}
+                        <tr>
+                            <td>{{ p.label }}</td>
+                            <td class="text-end">{{ p.recebido|floatformat:2|intcomma }}</td>
+                            <td class="text-end">{{ p.pago|floatformat:2|intcomma }}</td>
+                            <td class="text-end">{{ p.saldo|floatformat:2|intcomma }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{{ fluxo_caixa|json_script:"fluxo-caixa-data" }}
 
 <div class="row g-3 mb-4">
     <!-- Contratos vencendo -->
@@ -141,7 +183,46 @@
     </div>
 </div>
 
-<div class="row g-3">
+<div class="row g-3 mb-4">
+    <!-- Documentos com validade vencendo -->
+    <div class="col-md-6">
+        <div class="card shadow-sm h-100">
+            <div class="card-header bg-white fw-semibold border-bottom">
+                <i class="bi bi-calendar2-x text-danger me-2"></i>
+                Documentos vencidos ou vencendo em 30 dias
+                <span class="badge bg-danger ms-1">{{ docs_vencendo_cnt }}</span>
+            </div>
+            <div class="card-body p-0">
+                {% if docs_vencendo %}
+                <table class="table table-sm table-hover mb-0">
+                    <thead class="table-light">
+                        <tr><th>Documento</th><th>Imóvel</th><th>Validade</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for doc in docs_vencendo %}
+                        <tr>
+                            <td>{{ doc.titulo|truncatechars:35 }}</td>
+                            <td>{{ doc.imovel.nome|default:"—" }}</td>
+                            <td class="{% if doc.vencido %}text-danger fw-semibold{% else %}text-warning fw-semibold{% endif %}">
+                                {{ doc.data_validade|date:"d/m/Y" }}
+                                {% if doc.vencido %}<span class="badge bg-danger ms-1">Vencido</span>{% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% if docs_vencendo_cnt > 10 %}
+                <div class="p-2 border-top">
+                    <a href="{% url 'documento_list' %}?vencendo=1" class="small">Ver todos ({{ docs_vencendo_cnt }})</a>
+                </div>
+                {% endif %}
+                {% else %}
+                <p class="text-muted p-3 mb-0">Nenhum documento com validade vencida ou próxima do vencimento.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
     <!-- Manutenções em aberto -->
     <div class="col-md-6">
         <div class="card shadow-sm h-100">
@@ -227,8 +308,86 @@
                     <a href="{% url 'contrato_list' %}?reajuste_pendente=1" class="alert-link ms-1">Ver</a>
                 </div>
                 {% endif %}
+                {% if docs_vencendo_cnt > 0 %}
+                <div class="alert alert-danger mt-2 mb-0 py-2">
+                    <i class="bi bi-calendar2-x me-1"></i>
+                    <strong>{{ docs_vencendo_cnt }}</strong> documento(s) com validade vencida ou vencendo em 30 dias.
+                    <a href="{% url 'documento_list' %}?vencendo=1" class="alert-link ms-1">Ver</a>
+                </div>
+                {% endif %}
             </div>
         </div>
     </div>
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+(function () {
+    const dadosEl = document.getElementById('fluxo-caixa-data');
+    const canvas = document.getElementById('grafico-fluxo');
+    if (!dadosEl || !canvas || typeof Chart === 'undefined') return;
+
+    const serie = JSON.parse(dadosEl.textContent);
+    const formatoBRL = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
+
+    new Chart(canvas, {
+        type: 'bar',
+        data: {
+            labels: serie.map(p => p.label),
+            datasets: [
+                {
+                    label: 'Recebido',
+                    data: serie.map(p => p.recebido),
+                    backgroundColor: '#2a78d6',
+                    borderRadius: { topLeft: 4, topRight: 4 },
+                    borderSkipped: 'bottom',
+                    maxBarThickness: 22,
+                },
+                {
+                    label: 'Pago',
+                    data: serie.map(p => p.pago),
+                    backgroundColor: '#e34948',
+                    borderRadius: { topLeft: 4, topRight: 4 },
+                    borderSkipped: 'bottom',
+                    maxBarThickness: 22,
+                },
+            ],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                legend: {
+                    position: 'top',
+                    align: 'end',
+                    labels: { boxWidth: 12, boxHeight: 12, color: '#52514e' },
+                },
+                tooltip: {
+                    callbacks: {
+                        label: (ctx) => `${ctx.dataset.label}: ${formatoBRL.format(ctx.parsed.y)}`,
+                    },
+                },
+            },
+            scales: {
+                x: {
+                    grid: { display: false },
+                    ticks: { color: '#898781' },
+                },
+                y: {
+                    beginAtZero: true,
+                    grid: { color: '#e1e0d9' },
+                    border: { display: false },
+                    ticks: {
+                        color: '#898781',
+                        callback: (valor) => formatoBRL.format(valor),
+                    },
+                },
+            },
+        },
+    });
+})();
+</script>
 {% endblock %}
