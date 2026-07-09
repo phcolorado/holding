@@ -1,0 +1,309 @@
+{% extends "base.html" %}
+{% load humanize %}
+
+{% block title %}Painéis — Gestão Patrimonial{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h4 class="fw-bold mb-0"><i class="bi bi-graph-up me-2 text-primary"></i>Painéis</h4>
+</div>
+
+<!-- Filtros -->
+<form method="get" class="card shadow-sm mb-4">
+    <div class="card-body py-2">
+        <div class="row g-2 align-items-end">
+            <div class="col-auto">
+                <label class="form-label fw-semibold mb-1 small">Mês final</label>
+                <select name="mes" class="form-select form-select-sm">
+                    {% for num, nome in meses %}
+                    <option value="{{ num }}" {% if num == mes_atual %}selected{% endif %}>{{ nome }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <label class="form-label fw-semibold mb-1 small">Ano final</label>
+                <select name="ano" class="form-select form-select-sm">
+                    {% for a in anos %}
+                    <option value="{{ a }}" {% if a == ano_atual %}selected{% endif %}>{{ a }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <label class="form-label fw-semibold mb-1 small">Período</label>
+                <select name="janela" class="form-select form-select-sm">
+                    {% for j in janelas %}
+                    <option value="{{ j }}" {% if j == janela_atual %}selected{% endif %}>Últimos {{ j }} meses</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <button type="submit" class="btn btn-primary btn-sm"><i class="bi bi-funnel me-1"></i>Aplicar</button>
+            </div>
+        </div>
+    </div>
+</form>
+
+<div class="row g-3">
+    <!-- Ocupação -->
+    <div class="col-lg-6">
+        <div class="card shadow-sm h-100">
+            <div class="card-header bg-white fw-semibold border-bottom d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-buildings me-2 text-primary"></i>Ocupação das unidades locáveis</span>
+                <button class="btn btn-sm btn-outline-secondary py-0" type="button" data-bs-toggle="collapse" data-bs-target="#tab-ocupacao">Tabela</button>
+            </div>
+            <div class="card-body">
+                <div style="height: 260px;">
+                    <canvas id="grafico-ocupacao" role="img" aria-label="Gráfico de linha com o percentual de ocupação por mês"></canvas>
+                </div>
+                <div class="collapse mt-3" id="tab-ocupacao">
+                    <div class="table-responsive">
+                        <table class="table table-sm mb-0">
+                            <thead class="table-light"><tr><th>Mês</th><th class="text-end">Ocupados</th><th class="text-end">Total</th><th class="text-end">Ocupação</th><th class="text-end">Vacância</th></tr></thead>
+                            <tbody>
+                                {% for p in ocupacao %}
+                                <tr><td>{{ p.label }}</td><td class="text-end">{{ p.ocupados }}</td><td class="text-end">{{ p.total }}</td><td class="text-end">{{ p.percentual }}%</td><td class="text-end">{{ p.vacancia }}%</td></tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Inadimplência -->
+    <div class="col-lg-6">
+        <div class="card shadow-sm h-100">
+            <div class="card-header bg-white fw-semibold border-bottom d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-exclamation-triangle me-2 text-danger"></i>Inadimplência em aberto por competência</span>
+                <button class="btn btn-sm btn-outline-secondary py-0" type="button" data-bs-toggle="collapse" data-bs-target="#tab-inad">Tabela</button>
+            </div>
+            <div class="card-body">
+                <div style="height: 260px;">
+                    <canvas id="grafico-inadimplencia" role="img" aria-label="Gráfico de barras com o valor vencido e não quitado por mês de competência"></canvas>
+                </div>
+                <div class="collapse mt-3" id="tab-inad">
+                    <div class="table-responsive">
+                        <table class="table table-sm mb-0">
+                            <thead class="table-light"><tr><th>Competência</th><th class="text-end">Valor em aberto (R$)</th><th class="text-end">Receitas</th></tr></thead>
+                            <tbody>
+                                {% for p in inadimplencia %}
+                                <tr><td>{{ p.label }}</td><td class="text-end">{{ p.valor|floatformat:2|intcomma }}</td><td class="text-end">{{ p.quantidade }}</td></tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="small text-muted mt-2">Receitas vencidas e não quitadas até hoje, agrupadas pelo mês de competência.</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Receitas × Despesas por imóvel -->
+    <div class="col-lg-6">
+        <div class="card shadow-sm h-100">
+            <div class="card-header bg-white fw-semibold border-bottom d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-houses me-2 text-primary"></i>Receitas × despesas por imóvel</span>
+                <button class="btn btn-sm btn-outline-secondary py-0" type="button" data-bs-toggle="collapse" data-bs-target="#tab-imovel">Tabela</button>
+            </div>
+            <div class="card-body">
+                <div style="min-height: 260px; height: {% widthratio por_imovel|length 1 44 %}px;">
+                    <canvas id="grafico-por-imovel" role="img" aria-label="Gráfico de barras horizontais com receita recebida e despesa paga por imóvel"></canvas>
+                </div>
+                <div class="collapse mt-3" id="tab-imovel">
+                    <div class="table-responsive">
+                        <table class="table table-sm mb-0">
+                            <thead class="table-light"><tr><th>Imóvel</th><th class="text-end">Recebido (R$)</th><th class="text-end">Pago (R$)</th><th class="text-end">Resultado (R$)</th></tr></thead>
+                            <tbody>
+                                {% for p in por_imovel %}
+                                <tr><td>{{ p.imovel }}</td><td class="text-end">{{ p.recebido|floatformat:2|intcomma }}</td><td class="text-end">{{ p.pago|floatformat:2|intcomma }}</td><td class="text-end">{{ p.resultado|floatformat:2|intcomma }}</td></tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Despesas por categoria -->
+    <div class="col-lg-6">
+        <div class="card shadow-sm h-100">
+            <div class="card-header bg-white fw-semibold border-bottom d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-tags me-2 text-danger"></i>Despesas por categoria</span>
+                <button class="btn btn-sm btn-outline-secondary py-0" type="button" data-bs-toggle="collapse" data-bs-target="#tab-cat">Tabela</button>
+            </div>
+            <div class="card-body">
+                <div style="height: 260px;">
+                    <canvas id="grafico-categorias" role="img" aria-label="Gráfico de barras horizontais com o total de despesas por categoria"></canvas>
+                </div>
+                <div class="collapse mt-3" id="tab-cat">
+                    <div class="table-responsive">
+                        <table class="table table-sm mb-0">
+                            <thead class="table-light"><tr><th>Categoria</th><th class="text-end">Total (R$)</th><th class="text-end">Lançamentos</th></tr></thead>
+                            <tbody>
+                                {% for p in por_categoria %}
+                                <tr><td>{{ p.categoria }}</td><td class="text-end">{{ p.valor|floatformat:2|intcomma }}</td><td class="text-end">{{ p.quantidade }}</td></tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="small text-muted mt-2">Despesas do período, exceto canceladas (pagas e em aberto).</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{{ ocupacao|json_script:"dados-ocupacao" }}
+{{ inadimplencia|json_script:"dados-inadimplencia" }}
+{{ por_imovel|json_script:"dados-por-imovel" }}
+{{ por_categoria|json_script:"dados-categorias" }}
+{% endblock %}
+
+{% block extra_js %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+(function () {
+    if (typeof Chart === 'undefined') return;
+    const dados = (id) => JSON.parse(document.getElementById(id).textContent);
+    const brl = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
+    const AZUL = '#2a78d6', VERMELHO = '#e34948', LARANJA = '#eb6834';
+    const GRADE = '#e1e0d9', INK = '#898781', INK2 = '#52514e';
+
+    const eixoValor = {
+        beginAtZero: true,
+        grid: { color: GRADE },
+        border: { display: false },
+        ticks: { color: INK, callback: (v) => brl.format(v) },
+    };
+    const eixoCategoria = { grid: { display: false }, ticks: { color: INK } };
+    const tooltipBRL = { callbacks: { label: (ctx) => `${ctx.dataset.label}: ${brl.format(ctx.parsed.x ?? ctx.parsed.y)}` } };
+
+    // 1. Ocupação (linha, %)
+    const oc = dados('dados-ocupacao');
+    new Chart(document.getElementById('grafico-ocupacao'), {
+        type: 'line',
+        data: {
+            labels: oc.map(p => p.label),
+            datasets: [{
+                label: 'Ocupação',
+                data: oc.map(p => p.percentual),
+                borderColor: AZUL,
+                backgroundColor: AZUL,
+                borderWidth: 2,
+                pointRadius: 3,
+                pointHoverRadius: 5,
+                tension: 0.2,
+            }],
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                legend: { display: false },
+                tooltip: { callbacks: { label: (ctx) => {
+                    const p = oc[ctx.dataIndex];
+                    return `Ocupação: ${p.percentual}% (${p.ocupados}/${p.total} unidades)`;
+                } } },
+            },
+            scales: {
+                x: eixoCategoria,
+                y: {
+                    beginAtZero: true, max: 100,
+                    grid: { color: GRADE }, border: { display: false },
+                    ticks: { color: INK, callback: (v) => v + '%' },
+                },
+            },
+        },
+    });
+
+    // 2. Inadimplência mensal (barras)
+    const inad = dados('dados-inadimplencia');
+    new Chart(document.getElementById('grafico-inadimplencia'), {
+        type: 'bar',
+        data: {
+            labels: inad.map(p => p.label),
+            datasets: [{
+                label: 'Em aberto',
+                data: inad.map(p => p.valor),
+                backgroundColor: LARANJA,
+                borderRadius: { topLeft: 4, topRight: 4 },
+                borderSkipped: 'bottom',
+                maxBarThickness: 22,
+            }],
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: { callbacks: { label: (ctx) => {
+                    const p = inad[ctx.dataIndex];
+                    return `${brl.format(p.valor)} em ${p.quantidade} receita(s)`;
+                } } },
+            },
+            scales: { x: eixoCategoria, y: eixoValor },
+        },
+    });
+
+    // 3. Receitas × despesas por imóvel (barras horizontais)
+    const im = dados('dados-por-imovel');
+    new Chart(document.getElementById('grafico-por-imovel'), {
+        type: 'bar',
+        data: {
+            labels: im.map(p => p.imovel),
+            datasets: [
+                {
+                    label: 'Recebido', data: im.map(p => p.recebido),
+                    backgroundColor: AZUL, maxBarThickness: 18,
+                    borderRadius: { topRight: 4, bottomRight: 4 }, borderSkipped: 'left',
+                },
+                {
+                    label: 'Pago', data: im.map(p => p.pago),
+                    backgroundColor: VERMELHO, maxBarThickness: 18,
+                    borderRadius: { topRight: 4, bottomRight: 4 }, borderSkipped: 'left',
+                },
+            ],
+        },
+        options: {
+            indexAxis: 'y',
+            responsive: true, maintainAspectRatio: false,
+            plugins: {
+                legend: { position: 'top', align: 'end', labels: { boxWidth: 12, boxHeight: 12, color: INK2 } },
+                tooltip: tooltipBRL,
+            },
+            scales: { x: eixoValor, y: eixoCategoria },
+        },
+    });
+
+    // 4. Despesas por categoria (barras horizontais)
+    const cat = dados('dados-categorias');
+    new Chart(document.getElementById('grafico-categorias'), {
+        type: 'bar',
+        data: {
+            labels: cat.map(p => p.categoria),
+            datasets: [{
+                label: 'Despesas',
+                data: cat.map(p => p.valor),
+                backgroundColor: VERMELHO,
+                maxBarThickness: 18,
+                borderRadius: { topRight: 4, bottomRight: 4 },
+                borderSkipped: 'left',
+            }],
+        },
+        options: {
+            indexAxis: 'y',
+            responsive: true, maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: { callbacks: { label: (ctx) => {
+                    const p = cat[ctx.dataIndex];
+                    return `${brl.format(p.valor)} em ${p.quantidade} lançamento(s)`;
+                } } },
+            },
+            scales: { x: eixoValor, y: eixoCategoria },
+        },
+    });
+})();
+</script>
+{% endblock %}

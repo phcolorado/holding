@@ -8,17 +8,21 @@ from django.db.models import Q, Sum
 from django.utils import timezone
 
 
-def competencias_ultimos_12_meses(referencia=None):
-    """Lista [(ano, mes), ...] das 12 competências até a referência (inclusive), em ordem cronológica."""
+def competencias_ultimas(n_meses, referencia=None):
+    """Lista [(ano, mes), ...] das últimas n competências até a referência (inclusive), em ordem cronológica."""
     ref = referencia or timezone.localdate()
     ano, mes = ref.year, ref.month
     competencias = []
-    for _ in range(12):
+    for _ in range(n_meses):
         competencias.append((ano, mes))
         mes -= 1
         if mes == 0:
             mes, ano = 12, ano - 1
     return competencias[::-1]
+
+
+def competencias_ultimos_12_meses(referencia=None):
+    return competencias_ultimas(12, referencia)
 
 
 def filtro_competencias(competencias, campo_ano='competencia_ano', campo_mes='competencia_mes'):

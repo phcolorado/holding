@@ -5,6 +5,7 @@ urlpatterns = [
     path('receitas/', views.receitas_list, name='receitas_list'),
     path('despesas/', views.despesas_list, name='despesas_list'),
     path('relatorios/', views.relatorios, name='relatorios'),
+    path('paineis/', views.paineis, name='paineis'),
     path('baixa-receitas/', views.baixa_receitas_mes_view, name='baixa_receitas_mes'),
     path('gerar-receitas/', views.gerar_receitas_mes_view, name='gerar_receitas_mes'),
     path('checklist-mensal/', views.checklist_mensal_view, name='checklist_mensal'),

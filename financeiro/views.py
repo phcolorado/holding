@@ -116,6 +116,36 @@ def despesas_list(request):
 
 
 @login_required
+def paineis(request):
+    """Painéis gráficos: ocupação, receitas × despesas, inadimplência e categorias."""
+    from datetime import date as date_cls
+    from .paineis import (
+        serie_ocupacao_mensal, serie_receita_despesa_por_imovel,
+        serie_inadimplencia_mensal, serie_despesas_por_categoria,
+    )
+
+    mes, ano = mes_ano_da_request(request)
+    janela = int_param(request.GET.get('janela'), 12)
+    if janela not in (6, 12, 24):
+        janela = 12
+    referencia = date_cls(ano, mes, 1)
+
+    context = {
+        'ocupacao': serie_ocupacao_mensal(janela, referencia),
+        'por_imovel': serie_receita_despesa_por_imovel(janela, referencia),
+        'inadimplencia': serie_inadimplencia_mensal(janela, referencia),
+        'por_categoria': serie_despesas_por_categoria(janela, referencia),
+        'mes_atual': mes,
+        'ano_atual': ano,
+        'janela_atual': janela,
+        'meses': ReceitaAluguel.MESES,
+        'anos': anos_para_filtro(),
+        'janelas': (6, 12, 24),
+    }
+    return render(request, 'financeiro/paineis.html', context)
+
+
+@login_required
 def relatorios(request):
     hoje = timezone.localdate()
 

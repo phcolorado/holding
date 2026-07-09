@@ -1826,3 +1826,141 @@ class FluxoCaixa12mTest(TestCase):
         self.assertEqual(atual['saldo'], 1700.0)
         # Receita prevista (não recebida) não entra na série
         self.assertEqual(sum(p['recebido'] for p in serie), 2000.0)
+
+
+# ─── Painéis gráficos ─────────────────────────────────────────────────────────
+
+class PaineisSeriesTest(TestCase):
+    def setUp(self):
+        self.imovel, self.locatario = _criar_base()
+        self.hoje = timezone.localdate()
+
+    def test_serie_ocupacao_conta_contrato_vigente(self):
+        from financeiro.paineis import serie_ocupacao_mensal
+
+        # Imóvel agrupador não entra na base de locáveis
+        Imovel.objects.create(
+            nome='Prédio Agrupador', endereco='X', cidade='SP', estado='SP', unidade_locavel=False,
+        )
+        _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=self.hoje - timedelta(days=400),
+            data_fim=self.hoje + timedelta(days=365),
+        )
+        vago = Imovel.objects.create(nome='Imóvel Vago', endereco='Y', cidade='SP', estado='SP')
+
+        serie = serie_ocupacao_mensal(12, self.hoje)
+        self.assertEqual(len(serie), 12)
+        atual = serie[-1]
+        self.assertEqual(atual['total'], 2)          # ocupado + vago (agrupador fora)
+        self.assertEqual(atual['ocupados'], 1)
+        self.assertEqual(atual['percentual'], 50.0)
+        self.assertEqual(atual['vacancia'], 50.0)
+
+    def test_serie_ocupacao_respeita_encerramento_real(self):
+        from financeiro.paineis import serie_ocupacao_mensal
+
+        _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=self.hoje - timedelta(days=400),
+            data_fim=self.hoje + timedelta(days=365),
+            status='encerrado',
+            data_encerramento_real=self.hoje - timedelta(days=200),
+        )
+        serie = serie_ocupacao_mensal(3, self.hoje)
+        self.assertEqual(serie[-1]['ocupados'], 0)
+
+    def test_serie_receita_despesa_por_imovel(self):
+        from financeiro.paineis import serie_receita_despesa_por_imovel
+
+        contrato = _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
+        )
+        ReceitaAluguel.objects.create(
+            contrato=contrato, imovel=self.imovel,
+            competencia_mes=self.hoje.month, competencia_ano=self.hoje.year,
+            data_vencimento=self.hoje, valor_previsto=Decimal('2000.00'),
+            valor_recebido=Decimal('2000.00'), status='recebido',
+        )
+        Despesa.objects.create(
+            imovel=self.imovel, descricao='Condomínio',
+            competencia_mes=self.hoje.month, competencia_ano=self.hoje.year,
+            data_vencimento=self.hoje, valor=Decimal('300.00'), status='paga',
+        )
+        serie = serie_receita_despesa_por_imovel(12, self.hoje)
+        self.assertEqual(len(serie), 1)
+        self.assertEqual(serie[0]['imovel'], self.imovel.nome)
+        self.assertEqual(serie[0]['recebido'], 2000.0)
+        self.assertEqual(serie[0]['pago'], 300.0)
+        self.assertEqual(serie[0]['resultado'], 1700.0)
+
+    def test_serie_inadimplencia_mensal(self):
+        from financeiro.paineis import serie_inadimplencia_mensal
+
+        contrato = _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
+        )
+        ontem = self.hoje - timedelta(days=1)
+        ReceitaAluguel.objects.create(
+            contrato=contrato, imovel=self.imovel,
+            competencia_mes=ontem.month, competencia_ano=ontem.year,
+            data_vencimento=ontem, valor_previsto=Decimal('1500.00'), status='previsto',
+        )
+        serie = serie_inadimplencia_mensal(12, self.hoje)
+        self.assertEqual(len(serie), 12)
+        alvo = next(p for p in serie if p['label'] == f'{ontem.month:02d}/{ontem.year}')
+        self.assertEqual(alvo['valor'], 1500.0)
+        self.assertEqual(alvo['quantidade'], 1)
+
+    def test_serie_despesas_por_categoria_exclui_canceladas(self):
+        from financeiro.paineis import serie_despesas_por_categoria
+
+        Despesa.objects.create(
+            imovel=self.imovel, descricao='IPTU', categoria='iptu',
+            competencia_mes=self.hoje.month, competencia_ano=self.hoje.year,
+            data_vencimento=self.hoje, valor=Decimal('800.00'), status='paga',
+        )
+        Despesa.objects.create(
+            imovel=self.imovel, descricao='Cancelada', categoria='manutencao',
+            competencia_mes=self.hoje.month, competencia_ano=self.hoje.year,
+            data_vencimento=self.hoje, valor=Decimal('999.00'), status='cancelada',
+        )
+        serie = serie_despesas_por_categoria(12, self.hoje)
+        self.assertEqual(len(serie), 1)
+        self.assertEqual(serie[0]['categoria'], 'IPTU')
+        self.assertEqual(serie[0]['valor'], 800.0)
+
+
+class PaineisViewTest(TestCase):
+    def setUp(self):
+        self.client = Client()
+        User.objects.create_user('painel_user', password='pass')
+        self.client.login(username='painel_user', password='pass')
+
+    def test_exige_login(self):
+        self.client.logout()
+        response = self.client.get(reverse('paineis'))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn('/login/', response['Location'])
+
+    def test_renderiza_com_series(self):
+        response = self.client.get(reverse('paineis'))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.context['ocupacao']), 12)
+        self.assertEqual(len(response.context['inadimplencia']), 12)
+        self.assertContains(response, 'grafico-ocupacao')
+        self.assertContains(response, 'grafico-inadimplencia')
+        self.assertContains(response, 'grafico-por-imovel')
+        self.assertContains(response, 'grafico-categorias')
+
+    def test_janela_invalida_usa_padrao(self):
+        response = self.client.get(reverse('paineis'), {'janela': '99', 'mes': 'abc'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context['janela_atual'], 12)
+
+    def test_janela_24_meses(self):
+        response = self.client.get(reverse('paineis'), {'janela': '24'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.context['ocupacao']), 24)
