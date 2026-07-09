@@ -5,6 +5,7 @@ from django.db.models import Sum
 from django.shortcuts import render
 from django.utils import timezone
 
+from conciliacao.services import transacoes_pendentes_qs
 from patrimonio.models import Imovel, Contrato, Manutencao
 from financeiro.models import ReceitaAluguel, Despesa
 from financeiro.services import serie_fluxo_caixa_12m
@@ -83,7 +84,10 @@ def dashboard(request):
 
     fluxo_caixa = serie_fluxo_caixa_12m(hoje)
 
+    extrato_pendentes = transacoes_pendentes_qs().count()
+
     context = {
+        'extrato_pendentes': extrato_pendentes,
         'imoveis_total': imoveis_total,
         'imoveis_alugados': imoveis_alugados,
         'imoveis_vagos': imoveis_vagos,

@@ -315,6 +315,13 @@
                     <a href="{% url 'documento_list' %}?vencendo=1" class="alert-link ms-1">Ver</a>
                 </div>
                 {% endif %}
+                {% if extrato_pendentes > 0 %}
+                <div class="alert alert-warning mt-2 mb-0 py-2">
+                    <i class="bi bi-bank me-1"></i>
+                    <strong>{{ extrato_pendentes }}</strong> transação(ões) de extrato bancário pendente(s) de conciliação.
+                    <a href="{% url 'extrato_list' %}" class="alert-link ms-1">Conciliar</a>
+                </div>
+                {% endif %}
             </div>
         </div>
     </div>

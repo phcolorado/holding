@@ -1,0 +1,263 @@
+{% extends "base.html" %}
+{% load humanize %}
+
+{% block title %}Conciliar Extrato — Gestão Patrimonial{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <div>
+        <a href="{% url 'extrato_list' %}" class="text-muted text-decoration-none small">
+            <i class="bi bi-arrow-left"></i> Extratos
+        </a>
+        <h4 class="fw-bold mb-0 mt-1">
+            <i class="bi bi-check2-square me-2 text-primary"></i>Conciliação — {{ extrato.conta.nome }}
+        </h4>
+        <span class="text-muted small">
+            {% if extrato.periodo_inicio %}
+            Período {{ extrato.periodo_inicio|date:"d/m/Y" }} a {{ extrato.periodo_fim|date:"d/m/Y" }} ·
+            {% endif %}
+            {{ total }} transação(ões)
+        </span>
+    </div>
+    <div>
+        {% if pendentes %}
+        <span class="badge bg-warning text-dark fs-6">{{ pendentes|length }} pendente(s)</span>
+        {% else %}
+        <span class="badge bg-success fs-6"><i class="bi bi-check-lg me-1"></i>Tudo conciliado</span>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Pendentes -->
+{% for item in pendentes %}
+{% with t=item.transacao %}
+<div class="card shadow-sm mb-3 {% if t.tipo == 'credito' %}border-success{% else %}border-danger{% endif %}" style="border-left-width: 4px;">
+    <div class="card-body py-3">
+        <div class="d-flex justify-content-between flex-wrap gap-2">
+            <div>
+                <span class="badge {% if t.tipo == 'credito' %}bg-success{% else %}bg-danger{% endif %}">
+                    {{ t.get_tipo_display }}
+                </span>
+                <span class="fw-bold fs-5 ms-2 {% if t.tipo == 'credito' %}text-success{% else %}text-danger{% endif %}">
+                    R$ {{ t.valor_absoluto|floatformat:2|intcomma }}
+                </span>
+                <span class="text-muted ms-2">{{ t.data|date:"d/m/Y" }}</span>
+                <div class="small text-muted mt-1">{{ t.descricao }}{% if t.memo and t.memo != t.descricao %} — {{ t.memo }}{% endif %}</div>
+            </div>
+            <form method="post" class="align-self-start">
+                {% csrf_token %}
+                <input type="hidden" name="transacao_id" value="{{ t.pk }}">
+                <input type="hidden" name="action" value="ignorar">
+                <button type="submit" class="btn btn-sm btn-outline-secondary"
+                        onclick="return confirm('Ignorar esta transação? (ex.: transferência entre contas próprias)')">
+                    <i class="bi bi-eye-slash me-1"></i>Ignorar
+                </button>
+            </form>
+        </div>
+
+        {% if t.tipo == 'credito' %}
+        <!-- Crédito: conciliar com receitas -->
+        <form method="post" class="mt-3">
+            {% csrf_token %}
+            <input type="hidden" name="transacao_id" value="{{ t.pk }}">
+            <input type="hidden" name="action" value="conciliar">
+
+            {% if item.sugestao %}
+            <div class="alert {% if item.sugestao.tipo == 'exata' %}alert-success{% else %}alert-info{% endif %} py-2 mb-2">
+                <i class="bi bi-magic me-1"></i>
+                {% if item.sugestao.tipo == 'exata' %}
+                    Sugestão: aluguel único com valor exato.
+                {% elif item.sugestao.tipo == 'repasse' %}
+                    Sugestão: <strong>repasse consolidado</strong> de {{ item.sugestao.receitas|length }} aluguéis
+                    (soma R$ {{ item.sugestao.total|floatformat:2|intcomma }}).
+                {% else %}
+                    Sugestão: <strong>repasse consolidado líquido de comissão</strong> —
+                    {{ item.sugestao.receitas|length }} aluguéis menos
+                    {{ item.sugestao.comissoes|length }} taxa(s) de administração
+                    (líquido R$ {{ item.sugestao.total|floatformat:2|intcomma }}).
+                {% endif %}
+            </div>
+            {% endif %}
+
+            {% if item.candidatas %}
+            <div class="table-responsive">
+                <table class="table table-sm align-middle mb-2">
+                    <thead class="table-light">
+                        <tr>
+                            <th style="width:2rem;"></th>
+                            <th>Imóvel</th><th>Locatário(s)</th><th>Competência</th>
+                            <th>Vencimento</th><th class="text-end">Valor Previsto</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for c in item.candidatas %}
+                        <tr>
+                            <td>
+                                <input class="form-check-input receita-check" type="checkbox"
+                                       name="receita_ids" value="{{ c.receita.pk }}"
+                                       data-valor="{{ c.receita.valor_previsto }}"
+                                       {% if c.sugerida %}checked{% endif %}>
+                            </td>
+                            <td class="fw-semibold">{{ c.receita.imovel.nome }}</td>
+                            <td class="small text-muted">{{ c.receita.contrato.locatarios_display }}</td>
+                            <td class="small">{{ c.receita.get_competencia_mes_display }}/{{ c.receita.competencia_ano }}</td>
+                            <td class="small">{{ c.receita.data_vencimento|date:"d/m/Y" }}</td>
+                            <td class="text-end">R$ {{ c.receita.valor_previsto|floatformat:2|intcomma }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <div class="d-flex align-items-center flex-wrap gap-3">
+                <button type="submit" class="btn btn-success btn-sm">
+                    <i class="bi bi-check-lg me-1"></i>Confirmar Recebimento
+                </button>
+                {% if item.sugestao and item.sugestao.tipo == 'repasse_liquido' %}
+                <div class="form-check mb-0">
+                    <input class="form-check-input" type="checkbox" name="marcar_comissoes" value="1" checked
+                           id="comissoes-{{ t.pk }}">
+                    <label class="form-check-label small" for="comissoes-{{ t.pk }}">
+                        Marcar as taxas de administração vinculadas como pagas
+                    </label>
+                </div>
+                {% endif %}
+                <span class="small text-muted">
+                    Soma selecionada: <strong class="soma-selecionada">—</strong>
+                    · Crédito: R$ {{ t.valor_absoluto|floatformat:2|intcomma }}
+                </span>
+            </div>
+            {% else %}
+            <div class="text-muted small mt-2">
+                Nenhuma receita em aberto com vencimento próximo a {{ t.data|date:"d/m/Y" }}.
+                Gere as receitas do mês ou trate manualmente pelo Admin.
+            </div>
+            {% endif %}
+        </form>
+
+        {% else %}
+        <!-- Débito: lançar despesa -->
+        <form method="post" class="mt-3">
+            {% csrf_token %}
+            <input type="hidden" name="transacao_id" value="{{ t.pk }}">
+            <input type="hidden" name="action" value="lancar_despesa">
+            {% if item.regra %}
+            <div class="alert alert-info py-2 mb-2">
+                <i class="bi bi-magic me-1"></i>Regra aplicada: "{{ item.regra.texto_contem }}" →
+                {{ item.regra.get_categoria_display }}
+            </div>
+            {% endif %}
+            <div class="row g-2 align-items-end">
+                <div class="col-md-3">
+                    <label class="form-label fw-semibold mb-1 small">Categoria</label>
+                    <select name="categoria" class="form-select form-select-sm">
+                        {% for val, label in despesa_form.fields.categoria.choices %}
+                        <option value="{{ val }}"
+                            {% if item.regra and item.regra.categoria == val %}selected
+                            {% elif not item.regra and val == 'outro' %}selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label fw-semibold mb-1 small">Descrição</label>
+                    <input type="text" name="descricao" class="form-control form-control-sm"
+                           value="{{ t.descricao|default:t.memo }}" required>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label fw-semibold mb-1 small">Fornecedor</label>
+                    <select name="fornecedor" class="form-select form-select-sm">
+                        <option value="">—</option>
+                        {% for p in despesa_form.fields.fornecedor.queryset %}
+                        <option value="{{ p.pk }}" {% if item.regra and item.regra.fornecedor_id == p.pk %}selected{% endif %}>{{ p.nome }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label fw-semibold mb-1 small">Imóvel</label>
+                    <select name="imovel" class="form-select form-select-sm">
+                        <option value="">— (geral)</option>
+                        {% for im in despesa_form.fields.imovel.queryset %}
+                        <option value="{{ im.pk }}" {% if item.regra and item.regra.imovel_id == im.pk %}selected{% endif %}>{{ im.nome }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-auto">
+                    <button type="submit" class="btn btn-warning btn-sm">
+                        <i class="bi bi-credit-card me-1"></i>Lançar Despesa Paga
+                    </button>
+                </div>
+            </div>
+        </form>
+        {% endif %}
+    </div>
+</div>
+{% endwith %}
+{% endfor %}
+
+<!-- Tratadas -->
+{% if tratadas %}
+<div class="card shadow-sm mt-4">
+    <div class="card-header bg-white fw-semibold border-bottom">
+        <i class="bi bi-clock-history me-2"></i>Transações tratadas ({{ tratadas|length }})
+    </div>
+    <div class="card-body p-0">
+        <table class="table table-sm table-hover mb-0">
+            <thead class="table-light">
+                <tr><th>Data</th><th>Tipo</th><th class="text-end">Valor</th><th>Descrição</th><th>Situação</th><th></th></tr>
+            </thead>
+            <tbody>
+                {% for t in tratadas %}
+                <tr>
+                    <td class="small">{{ t.data|date:"d/m/Y" }}</td>
+                    <td>
+                        <span class="badge {% if t.tipo == 'credito' %}bg-success{% else %}bg-danger{% endif %}">{{ t.get_tipo_display }}</span>
+                    </td>
+                    <td class="text-end small">R$ {{ t.valor_absoluto|floatformat:2|intcomma }}</td>
+                    <td class="small text-muted">{{ t.descricao|truncatechars:50 }}</td>
+                    <td class="small">
+                        {% if t.status == 'ignorada' %}
+                        <span class="badge bg-secondary">Ignorada</span>
+                        {% elif t.despesa %}
+                        Despesa: {{ t.despesa.descricao|truncatechars:35 }}
+                        {% else %}
+                        {% for item in t.itens_receita.all %}
+                        {{ item.receita.imovel.nome }} (R$ {{ item.valor_atribuido|floatformat:2 }}){% if not forloop.last %}, {% endif %}
+                        {% endfor %}
+                        {% endif %}
+                    </td>
+                    <td class="text-end">
+                        {% if t.status == 'ignorada' %}
+                        <form method="post" class="d-inline">
+                            {% csrf_token %}
+                            <input type="hidden" name="transacao_id" value="{{ t.pk }}">
+                            <input type="hidden" name="action" value="reabrir">
+                            <button type="submit" class="btn btn-sm btn-outline-secondary py-0">Reabrir</button>
+                        </form>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// Atualiza a soma das receitas selecionadas em cada card de crédito
+document.querySelectorAll('form').forEach(form => {
+    const checks = form.querySelectorAll('.receita-check');
+    const alvo = form.querySelector('.soma-selecionada');
+    if (!checks.length || !alvo) return;
+    const formato = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
+    const atualizar = () => {
+        let soma = 0;
+        checks.forEach(c => { if (c.checked) soma += parseFloat(c.dataset.valor); });
+        alvo.textContent = formato.format(soma);
+    };
+    checks.forEach(c => c.addEventListener('change', atualizar));
+    atualizar();
+});
+</script>
+{% endblock %}

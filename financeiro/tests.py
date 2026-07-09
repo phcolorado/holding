@@ -1074,7 +1074,7 @@ class ChecklistMensalViewTest(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertIn('checklist', response.context)
-        self.assertEqual(len(response.context['checklist']), 10)
+        self.assertEqual(len(response.context['checklist']), 11)
 
     def test_post_marcar_enviado_cria_fechamento(self):
         """POST action=marcar_enviado cria FechamentoMensal e redireciona."""

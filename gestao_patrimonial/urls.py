@@ -11,5 +11,6 @@ urlpatterns = [
     path('', include('core.urls')),
     path('patrimonio/', include('patrimonio.urls')),
     path('financeiro/', include('financeiro.urls')),
+    path('financeiro/conciliacao/', include('conciliacao.urls')),
     path('documentos/', include('documentos.urls')),
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

@@ -107,6 +107,12 @@
                     </a>
                 </li>
                 <li class="nav-item">
+                    <a class="nav-link {% if 'extrato' in request.resolver_match.url_name or 'conciliar' in request.resolver_match.url_name %}active{% endif %}"
+                       href="{% url 'extrato_list' %}">
+                        <i class="bi bi-bank me-2"></i>Conciliação Bancária
+                    </a>
+                </li>
+                <li class="nav-item">
                     <a class="nav-link {% if request.resolver_match.url_name == 'checklist_mensal' %}active{% endif %}"
                        href="{% url 'checklist_mensal' %}">
                         <i class="bi bi-clipboard2-check me-2"></i>Checklist Mensal

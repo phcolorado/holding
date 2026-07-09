@@ -350,6 +350,11 @@ def checklist_mensal_view(request):
 
     docs_validade_cnt = documentos_vencendo_qs().count()
 
+    from conciliacao.services import transacoes_pendentes_qs
+    extrato_pendentes = transacoes_pendentes_qs().filter(
+        data__year=ano, data__month=mes
+    ).count()
+
     reajustes_pendentes = Contrato.objects.filter(
         status='ativo', data_proximo_reajuste__isnull=False, data_proximo_reajuste__lte=hoje,
     ).count()
@@ -421,6 +426,15 @@ def checklist_mensal_view(request):
             'link': reverse('documento_list') + '?vencendo=1',
         },
         {
+            'item': 'Extrato bancário conciliado',
+            'ok': extrato_pendentes == 0,
+            'detalhe': (
+                f'{extrato_pendentes} transação(ões) do extrato pendente(s) no mês'
+                if extrato_pendentes else 'Nenhuma transação de extrato pendente no mês'
+            ),
+            'link': reverse('extrato_list'),
+        },
+        {
             'item': 'Relatório contábil exportado',
             'ok': False,
             'informativa': True,
@@ -456,6 +470,7 @@ def checklist_mensal_view(request):
         'docs_pendentes_cnt': docs_pendentes_cnt,
         'docs_obrigatorios_pendentes': docs_obrigatorios_pendentes,
         'docs_validade_cnt': docs_validade_cnt,
+        'extrato_pendentes': extrato_pendentes,
         'reajustes_pendentes': reajustes_pendentes,
     }
     return render(request, 'financeiro/checklist_mensal.html', context)

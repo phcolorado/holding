@@ -8,7 +8,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         todos_perms = list(Permission.objects.all())
-        app_labels = {'patrimonio', 'financeiro', 'documentos'}
+        app_labels = {'patrimonio', 'financeiro', 'documentos', 'conciliacao'}
         perms_do_sistema = [
             p for p in todos_perms
             if p.content_type.app_label in app_labels

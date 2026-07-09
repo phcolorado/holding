@@ -20,7 +20,8 @@ Construído com Python + Django + Bootstrap 5 + SQLite.
 - **Geração automática de receitas**: gera `ReceitaAluguel` (com itens e despesa de administração, se configurada) para todos os contratos ativos de um mês via interface web ou Admin; idempotente (sem duplicatas); respeita prazo indeterminado e encerramento real
 - **Baixa de aluguéis**: tela de conferência mensal com marcação rápida de recebimento, composição da receita, sugestão de multa/juros e edição inline de cada receita
 - **Inadimplência por vencimento**: regra baseada em `data_vencimento`, independente do campo de status — a aba "Inadimplência Aberta" do relatório para contabilidade lista **todas** as receitas vencidas e não quitadas, sem filtro de mês de competência
-- **Checklist Mensal**: tela `/financeiro/checklist-mensal/` com 10 etapas de fechamento (incluindo reajustes pendentes e validade de documentos) e ação de marcar envio à contabilidade via `FechamentoMensal`
+- **Conciliação bancária (OFX)**: importa extratos do banco, casa créditos com as receitas esperadas (inclusive **repasses consolidados de imobiliária**, brutos ou líquidos da taxa de administração) e transforma débitos em despesas classificadas por regras
+- **Checklist Mensal**: tela `/financeiro/checklist-mensal/` com 11 etapas de fechamento (incluindo reajustes pendentes, validade de documentos e conciliação de extrato) e ação de marcar envio à contabilidade via `FechamentoMensal`
 - **Alertas de validade de documentos**: documentos com `data_validade` vencida ou vencendo em 30 dias aparecem no Dashboard, no Checklist Mensal e no filtro "Vencendo/vencidos" da lista de documentos
 - **Sugestão de reajuste pelo Banco Central**: action no Admin de Contratos que consulta o acumulado de 12 meses do IPCA/IGP-M/INPC na API SGS do BCB e cria um reajuste pendente para revisão
 - **Indicadores por imóvel**: yield bruto/líquido anual, receita/despesa/resultado de 12 meses e taxa de ocupação na tela de detalhe do imóvel
@@ -393,6 +394,29 @@ python manage.py migrate
 
 ---
 
+## Conciliação Bancária (extrato OFX)
+
+Acesse `/financeiro/conciliacao/` (menu lateral: "Conciliação Bancária").
+
+**Preparação (uma vez):**
+1. Cadastre a(s) **Conta(s) Bancária(s)** no Admin → Conciliação Bancária.
+2. (Opcional) Cadastre **Regras de Classificação** para débitos recorrentes — ex.: descrição contém "CEMIG" → categoria/fornecedor/imóvel pré-preenchidos.
+
+**Fluxo mensal:**
+1. Exporte o extrato do internet banking em formato **OFX** e importe na tela.
+2. Para cada **crédito**, o sistema sugere automaticamente:
+   - **Aluguel único** com valor exato; ou
+   - **Repasse consolidado de imobiliária** — quando um único crédito (ex.: R$ 10 mil) corresponde à soma de vários aluguéis administrados pela mesma imobiliária, **bruto ou líquido da taxa de administração**. No caso líquido, ao confirmar, as despesas de comissão vinculadas também são marcadas como pagas.
+   - Sem match automático, selecione manualmente as receitas (a soma é exibida ao vivo).
+   Confirmar dá baixa nas receitas (`recebido`/`parcial`) com a data da transação.
+3. Para cada **débito**, lance como **despesa paga** com um clique (categoria/fornecedor/imóvel sugeridos pela regra), ou **ignore** (transferências entre contas próprias etc.).
+
+**Garantias de idempotência:** o mesmo arquivo não pode ser importado duas vezes (hash), e transações repetidas em extratos de períodos sobrepostos são ignoradas pelo `FITID` do OFX. O Dashboard e o Checklist Mensal alertam quando há transações pendentes de conciliação.
+
+> PDF de extrato não é suportado nesta fase — o OFX é estruturado e confiável; exporte-o no internet banking (opção "OFX", "Money" ou "Open Financial Exchange").
+
+---
+
 ## Sugestão automática de reajuste (Banco Central)
 
 No Admin → Contratos, selecione contratos e use a action **"Sugerir reajuste pelo índice acumulado 12m (Banco Central)"**. O sistema:
@@ -440,4 +464,5 @@ Para migrar os dados do SQLite: `python manage.py dumpdata --natural-foreign --n
 | Pillow                | >=10.0  | Processamento de imagens        |
 | django-widget-tweaks  | >=1.5   | Templates de formulários        |
 | django-simple-history | >=3.7   | Auditoria de alterações         |
+| ofxparse              | >=0.21  | Leitura de extratos OFX         |
 | psycopg2-binary       | >=2.9   | Driver Postgres (opcional)      |

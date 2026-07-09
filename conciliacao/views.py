@@ -1,0 +1,150 @@
+from django.contrib import messages
+from django.contrib.auth.decorators import login_required
+from django.core.exceptions import PermissionDenied
+from django.http import HttpResponseRedirect
+from django.shortcuts import get_object_or_404, render
+from django.urls import reverse
+
+from core.utils import pk_param
+from financeiro.models import ReceitaAluguel
+from .forms import UploadExtratoForm, DespesaExtratoForm
+from .models import ExtratoImportado, TransacaoExtrato, ContaBancaria
+from .services import (
+    ExtratoJaImportadoError, OFXInvalidoError,
+    importar_ofx, receitas_candidatas, sugerir_receitas, sugerir_classificacao,
+    conciliar_com_receitas, lancar_despesa,
+)
+
+
+def _exigir_permissao(request, perm):
+    if not request.user.has_perm(perm):
+        raise PermissionDenied
+
+
+@login_required
+def extrato_list(request):
+    """GET: lista extratos importados. POST: importa um novo arquivo OFX."""
+    if request.method == 'POST':
+        _exigir_permissao(request, 'conciliacao.add_extratoimportado')
+        form = UploadExtratoForm(request.POST, request.FILES)
+        if form.is_valid():
+            try:
+                extrato = importar_ofx(
+                    form.cleaned_data['arquivo'], form.cleaned_data['conta'], request.user
+                )
+            except (ExtratoJaImportadoError, OFXInvalidoError) as exc:
+                messages.error(request, str(exc))
+            else:
+                messages.success(
+                    request,
+                    f'Extrato importado: {extrato.transacoes_novas} transação(ões) nova(s), '
+                    f'{extrato.transacoes_duplicadas} já existiam.',
+                )
+                return HttpResponseRedirect(reverse('conciliar_extrato', args=[extrato.pk]))
+        else:
+            for erros in form.errors.values():
+                for erro in erros:
+                    messages.error(request, erro)
+        return HttpResponseRedirect(reverse('extrato_list'))
+
+    extratos = ExtratoImportado.objects.select_related('conta', 'importado_por')
+    context = {
+        'extratos': extratos,
+        'form': UploadExtratoForm(),
+        'tem_conta': ContaBancaria.objects.filter(ativo=True).exists(),
+        'total_pendentes': TransacaoExtrato.objects.filter(status='pendente').count(),
+    }
+    return render(request, 'conciliacao/extrato_list.html', context)
+
+
+def _contexto_transacao(transacao):
+    """Pré-calcula sugestões e candidatas para exibição na tela de conciliação."""
+    dados = {'transacao': transacao, 'sugestao': None, 'candidatas': [], 'regra': None}
+    if transacao.status != 'pendente':
+        return dados
+    if transacao.tipo == 'credito':
+        sugestao = sugerir_receitas(transacao)
+        dados['sugestao'] = sugestao
+        sugeridas_pks = {r.pk for r in sugestao['receitas']} if sugestao else set()
+        dados['candidatas'] = [
+            {'receita': r, 'sugerida': r.pk in sugeridas_pks}
+            for r in receitas_candidatas(transacao)
+        ]
+    else:
+        dados['regra'] = sugerir_classificacao(transacao)
+    return dados
+
+
+@login_required
+def conciliar_extrato(request, pk):
+    """Tela de conciliação de um extrato: créditos ↔ receitas, débitos → despesas."""
+    extrato = get_object_or_404(ExtratoImportado.objects.select_related('conta'), pk=pk)
+
+    if request.method == 'POST':
+        transacao = get_object_or_404(
+            TransacaoExtrato, pk=pk_param(request.POST.get('transacao_id')) or 0, extrato=extrato
+        )
+        action = request.POST.get('action', '')
+
+        if action == 'conciliar' and transacao.status == 'pendente' and transacao.tipo == 'credito':
+            _exigir_permissao(request, 'financeiro.change_receitaaluguel')
+            receita_ids = [pk_param(v) for v in request.POST.getlist('receita_ids') if pk_param(v)]
+            receitas = list(
+                ReceitaAluguel.objects.filter(pk__in=receita_ids)
+                .exclude(status__in=ReceitaAluguel.STATUS_QUITADOS)
+            )
+            if not receitas:
+                messages.error(request, 'Selecione ao menos uma receita em aberto para conciliar.')
+            else:
+                marcar_comissoes = request.POST.get('marcar_comissoes') == '1'
+                conciliar_com_receitas(transacao, receitas, marcar_comissoes=marcar_comissoes)
+                nomes = ', '.join(r.imovel.nome for r in receitas)
+                messages.success(request, f'Crédito de R$ {transacao.valor_absoluto} conciliado com: {nomes}.')
+
+        elif action == 'lancar_despesa' and transacao.status == 'pendente' and transacao.tipo == 'debito':
+            _exigir_permissao(request, 'financeiro.add_despesa')
+            form = DespesaExtratoForm(request.POST)
+            if form.is_valid():
+                despesa = lancar_despesa(
+                    transacao,
+                    categoria=form.cleaned_data['categoria'],
+                    descricao=form.cleaned_data['descricao'],
+                    fornecedor=form.cleaned_data['fornecedor'],
+                    imovel=form.cleaned_data['imovel'],
+                )
+                messages.success(request, f'Despesa lançada: {despesa.descricao} (R$ {despesa.valor}).')
+            else:
+                erros = '; '.join(e for lista in form.errors.values() for e in lista)
+                messages.error(request, f'Despesa não lançada: {erros}')
+
+        elif action == 'ignorar' and transacao.status == 'pendente':
+            _exigir_permissao(request, 'conciliacao.change_transacaoextrato')
+            transacao.status = 'ignorada'
+            transacao.save(update_fields=['status'])
+            messages.info(request, 'Transação marcada como ignorada.')
+
+        elif action == 'reabrir' and transacao.status == 'ignorada':
+            _exigir_permissao(request, 'conciliacao.change_transacaoextrato')
+            transacao.status = 'pendente'
+            transacao.save(update_fields=['status'])
+            messages.info(request, 'Transação reaberta.')
+
+        return HttpResponseRedirect(reverse('conciliar_extrato', args=[extrato.pk]))
+
+    transacoes = (
+        extrato.transacoes
+        .select_related('despesa', 'despesa__imovel')
+        .prefetch_related('itens_receita__receita__imovel')
+        .order_by('data', 'id')
+    )
+    pendentes = [_contexto_transacao(t) for t in transacoes if t.status == 'pendente']
+    tratadas = [t for t in transacoes if t.status != 'pendente']
+
+    context = {
+        'extrato': extrato,
+        'pendentes': pendentes,
+        'tratadas': tratadas,
+        'total': len(pendentes) + len(tratadas),
+        'despesa_form': DespesaExtratoForm(),
+    }
+    return render(request, 'conciliacao/conciliar.html', context)

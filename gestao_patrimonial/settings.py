@@ -38,6 +38,7 @@ INSTALLED_APPS = [
     'patrimonio',
     'financeiro',
     'documentos',
+    'conciliacao',
 ]
 
 MIDDLEWARE = [
