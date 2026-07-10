@@ -1,0 +1,43 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+<h1>Gerar receitas esperadas</h1>
+<p>
+    Escolha a <strong>competência</strong> (mês/ano) para gerar as receitas dos
+    {{ contratos|length }} contrato(s) selecionado(s). A geração é idempotente —
+    receitas já existentes não são alteradas nem duplicadas.
+</p>
+
+<form method="post">
+    {% csrf_token %}
+    {% for contrato in contratos %}
+    <input type="hidden" name="{{ action_checkbox_name }}" value="{{ contrato.pk }}">
+    {% endfor %}
+    <input type="hidden" name="action" value="gerar_receitas_esperadas">
+
+    <p>
+        <label for="id_mes"><strong>Mês:</strong></label>
+        <select name="mes" id="id_mes">
+            {% for num, nome in meses %}
+            <option value="{{ num }}" {% if num == mes_atual %}selected{% endif %}>{{ nome }}</option>
+            {% endfor %}
+        </select>
+        &nbsp;
+        <label for="id_ano"><strong>Ano:</strong></label>
+        <select name="ano" id="id_ano">
+            {% for a in anos %}
+            <option value="{{ a }}" {% if a == ano_atual %}selected{% endif %}>{{ a }}</option>
+            {% endfor %}
+        </select>
+    </p>
+
+    <ul>
+        {% for contrato in contratos %}
+        <li>{{ contrato }}</li>
+        {% endfor %}
+    </ul>
+
+    <input type="submit" name="aplicar_geracao" value="Gerar receitas da competência" class="default">
+    <a href="{% url 'admin:patrimonio_contrato_changelist' %}" class="button cancel-link">Cancelar</a>
+</form>
+{% endblock %}

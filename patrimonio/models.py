@@ -1,5 +1,6 @@
 from calendar import monthrange
 from datetime import date
+from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
@@ -81,6 +82,19 @@ class Imovel(models.Model):
     def __str__(self):
         return f'{self.nome} — {self.cidade}/{self.estado}'
 
+    def clean(self):
+        if self.imovel_pai_id:
+            if self.pk and self.imovel_pai_id == self.pk:
+                raise ValidationError({'imovel_pai': 'Um imóvel não pode ser pai de si mesmo.'})
+            # Impede ciclos na hierarquia (A → B → A)
+            visitados = {self.pk} if self.pk else set()
+            atual = self.imovel_pai
+            while atual is not None:
+                if atual.pk in visitados:
+                    raise ValidationError({'imovel_pai': 'Hierarquia circular de imóveis não é permitida.'})
+                visitados.add(atual.pk)
+                atual = atual.imovel_pai
+
     def get_contrato_ativo(self):
         return self.contrato_set.filter(status='ativo').first()
 
@@ -107,6 +121,10 @@ class Pessoa(models.Model):
         ),
     )
     cpf_cnpj = models.CharField('CPF / CNPJ', max_length=18, blank=True)
+    cpf_cnpj_normalizado = models.CharField(
+        'CPF/CNPJ (somente dígitos)', max_length=14, blank=True, editable=False, db_index=True,
+        help_text='Preenchido automaticamente — usado para impedir cadastros duplicados.',
+    )
     email = models.EmailField('E-mail', blank=True)
     telefone = models.CharField('Telefone', max_length=20, blank=True)
     endereco = models.CharField('Endereço', max_length=300, blank=True)
@@ -122,6 +140,26 @@ class Pessoa(models.Model):
 
     def __str__(self):
         return self.nome
+
+    @staticmethod
+    def normalizar_cpf_cnpj(valor):
+        return ''.join(c for c in (valor or '') if c.isdigit())
+
+    def clean(self):
+        normalizado = self.normalizar_cpf_cnpj(self.cpf_cnpj)
+        if normalizado:
+            duplicadas = Pessoa.objects.filter(cpf_cnpj_normalizado=normalizado)
+            if self.pk:
+                duplicadas = duplicadas.exclude(pk=self.pk)
+            if duplicadas.exists():
+                raise ValidationError({
+                    'cpf_cnpj': f'Já existe uma pessoa cadastrada com este CPF/CNPJ ({duplicadas.first().nome}).'
+                })
+
+    def save(self, *args, **kwargs):
+        # A forma formatada é preservada em cpf_cnpj; a normalizada serve para comparação.
+        self.cpf_cnpj_normalizado = self.normalizar_cpf_cnpj(self.cpf_cnpj)
+        super().save(*args, **kwargs)
 
 
 class Contrato(models.Model):
@@ -184,7 +222,10 @@ class Contrato(models.Model):
         'Data de Encerramento Real', null=True, blank=True,
         help_text='Preencha apenas quando o contrato foi efetivamente encerrado (rescisão ou fim real da locação).',
     )
-    valor_aluguel = models.DecimalField('Valor do Aluguel (R$)', max_digits=12, decimal_places=2)
+    valor_aluguel = models.DecimalField(
+        'Valor do Aluguel (R$)', max_digits=12, decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))],
+    )
     dia_vencimento = models.PositiveSmallIntegerField(
         'Dia de Vencimento',
         validators=[MinValueValidator(1), MaxValueValidator(31)],
@@ -194,14 +235,17 @@ class Contrato(models.Model):
     tipo_garantia = models.CharField('Tipo de Garantia', max_length=30, choices=GARANTIA_CHOICES, default='sem_garantia')
     comissao_imobiliaria_percentual = models.DecimalField(
         'Taxa de Administração Imobiliária (%)', max_digits=5, decimal_places=2, null=True, blank=True,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
         help_text='Percentual cobrado pela imobiliária sobre o encargo de aluguel. Gera despesa automática ao gerar a receita mensal.',
     )
     multa_atraso_percentual = models.DecimalField(
         'Multa por Atraso (%)', max_digits=6, decimal_places=2, default=0,
+        validators=[MinValueValidator(0)],
         help_text='Percentual de multa sobre o valor previsto, aplicado após os dias de carência.',
     )
     juros_mora_percentual_mes = models.DecimalField(
         'Juros de Mora (% ao mês)', max_digits=6, decimal_places=2, default=0,
+        validators=[MinValueValidator(0)],
         help_text='Percentual de juros ao mês, calculado proporcionalmente aos dias de atraso (base 30 dias).',
     )
     dias_carencia_multa = models.PositiveSmallIntegerField(
@@ -223,6 +267,32 @@ class Contrato(models.Model):
         return f'Contrato {self.imovel} — {self.locatario.nome} ({self.get_status_display()})'
 
     def clean(self):
+        erros = {}
+        if self.data_inicio and self.data_fim and self.data_fim < self.data_inicio:
+            erros['data_fim'] = 'A data de término não pode ser anterior à data de início.'
+        if self.data_inicio and self.data_encerramento_real and self.data_encerramento_real < self.data_inicio:
+            erros['data_encerramento_real'] = 'O encerramento real não pode ser anterior ao início do contrato.'
+        if (
+            self.status in ('encerrado', 'rescindido')
+            and self.prazo_indeterminado
+            and not self.data_encerramento_real
+        ):
+            erros['data_encerramento_real'] = (
+                'Contrato por prazo indeterminado encerrado/rescindido precisa da data de '
+                'encerramento real — sem ela a vigência ficaria indefinida.'
+            )
+        if (
+            self.status == 'ativo'
+            and self.data_encerramento_real
+            and self.data_encerramento_real < timezone.localdate()
+        ):
+            erros['status'] = (
+                'O contrato tem encerramento real no passado — altere o status para '
+                'Encerrado ou Rescindido, ou remova a data de encerramento.'
+            )
+        if erros:
+            raise ValidationError(erros)
+
         # Impede contratos ativos sobrepostos para o mesmo imóvel.
         # Contratos por prazo indeterminado (sem encerramento real) são
         # tratados como abertos até uma data futura indefinida (date.max).
@@ -405,6 +475,16 @@ class EncargoContrato(models.Model):
         return f'{self.get_tipo_display()} — {self.contrato} (R$ {self.valor})'
 
     def clean(self):
+        if self.valor is not None:
+            if self.tipo == 'aluguel' and self.valor <= 0:
+                raise ValidationError({'valor': 'O encargo de aluguel deve ter valor maior que zero.'})
+            if self.valor < 0:
+                raise ValidationError({'valor': 'O valor do encargo não pode ser negativo.'})
+        if (
+            self.data_inicio_cobranca and self.data_fim_cobranca
+            and self.data_fim_cobranca < self.data_inicio_cobranca
+        ):
+            raise ValidationError({'data_fim_cobranca': 'O fim da cobrança não pode ser anterior ao início.'})
         if self.tipo == 'aluguel' and self.periodicidade != 'mensal':
             raise ValidationError({'periodicidade': 'O encargo de aluguel deve ser mensal.'})
         if self.tipo == 'aluguel' and self.ativo and self.contrato_id:
@@ -463,6 +543,14 @@ class ReajusteContrato(models.Model):
         'Aplicado', default=False,
         help_text='Ao marcar e salvar um reajuste novo como aplicado, o sistema atualiza o valor vigente do contrato e do encargo de aluguel automaticamente.',
     )
+    aplicado_em = models.DateTimeField(
+        'Aplicado em', null=True, blank=True, editable=False,
+        help_text='Preenchido pelo sistema no momento da aplicação — impede reaplicação.',
+    )
+    periodo_indice = models.CharField(
+        'Período do Índice', max_length=40, blank=True,
+        help_text='Competências usadas na sugestão automática (ex.: "06/2023 a 05/2024").',
+    )
     observacoes = models.TextField('Observações', blank=True)
     criado_em = models.DateTimeField('Criado em', auto_now_add=True)
     atualizado_em = models.DateTimeField('Atualizado em', auto_now=True)
@@ -476,24 +564,51 @@ class ReajusteContrato(models.Model):
     def __str__(self):
         return f'Reajuste {self.contrato} em {self.data_reajuste:%d/%m/%Y}'
 
+    def clean(self):
+        erros = {}
+        if self.valor_novo is not None and self.valor_novo <= 0:
+            erros['valor_novo'] = 'O valor novo deve ser maior que zero.'
+        if self.valor_anterior is not None and self.valor_anterior <= 0:
+            erros['valor_anterior'] = 'O valor anterior deve ser maior que zero.'
+        if erros:
+            raise ValidationError(erros)
+
     def aplicar(self):
         """
-        Atualiza o valor vigente do contrato e do encargo de aluguel ativo a
-        partir deste reajuste, e avança data_proximo_reajuste em 12 meses
-        (exceto para índice fixo). Nunca altera receitas já geradas.
-        """
-        contrato = self.contrato
-        contrato.valor_aluguel = self.valor_novo
-        update_fields = ['valor_aluguel']
-        if self.indice != 'fixo':
-            contrato.data_proximo_reajuste = _avancar_12_meses(self.data_reajuste)
-            update_fields.append('data_proximo_reajuste')
-        contrato.save(update_fields=update_fields)
+        Aplica o reajuste: atualiza o valor vigente do contrato e do encargo
+        de aluguel ativo, avança data_proximo_reajuste em 12 meses (exceto
+        índice fixo) e marca aplicado/aplicado_em. Nunca altera receitas já
+        geradas.
 
-        encargo_aluguel = contrato.encargos.filter(tipo='aluguel', ativo=True).first()
-        if encargo_aluguel:
-            encargo_aluguel.valor = self.valor_novo
-            encargo_aluguel.save(update_fields=['valor'])
+        Idempotente e atômico: se o reajuste já foi aplicado (aplicado_em
+        preenchido no banco), retorna False sem reaplicar. Usa
+        select_for_update para impedir aplicação simultânea.
+        Retorna True quando aplicou nesta chamada.
+        """
+        from django.db import transaction
+
+        with transaction.atomic():
+            atual = ReajusteContrato.objects.select_for_update().get(pk=self.pk)
+            if atual.aplicado_em is not None:
+                return False
+
+            contrato = Contrato.objects.select_for_update().get(pk=self.contrato_id)
+            contrato.valor_aluguel = self.valor_novo
+            update_fields = ['valor_aluguel']
+            if self.indice != 'fixo':
+                contrato.data_proximo_reajuste = _avancar_12_meses(self.data_reajuste)
+                update_fields.append('data_proximo_reajuste')
+            contrato.save(update_fields=update_fields)
+
+            encargo_aluguel = contrato.encargos.filter(tipo='aluguel', ativo=True).first()
+            if encargo_aluguel:
+                encargo_aluguel.valor = self.valor_novo
+                encargo_aluguel.save(update_fields=['valor'])
+
+            self.aplicado = True
+            self.aplicado_em = timezone.now()
+            self.save(update_fields=['aplicado', 'aplicado_em'])
+        return True
 
 
 class Manutencao(models.Model):

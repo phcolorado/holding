@@ -44,25 +44,59 @@ def imovel_list(request):
 @login_required
 @permission_required('patrimonio.view_imovel', raise_exception=True)
 def imovel_detail(request, pk):
+    """
+    Detalhe do imóvel: cada seção só é consultada e exibida se o usuário tem
+    a permissão de leitura da área correspondente — a view não busca dados
+    que o template esconderia.
+    """
     imovel = get_object_or_404(Imovel, pk=pk)
-    contrato_ativo = imovel.get_contrato_ativo()
+    pode = request.user.has_perm
 
-    receitas = ReceitaAluguel.objects.filter(imovel=imovel).order_by('-competencia_ano', '-competencia_mes')[:24]
-    despesas = Despesa.objects.filter(imovel=imovel).order_by('-data_vencimento')[:24]
-    documentos = Documento.objects.filter(imovel=imovel).order_by('-criado_em')
-    manutencoes = Manutencao.objects.filter(imovel=imovel).order_by('-data_solicitacao')
-    docs_obrigatorios = DocumentoObrigatorio.objects.filter(imovel=imovel).select_related('documento')
+    ve_contrato = pode('patrimonio.view_contrato')
+    ve_receitas = pode('financeiro.view_receitaaluguel')
+    ve_despesas = pode('financeiro.view_despesa')
+    ve_documentos = pode('documentos.view_documento')
+    ve_obrigatorios = pode('documentos.view_documentoobrigatorio')
+    ve_manutencoes = pode('patrimonio.view_manutencao')
+
+    contrato_ativo = imovel.get_contrato_ativo() if ve_contrato else None
+    receitas = (
+        ReceitaAluguel.objects.filter(imovel=imovel)
+        .prefetch_related('contrato__partes__pessoa')
+        .order_by('-competencia_ano', '-competencia_mes')[:24]
+        if ve_receitas else ReceitaAluguel.objects.none()
+    )
+    despesas = (
+        Despesa.objects.filter(imovel=imovel).order_by('-data_vencimento')[:24]
+        if ve_despesas else Despesa.objects.none()
+    )
+    documentos = (
+        Documento.objects.filter(imovel=imovel).order_by('-criado_em')
+        if ve_documentos else Documento.objects.none()
+    )
+    manutencoes = (
+        Manutencao.objects.filter(imovel=imovel).order_by('-data_solicitacao')
+        if ve_manutencoes else Manutencao.objects.none()
+    )
+    docs_obrigatorios = (
+        DocumentoObrigatorio.objects.filter(imovel=imovel).select_related('documento')
+        if ve_obrigatorios else DocumentoObrigatorio.objects.none()
+    )
     unidades = imovel.unidades.all()
 
-    total_recebido = ReceitaAluguel.objects.filter(
-        imovel=imovel, status__in=('recebido', 'parcial')
-    ).aggregate(total=Sum('valor_recebido'))['total'] or 0
-    total_despesas = Despesa.objects.filter(
-        imovel=imovel, status='paga'
-    ).aggregate(total=Sum('valor'))['total'] or 0
+    if ve_receitas:
+        total_recebido = ReceitaAluguel.objects.filter(
+            imovel=imovel, status__in=('recebido', 'parcial')
+        ).aggregate(total=Sum('valor_recebido'))['total'] or 0
+        indicadores = indicadores_do_imovel(imovel)
+    else:
+        total_recebido = 0
+        indicadores = None
+    total_despesas = (
+        Despesa.objects.filter(imovel=imovel, status='paga').aggregate(total=Sum('valor'))['total'] or 0
+        if ve_despesas else 0
+    )
     resultado = total_recebido - total_despesas
-
-    indicadores = indicadores_do_imovel(imovel)
 
     context = {
         'indicadores': indicadores,
@@ -77,6 +111,7 @@ def imovel_detail(request, pk):
         'resultado': resultado,
         'docs_obrigatorios': docs_obrigatorios,
         'unidades': unidades,
+        've_obrigatorios': ve_obrigatorios,
     }
     return render(request, 'patrimonio/imovel_detail.html', context)
 

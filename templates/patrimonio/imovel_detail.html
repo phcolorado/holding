@@ -129,8 +129,12 @@
             </div>
             <div class="card-body small">
                 <div class="d-flex justify-content-between mb-1">
-                    <span class="text-muted">Receita recebida</span>
+                    <span class="text-muted">Receita total de caixa</span>
                     <span class="fw-semibold">R$ {{ indicadores.receita_12m|floatformat:2|intcomma }}</span>
+                </div>
+                <div class="d-flex justify-content-between mb-1">
+                    <span class="text-muted">Receita locatícia (só aluguel)</span>
+                    <span class="fw-semibold">R$ {{ indicadores.receita_locaticia_12m|floatformat:2|intcomma }}</span>
                 </div>
                 <div class="d-flex justify-content-between mb-1">
                     <span class="text-muted">Despesas pagas</span>
@@ -163,7 +167,9 @@
                 </div>
                 {% if indicadores.valor_base %}
                 <div class="text-muted mt-2" style="font-size: .75rem;">
-                    Yield calculado sobre {% if imovel.valor_estimado %}o valor estimado{% else %}o valor de aquisição{% endif %}
+                    Yield calculado sobre a <strong>receita locatícia</strong> (somente aluguel —
+                    IPTU/encargos repassados ficam de fora) dividida
+                    {% if imovel.valor_estimado %}pelo valor estimado{% else %}pelo valor de aquisição{% endif %}
                     (R$ {{ indicadores.valor_base|floatformat:2|intcomma }}).
                 </div>
                 {% endif %}
@@ -214,6 +220,7 @@
             <i class="bi bi-tools me-1"></i>Manutenções <span class="badge bg-secondary">{{ manutencoes|length }}</span>
         </a>
     </li>
+    {% if ve_obrigatorios %}
     <li class="nav-item">
         <a class="nav-link" data-bs-toggle="tab" href="#obrigatorios-tab">
             <i class="bi bi-file-earmark-check me-1"></i>Docs. Obrigatórios
@@ -222,6 +229,7 @@
             {% endwith %}
         </a>
     </li>
+    {% endif %}
     <li class="nav-item">
         <a class="nav-link" data-bs-toggle="tab" href="#unidades-tab">
             <i class="bi bi-diagram-3 me-1"></i>Unidades <span class="badge bg-secondary">{{ unidades|length }}</span>
@@ -357,6 +365,7 @@
         </div>
     </div>
 
+    {% if ve_obrigatorios %}
     <div class="tab-pane fade" id="obrigatorios-tab">
         <div class="card shadow-sm">
             <div class="card-header bg-white d-flex justify-content-between align-items-center">
@@ -385,7 +394,7 @@
                             </td>
                             <td>
                                 {% if ob.documento %}
-                                    <a href="{{ ob.documento.arquivo.url }}" target="_blank" class="small">
+                                    <a href="{% url 'documento_download' ob.documento.pk %}" target="_blank" class="small">
                                         <i class="bi bi-download me-1"></i>{{ ob.documento.titulo|truncatechars:30 }}
                                     </a>
                                 {% else %}
@@ -408,6 +417,7 @@
         </div>
     </div>
 
+    {% endif %}
     <div class="tab-pane fade" id="unidades-tab">
         <div class="card shadow-sm">
             <div class="card-body p-0">

@@ -79,7 +79,7 @@
                 {% for r in receitas %}
                 <tr class="{% if r.status == 'atrasado' %}table-danger{% elif r.status == 'recebido' %}table-success{% endif %}">
                     <td><a href="{% url 'imovel_detail' r.imovel.pk %}">{{ r.imovel.nome }}</a></td>
-                    <td>{% if r.contrato %}{{ r.contrato.locatario.nome }}{% else %}—{% endif %}</td>
+                    <td>{% if r.contrato %}{{ r.contrato.locatarios_display }}{% else %}—{% endif %}</td>
                     <td>{{ r.get_competencia_mes_display }}/{{ r.competencia_ano }}</td>
                     <td>{{ r.data_vencimento|date:"d/m/Y" }}</td>
                     <td>R$ {{ r.valor_previsto|floatformat:2|intcomma }}</td>

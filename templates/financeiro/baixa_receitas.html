@@ -52,6 +52,7 @@
 </form>
 
 <!-- Ação: Gerar Receitas Esperadas (formulário POST separado) -->
+{% if perms.financeiro.add_receitaaluguel %}
 <form method="post" class="mb-3 text-end">
     {% csrf_token %}
     <input type="hidden" name="mes" value="{{ mes_atual }}">
@@ -62,6 +63,7 @@
         <i class="bi bi-magic me-1"></i>Gerar Receitas Esperadas
     </button>
 </form>
+{% endif %}
 
 <!-- Totais -->
 {% if receitas %}
@@ -120,7 +122,7 @@
                     <tr data-status="{{ r.status }}" data-atrasada="{{ r.esta_atrasada|yesno:'1,0' }}">
                         <td class="fw-semibold">{{ r.imovel.nome }}</td>
                         <td class="text-muted small">
-                            {% if r.contrato %}{{ r.contrato.locatario.nome }}{% else %}—{% endif %}
+                            {% if r.contrato %}{{ r.contrato.locatarios_display }}{% else %}—{% endif %}
                         </td>
                         <td class="small {% if r.esta_atrasada %}text-danger fw-semibold{% endif %}">
                             {{ r.data_vencimento|date:"d/m/Y" }}
@@ -157,6 +159,7 @@
                         </td>
                         <td class="small text-muted">{{ r.observacoes|truncatechars:30|default:"—" }}</td>
                         <td class="text-center text-nowrap">
+                            {% if perms.financeiro.change_receitaaluguel %}
                             {% if r.status != 'recebido' and r.status != 'cancelado' %}
                             <form method="post" class="d-inline">
                                 {% csrf_token %}
@@ -188,6 +191,7 @@
                                     title="Editar">
                                 <i class="bi bi-pencil"></i>
                             </button>
+                            {% endif %}
                         </td>
                     </tr>
                     {% empty %}

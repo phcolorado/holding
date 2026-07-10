@@ -5,14 +5,19 @@ on:
   pull_request:
 
 jobs:
-  testes:
+  sqlite:
+    name: SQLite · Python ${{ matrix.python }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.12']
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ matrix.python }}
           cache: pip
 
       - name: Instalar dependências
@@ -23,6 +28,56 @@ jobs:
 
       - name: Migrações pendentes
         run: python manage.py makemigrations --check --dry-run
+
+      - name: Migrar banco vazio do zero
+        run: python manage.py migrate --noinput
+
+      - name: Checagem de deploy (variáveis de produção)
+        env:
+          DJANGO_DEBUG: '0'
+          DJANGO_SECRET_KEY: chave-somente-para-ci-com-tamanho-suficiente-1234567890
+          DJANGO_ALLOWED_HOSTS: ci.exemplo.com
+        run: python manage.py check --deploy
+
+      - name: Rodar testes
+        run: python manage.py test --verbosity 2
+
+  postgres:
+    name: PostgreSQL · Python 3.12
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: holding_ci
+          POSTGRES_USER: holding
+          POSTGRES_PASSWORD: holding
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U holding"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DB_ENGINE: django.db.backends.postgresql
+      DB_NAME: holding_ci
+      DB_USER: holding
+      DB_PASSWORD: holding
+      DB_HOST: 127.0.0.1
+      DB_PORT: '5432'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Migrar banco Postgres do zero
+        run: python manage.py migrate --noinput
 
       - name: Rodar testes
         run: python manage.py test --verbosity 2

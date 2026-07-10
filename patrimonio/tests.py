@@ -1115,3 +1115,264 @@ class PerfisDeAcessoTest(TestCase):
         resposta = client.get(reverse('contrato_list'))
         self.assertEqual(resposta.status_code, 302)
         self.assertIn('/login/', resposta['Location'])
+
+
+# ─── Validações de domínio dos models (rodada de correções) ───────────────────
+
+class ValidacoesModelsTest(TestCase):
+    def setUp(self):
+        self.imovel = _criar_imovel()
+        self.locatario = _criar_pessoa('Locatário V', tipo='locatario')
+
+    def _contrato_nao_salvo(self, **kwargs):
+        defaults = dict(
+            imovel=self.imovel, locatario=self.locatario,
+            data_inicio=date(2024, 1, 1), data_fim=date(2024, 12, 31),
+            valor_aluguel=Decimal('2000.00'), dia_vencimento=10, status='ativo',
+        )
+        defaults.update(kwargs)
+        return Contrato(**defaults)
+
+    def test_data_fim_anterior_ao_inicio_rejeitada(self):
+        c = self._contrato_nao_salvo(data_fim=date(2023, 12, 31))
+        with self.assertRaises(ValidationError):
+            c.full_clean()
+
+    def test_encerramento_real_anterior_ao_inicio_rejeitado(self):
+        c = self._contrato_nao_salvo(data_encerramento_real=date(2023, 6, 1))
+        with self.assertRaises(ValidationError):
+            c.full_clean()
+
+    def test_valor_aluguel_zero_rejeitado(self):
+        c = self._contrato_nao_salvo(valor_aluguel=Decimal('0.00'))
+        with self.assertRaises(ValidationError):
+            c.full_clean()
+
+    def test_comissao_acima_de_100_rejeitada(self):
+        c = self._contrato_nao_salvo(comissao_imobiliaria_percentual=Decimal('101.00'))
+        with self.assertRaises(ValidationError):
+            c.full_clean()
+
+    def test_multa_negativa_rejeitada(self):
+        c = self._contrato_nao_salvo(multa_atraso_percentual=Decimal('-1.00'))
+        with self.assertRaises(ValidationError):
+            c.full_clean()
+
+    def test_encerrado_indeterminado_exige_data_real(self):
+        c = self._contrato_nao_salvo(status='encerrado', prazo_indeterminado=True)
+        with self.assertRaises(ValidationError) as ctx:
+            c.full_clean()
+        self.assertIn('data_encerramento_real', ctx.exception.message_dict)
+
+    def test_ativo_com_encerramento_no_passado_rejeitado(self):
+        c = self._contrato_nao_salvo(
+            data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
+            data_encerramento_real=date(2021, 1, 1),
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            c.full_clean()
+        self.assertIn('status', ctx.exception.message_dict)
+
+    def test_encargo_fim_cobranca_antes_do_inicio_rejeitado(self):
+        contrato = _criar_contrato(self.imovel, self.locatario, date(2024, 1, 1), date(2024, 12, 31))
+        encargo = EncargoContrato(
+            contrato=contrato, tipo='iptu', valor=Decimal('100.00'),
+            data_inicio_cobranca=date(2024, 6, 1), data_fim_cobranca=date(2024, 5, 1),
+        )
+        with self.assertRaises(ValidationError):
+            encargo.full_clean()
+
+    def test_encargo_aluguel_valor_zero_rejeitado(self):
+        contrato = _criar_contrato(self.imovel, self.locatario, date(2024, 1, 1), date(2024, 12, 31))
+        encargo = EncargoContrato(contrato=contrato, tipo='aluguel', valor=Decimal('0.00'))
+        with self.assertRaises(ValidationError):
+            encargo.full_clean()
+
+    def test_imovel_pai_igual_a_si_mesmo_rejeitado(self):
+        self.imovel.imovel_pai = self.imovel
+        with self.assertRaises(ValidationError):
+            self.imovel.full_clean()
+
+    def test_hierarquia_circular_rejeitada(self):
+        filho = _criar_imovel('Filho', imovel_pai=self.imovel)
+        self.imovel.imovel_pai = filho
+        with self.assertRaises(ValidationError):
+            self.imovel.full_clean()
+
+    def test_cpf_cnpj_duplicado_rejeitado(self):
+        _criar_pessoa('Um').__class__.objects.filter(nome='Um').update(cpf_cnpj='123.456.789-09', cpf_cnpj_normalizado='12345678909')
+        duplicada = Pessoa(nome='Dois', cpf_cnpj='12345678909')
+        with self.assertRaises(ValidationError):
+            duplicada.full_clean()
+
+    def test_cpf_cnpj_normalizado_preenchido_no_save(self):
+        p = Pessoa.objects.create(nome='Três', cpf_cnpj='987.654.321-00')
+        self.assertEqual(p.cpf_cnpj_normalizado, '98765432100')
+        # forma formatada preservada
+        self.assertEqual(p.cpf_cnpj, '987.654.321-00')
+
+    def test_cpf_cnpj_vazio_nao_obriga_nem_conflita(self):
+        Pessoa.objects.create(nome='Sem Doc 1')
+        p2 = Pessoa(nome='Sem Doc 2')
+        p2.full_clean()  # não deve levantar
+
+
+# ─── Reajuste seguro e competência histórica do índice ────────────────────────
+
+class ReajusteSeguroTest(TestCase):
+    def setUp(self):
+        self.imovel = _criar_imovel('Imóvel Reaj')
+        self.locatario = _criar_pessoa('Locatário R2', tipo='locatario')
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, date(2024, 1, 1), date(2030, 12, 31),
+            valor_aluguel=Decimal('2000.00'),
+        )
+        self.contrato.garantir_encargo_aluguel()
+        self.reajuste = ReajusteContrato.objects.create(
+            contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2100.00'),
+        )
+
+    def test_aplicar_atualiza_contrato_encargo_e_marca_aplicado(self):
+        self.assertTrue(self.reajuste.aplicar())
+        self.contrato.refresh_from_db()
+        self.reajuste.refresh_from_db()
+        encargo = self.contrato.encargos.get(tipo='aluguel', ativo=True)
+        self.assertEqual(self.contrato.valor_aluguel, Decimal('2100.00'))
+        self.assertEqual(encargo.valor, Decimal('2100.00'))
+        self.assertEqual(self.contrato.data_proximo_reajuste, date(2026, 1, 1))
+        self.assertTrue(self.reajuste.aplicado)
+        self.assertIsNotNone(self.reajuste.aplicado_em)
+
+    def test_aplicar_e_idempotente(self):
+        self.assertTrue(self.reajuste.aplicar())
+        self.contrato.refresh_from_db()
+        self.reajuste.refresh_from_db()
+        # segunda chamada não reaplica nem altera valores
+        self.assertFalse(self.reajuste.aplicar())
+        self.contrato.refresh_from_db()
+        self.assertEqual(self.contrato.valor_aluguel, Decimal('2100.00'))
+
+    def test_valor_novo_zero_rejeitado(self):
+        r = ReajusteContrato(
+            contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('0.00'),
+        )
+        with self.assertRaises(ValidationError):
+            r.full_clean()
+
+
+class IndiceCompetenciaHistoricaTest(TestCase):
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+
+    def test_competencia_final_do_reajuste_e_o_mes_anterior(self):
+        from patrimonio.indices import competencia_final_para_reajuste
+        self.assertEqual(competencia_final_para_reajuste(date(2024, 6, 15)), (2024, 5))
+        self.assertEqual(competencia_final_para_reajuste(date(2024, 1, 1)), (2023, 12))
+
+    def test_consulta_usa_intervalo_historico_correto(self):
+        import io, json
+        from unittest.mock import patch
+        from patrimonio.indices import variacao_acumulada_12m
+
+        urls = []
+
+        def fake_urlopen(url, timeout=0):
+            urls.append(url)
+            dados = [
+                {'data': f'01/{m:02d}/{2023 if m >= 6 else 2024}', 'valor': '0.5'}
+                for m in list(range(6, 13)) + list(range(1, 6))
+            ]
+            return io.BytesIO(json.dumps(dados).encode('utf-8'))
+
+        with patch('patrimonio.indices.urlopen', side_effect=fake_urlopen):
+            resultado = variacao_acumulada_12m('ipca', competencia_final=(2024, 5))
+
+        # URL pede exatamente jun/2023 a mai/2024 — não os "últimos 12 de hoje"
+        self.assertIn('dataInicial=01%2F06%2F2023', urls[0])
+        self.assertIn('dataFinal=31%2F05%2F2024', urls[0])
+        self.assertAlmostEqual(float(resultado['percentual']), 6.1678, places=3)
+
+    def test_serie_incompleta_gera_erro_de_defasagem(self):
+        import io, json
+        from unittest.mock import patch
+        from patrimonio.indices import variacao_acumulada_12m, IndiceIndisponivelError
+
+        poucos = io.BytesIO(json.dumps(
+            [{'data': '01/01/2024', 'valor': '0.5'}] * 5
+        ).encode('utf-8'))
+        with patch('patrimonio.indices.urlopen', return_value=poucos):
+            with self.assertRaises(IndiceIndisponivelError) as ctx:
+                variacao_acumulada_12m('igpm', competencia_final=(2024, 5))
+        self.assertIn('defasagem', str(ctx.exception))
+
+
+# ─── Permissões customizadas no detalhe do imóvel (item 9) ───────────────────
+
+class ImovelDetailPermissoesTest(TestCase):
+    def setUp(self):
+        from django.contrib.auth.models import Permission
+        self.imovel = _criar_imovel('Imóvel Perm')
+        self.locatario = _criar_pessoa('Locatário P', tipo='locatario')
+        contrato = _criar_contrato(self.imovel, self.locatario, date(2024, 1, 1), date(2030, 12, 31))
+        from financeiro.models import ReceitaAluguel
+        ReceitaAluguel.objects.create(
+            contrato=contrato, imovel=self.imovel,
+            competencia_mes=1, competencia_ano=2025,
+            data_vencimento=date(2025, 1, 10), valor_previsto=Decimal('2000.00'), status='previsto',
+        )
+        # usuário APENAS com view_imovel — sem financeiro, documentos ou contrato
+        self.user = User.objects.create_user('so_imovel', password='pass')
+        self.user.user_permissions.add(Permission.objects.get(codename='view_imovel'))
+        self.client = Client()
+        self.client.login(username='so_imovel', password='pass')
+
+    def test_detalhe_carrega_sem_dados_restritos(self):
+        resposta = self.client.get(reverse('imovel_detail', args=[self.imovel.pk]))
+        self.assertEqual(resposta.status_code, 200)
+        # a view não busca (nem exibe) dados de áreas sem permissão
+        self.assertEqual(len(resposta.context['receitas']), 0)
+        self.assertEqual(len(resposta.context['despesas']), 0)
+        self.assertEqual(len(resposta.context['documentos']), 0)
+        self.assertIsNone(resposta.context['contrato_ativo'])
+        self.assertIsNone(resposta.context['indicadores'])
+        html = resposta.content.decode()
+        self.assertNotIn('Resultado Financeiro', html)
+        self.assertNotIn('R$ 2.000', html)
+
+    def test_sem_view_imovel_403(self):
+        User.objects.create_user('nada', password='pass')
+        client = Client()
+        client.login(username='nada', password='pass')
+        self.assertEqual(client.get(reverse('imovel_detail', args=[self.imovel.pk])).status_code, 403)
+
+
+# ─── Yield locatício (item 13) ────────────────────────────────────────────────
+
+class YieldLocaticioTest(TestCase):
+    def test_yield_usa_apenas_itens_de_aluguel(self):
+        from financeiro.models import ReceitaAluguel, ReceitaAluguelItem
+        from patrimonio.indicadores import indicadores_do_imovel
+
+        imovel = _criar_imovel('Imóvel Yield', valor_estimado=Decimal('240000.00'))
+        locatario = _criar_pessoa('Locatário Y', tipo='locatario')
+        hoje = timezone.localdate()
+        contrato = _criar_contrato(
+            imovel, locatario, hoje - timedelta(days=400), hoje + timedelta(days=365),
+        )
+        receita = ReceitaAluguel.objects.create(
+            contrato=contrato, imovel=imovel,
+            competencia_mes=hoje.month, competencia_ano=hoje.year,
+            data_vencimento=hoje, valor_previsto=Decimal('2500.00'),
+            valor_recebido=Decimal('2500.00'), status='recebido',
+        )
+        ReceitaAluguelItem.objects.create(receita=receita, tipo='aluguel', valor=Decimal('2000.00'))
+        ReceitaAluguelItem.objects.create(receita=receita, tipo='iptu', valor=Decimal('500.00'))
+
+        ind = indicadores_do_imovel(imovel)
+        self.assertEqual(ind['receita_12m'], Decimal('2500.00'))          # caixa total
+        self.assertEqual(ind['receita_locaticia_12m'], Decimal('2000.00'))  # só aluguel
+        # 2000 / 240000 * 100 = 0.83 — IPTU repassado não infla o yield
+        self.assertEqual(ind['yield_bruto'], Decimal('0.83'))

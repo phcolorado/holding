@@ -429,3 +429,249 @@ class ConciliacaoViewsTest(TestCase):
         itens = {item['item']: item for item in response.context['checklist']}
         item = itens['Extrato bancário conciliado']
         self.assertFalse(item['ok'])
+
+
+# ─── Conciliação por saldo, validações e desfazer (rodada de correções) ───────
+
+def _ofx_conta(transacoes, bankid='0341', acctid='12345-6', nome='extrato.ofx'):
+    corpo = '\n'.join(
+        f'<STMTTRN><TRNTYPE>{"CREDIT" if not v.startswith("-") else "DEBIT"}'
+        f'<DTPOSTED>{d}<TRNAMT>{v}<FITID>{f}<MEMO>{m}</STMTTRN>'
+        for f, d, v, m in transacoes
+    )
+    conteudo = f"""OFXHEADER:100
+DATA:OFXSGML
+VERSION:102
+SECURITY:NONE
+ENCODING:USASCII
+CHARSET:1252
+COMPRESSION:NONE
+OLDFILEUID:NONE
+NEWFILEUID:NONE
+
+<OFX>
+<SIGNONMSGSRSV1><SONRS><STATUS><CODE>0<SEVERITY>INFO</STATUS>
+<DTSERVER>20260101<LANGUAGE>POR</SONRS></SIGNONMSGSRSV1>
+<BANKMSGSRSV1><STMTTRNRS><TRNUID>1
+<STATUS><CODE>0<SEVERITY>INFO</STATUS>
+<STMTRS><CURDEF>BRL
+<BANKACCTFROM><BANKID>{bankid}<ACCTID>{acctid}<ACCTTYPE>CHECKING</BANKACCTFROM>
+<BANKTRANLIST><DTSTART>20260101<DTEND>20261231
+{corpo}
+</BANKTRANLIST>
+<LEDGERBAL><BALAMT>0.00<DTASOF>20261231</LEDGERBAL>
+</STMTRS></STMTTRNRS></BANKMSGSRSV1>
+</OFX>
+"""
+    return SimpleUploadedFile(nome, conteudo.encode('cp1252'))
+
+
+def _ofx_duas_contas(nome='duascontas.ofx'):
+    bloco = """<STMTTRNRS><TRNUID>{n}
+<STATUS><CODE>0<SEVERITY>INFO</STATUS>
+<STMTRS><CURDEF>BRL
+<BANKACCTFROM><BANKID>0341<ACCTID>{acct}<ACCTTYPE>CHECKING</BANKACCTFROM>
+<BANKTRANLIST><DTSTART>20260101<DTEND>20261231
+<STMTTRN><TRNTYPE>CREDIT<DTPOSTED>20260310<TRNAMT>100.00<FITID>x{n}<MEMO>PIX</STMTTRN>
+</BANKTRANLIST>
+<LEDGERBAL><BALAMT>0.00<DTASOF>20261231</LEDGERBAL>
+</STMTRS></STMTTRNRS>"""
+    conteudo = f"""OFXHEADER:100
+DATA:OFXSGML
+VERSION:102
+SECURITY:NONE
+ENCODING:USASCII
+CHARSET:1252
+COMPRESSION:NONE
+OLDFILEUID:NONE
+NEWFILEUID:NONE
+
+<OFX>
+<SIGNONMSGSRSV1><SONRS><STATUS><CODE>0<SEVERITY>INFO</STATUS>
+<DTSERVER>20260101<LANGUAGE>POR</SONRS></SIGNONMSGSRSV1>
+<BANKMSGSRSV1>{bloco.format(n=1, acct='11111-1')}
+{bloco.format(n=2, acct='22222-2')}</BANKMSGSRSV1>
+</OFX>
+"""
+    return SimpleUploadedFile(nome, conteudo.encode('cp1252'))
+
+
+@override_settings(MEDIA_ROOT=MEDIA_TEMP)
+class ConciliacaoSaldoTest(TestCase):
+    def setUp(self):
+        from financeiro.models import RecebimentoReceita
+        self.RecebimentoReceita = RecebimentoReceita
+        self.conta = ContaBancaria.objects.create(nome='Conta Teste')
+        self.extrato = ExtratoImportado.objects.create(conta=self.conta, hash_arquivo='hsaldo')
+        self.imovel, self.locatario = _base()
+        self.contrato = _contrato(self.imovel, self.locatario)
+        self.receita = _receita(self.contrato, date(2026, 3, 10), Decimal('2000.00'))
+
+    def _tx(self, valor, fitid=None):
+        return TransacaoExtrato.objects.create(
+            extrato=self.extrato, conta=self.conta, fitid=fitid or f'f{valor}',
+            data=date(2026, 3, 12), valor=Decimal(valor),
+            tipo='credito' if Decimal(valor) >= 0 else 'debito', descricao='PIX',
+        )
+
+    def test_duas_conciliacoes_sucessivas_somam(self):
+        conciliar_com_receitas(self._tx('1000.00', 'a'), [self.receita])
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.status, 'parcial')
+        self.assertEqual(self.receita.saldo_em_aberto, Decimal('1000.00'))
+
+        conciliar_com_receitas(self._tx('1000.00', 'b'), [self.receita])
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.status, 'recebido')
+        self.assertEqual(self.receita.valor_recebido, Decimal('2000.00'))
+        self.assertEqual(self.receita.recebimentos.count(), 2)
+
+    def test_credito_maior_que_saldo_selecionado_rejeitado(self):
+        from .services import ConciliacaoInvalidaError
+        tx = self._tx('2500.00')
+        with self.assertRaises(ConciliacaoInvalidaError):
+            conciliar_com_receitas(tx, [self.receita])
+        tx.refresh_from_db()
+        self.receita.refresh_from_db()
+        # operação atômica: nada foi gravado
+        self.assertEqual(tx.status, 'pendente')
+        self.assertIsNone(self.receita.valor_recebido)
+        self.assertEqual(self.receita.recebimentos.count(), 0)
+
+    def test_transacao_ja_conciliada_nao_processa_de_novo(self):
+        from .services import ConciliacaoInvalidaError
+        tx = self._tx('2000.00')
+        conciliar_com_receitas(tx, [self.receita])
+        outra = _receita(self.contrato, date(2026, 3, 20), Decimal('500.00'), mes=4)
+        with self.assertRaises(ConciliacaoInvalidaError):
+            conciliar_com_receitas(tx, [outra])
+
+    def test_receita_quitada_rejeitada(self):
+        from .services import ConciliacaoInvalidaError
+        conciliar_com_receitas(self._tx('2000.00', 'a'), [self.receita])
+        self.receita.refresh_from_db()
+        with self.assertRaises(ConciliacaoInvalidaError):
+            conciliar_com_receitas(self._tx('100.00', 'b'), [self.receita])
+
+    def test_repasse_liquido_invalido_rejeitado(self):
+        from .services import ConciliacaoInvalidaError
+        # sem comissões vinculadas, marcar_comissoes é seleção arbitrária → erro
+        with self.assertRaises(ConciliacaoInvalidaError):
+            conciliar_com_receitas(self._tx('2000.00'), [self.receita], marcar_comissoes=True)
+
+    def test_repasse_liquido_com_valor_errado_rejeitado(self):
+        from django.core.exceptions import ObjectDoesNotExist
+        from .services import ConciliacaoInvalidaError
+        from financeiro.services import gerar_receitas_para_contrato
+
+        imob = Pessoa.objects.create(nome='Imob L', tipo='imobiliaria')
+        c = _contrato(
+            Imovel.objects.create(nome='Sala L', endereco='X', cidade='BH', estado='MG'),
+            self.locatario, valor_aluguel=Decimal('2000.00'), imobiliaria=imob,
+            comissao_imobiliaria_percentual=Decimal('10.00'),
+            data_inicio=date(2026, 1, 1), data_fim=date(2026, 12, 31),
+        )
+        gerar_receitas_para_contrato(c, data_inicio=date(2026, 3, 1), data_fim=date(2026, 3, 31))
+        receita = ReceitaAluguel.objects.get(contrato=c)
+        # líquido correto seria 1800; 1700 deve ser rejeitado
+        with self.assertRaises(ConciliacaoInvalidaError):
+            conciliar_com_receitas(self._tx('1700.00'), [receita], marcar_comissoes=True)
+
+    def test_desfazer_restaura_receitas_e_comissoes(self):
+        from .services import desfazer_conciliacao
+        from financeiro.services import gerar_receitas_para_contrato
+
+        imob = Pessoa.objects.create(nome='Imob D', tipo='imobiliaria')
+        c = _contrato(
+            Imovel.objects.create(nome='Sala D', endereco='X', cidade='BH', estado='MG'),
+            self.locatario, valor_aluguel=Decimal('2000.00'), imobiliaria=imob,
+            comissao_imobiliaria_percentual=Decimal('10.00'),
+            data_inicio=date(2026, 1, 1), data_fim=date(2026, 12, 31),
+        )
+        gerar_receitas_para_contrato(c, data_inicio=date(2026, 3, 1), data_fim=date(2026, 3, 31))
+        receita = ReceitaAluguel.objects.get(contrato=c)
+        comissao = Despesa.objects.get(contrato=c, origem_automatica=True)
+
+        tx = self._tx('1800.00')
+        conciliar_com_receitas(tx, [receita], marcar_comissoes=True)
+        receita.refresh_from_db(); comissao.refresh_from_db(); tx.refresh_from_db()
+        self.assertEqual(receita.status, 'recebido')
+        self.assertEqual(comissao.status, 'paga')
+        self.assertEqual(tx.status, 'conciliada')
+
+        desfazer_conciliacao(tx)
+        receita.refresh_from_db(); comissao.refresh_from_db(); tx.refresh_from_db()
+        self.assertEqual(tx.status, 'pendente')
+        self.assertFalse(tx.comissoes_marcadas)
+        self.assertEqual(tx.itens_receita.count(), 0)
+        self.assertIsNone(receita.valor_recebido)
+        self.assertIn(receita.status, ('previsto', 'atrasado'))
+        self.assertEqual(comissao.status, 'prevista')
+        self.assertIsNone(comissao.data_pagamento)
+
+    def test_desfazer_via_view_exige_permissao(self):
+        tx = self._tx('2000.00')
+        conciliar_com_receitas(tx, [self.receita])
+        user = com_leitura(User.objects.create_user('sem_desfazer', password='pass'))
+        client = Client()
+        client.login(username='sem_desfazer', password='pass')
+        resposta = client.post(reverse('conciliar_extrato', args=[self.extrato.pk]), {
+            'transacao_id': tx.pk, 'action': 'desfazer',
+        })
+        self.assertEqual(resposta.status_code, 403)
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'conciliada')
+
+
+@override_settings(MEDIA_ROOT=MEDIA_TEMP)
+class ImportarOFXContasTest(TestCase):
+    """Validações de conta e FITID na importação (item 14)."""
+
+    def setUp(self):
+        self.conta = ContaBancaria.objects.create(nome='Conta X')
+
+    def test_arquivo_com_multiplas_contas_rejeitado(self):
+        with self.assertRaises(OFXInvalidoError) as ctx:
+            importar_ofx(_ofx_duas_contas(), self.conta)
+        self.assertIn('2 contas', str(ctx.exception))
+        self.assertEqual(ExtratoImportado.objects.count(), 0)
+
+    def test_conta_divergente_rejeitada(self):
+        conta = ContaBancaria.objects.create(nome='Conta Y', numero_conta='99999-9')
+        with self.assertRaises(OFXInvalidoError) as ctx:
+            importar_ofx(_ofx_conta([('t1', '20260310', '100.00', 'PIX')]), conta)
+        self.assertIn('não corresponde', str(ctx.exception))
+
+    def test_bank_id_divergente_rejeitado(self):
+        conta = ContaBancaria.objects.create(nome='Conta Z', bank_id='0237')
+        with self.assertRaises(OFXInvalidoError):
+            importar_ofx(_ofx_conta([('t1', '20260310', '100.00', 'PIX')], nome='z.ofx'), conta)
+
+    def test_conta_correspondente_aceita(self):
+        conta = ContaBancaria.objects.create(nome='Conta OK', bank_id='0341', numero_conta='12345-6')
+        extrato = importar_ofx(_ofx_conta([('t1', '20260310', '100.00', 'PIX')], nome='ok.ofx'), conta)
+        self.assertEqual(extrato.transacoes_novas, 1)
+
+    def test_transacao_sem_fitid_ganha_identificador_deterministico(self):
+        arq = _ofx_conta([('', '20260310', '150.00', 'SEM FITID')], nome='semfitid.ofx')
+        extrato = importar_ofx(arq, self.conta)
+        self.assertEqual(extrato.transacoes_novas, 1)
+        tx = extrato.transacoes.get()
+        self.assertTrue(tx.fitid.startswith('gerado-'))
+        # reimportar arquivo com a mesma transação (nome/hash diferentes) não duplica
+        arq2 = _ofx_conta([('', '20260310', '150.00', 'SEM FITID'),
+                           ('t2', '20260311', '10.00', 'OUTRA')], nome='semfitid2.ofx')
+        extrato2 = importar_ofx(arq2, self.conta)
+        self.assertEqual(extrato2.transacoes_duplicadas, 1)
+        self.assertEqual(extrato2.transacoes_novas, 1)
+
+    def test_mesmo_fitid_em_contas_diferentes_permitido(self):
+        conta2 = ContaBancaria.objects.create(nome='Conta 2')
+        importar_ofx(_ofx_conta([('t1', '20260310', '100.00', 'PIX')], nome='c1.ofx'), self.conta)
+        # arquivo da outra conta tem ACCTID diferente (conteúdo/hash diferentes)
+        extrato2 = importar_ofx(
+            _ofx_conta([('t1', '20260310', '100.00', 'PIX')], acctid='22222-2', nome='c2.ofx'),
+            conta2,
+        )
+        self.assertEqual(extrato2.transacoes_novas, 1)
+        self.assertEqual(TransacaoExtrato.objects.filter(fitid='t1').count(), 2)

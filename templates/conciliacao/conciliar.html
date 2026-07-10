@@ -44,6 +44,7 @@
                 <span class="text-muted ms-2">{{ t.data|date:"d/m/Y" }}</span>
                 <div class="small text-muted mt-1">{{ t.descricao }}{% if t.memo and t.memo != t.descricao %} — {{ t.memo }}{% endif %}</div>
             </div>
+            {% if perms.conciliacao.change_transacaoextrato %}
             <form method="post" class="align-self-start">
                 {% csrf_token %}
                 <input type="hidden" name="transacao_id" value="{{ t.pk }}">
@@ -53,9 +54,11 @@
                     <i class="bi bi-eye-slash me-1"></i>Ignorar
                 </button>
             </form>
+            {% endif %}
         </div>
 
         {% if t.tipo == 'credito' %}
+        {% if perms.financeiro.change_receitaaluguel %}
         <!-- Crédito: conciliar com receitas -->
         <form method="post" class="mt-3">
             {% csrf_token %}
@@ -86,7 +89,8 @@
                         <tr>
                             <th style="width:2rem;"></th>
                             <th>Imóvel</th><th>Locatário(s)</th><th>Competência</th>
-                            <th>Vencimento</th><th class="text-end">Valor Previsto</th>
+                            <th>Vencimento</th><th class="text-end">Previsto</th>
+                            <th class="text-end">Recebido</th><th class="text-end">Saldo</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -95,7 +99,7 @@
                             <td>
                                 <input class="form-check-input receita-check" type="checkbox"
                                        name="receita_ids" value="{{ c.receita.pk }}"
-                                       data-valor="{{ c.receita.valor_previsto }}"
+                                       data-valor="{{ c.receita.saldo_em_aberto }}"
                                        {% if c.sugerida %}checked{% endif %}>
                             </td>
                             <td class="fw-semibold">{{ c.receita.imovel.nome }}</td>
@@ -103,6 +107,8 @@
                             <td class="small">{{ c.receita.get_competencia_mes_display }}/{{ c.receita.competencia_ano }}</td>
                             <td class="small">{{ c.receita.data_vencimento|date:"d/m/Y" }}</td>
                             <td class="text-end">R$ {{ c.receita.valor_previsto|floatformat:2|intcomma }}</td>
+                            <td class="text-end text-muted">{% if c.receita.valor_recebido %}R$ {{ c.receita.valor_recebido|floatformat:2|intcomma }}{% else %}—{% endif %}</td>
+                            <td class="text-end fw-semibold">R$ {{ c.receita.saldo_em_aberto|floatformat:2|intcomma }}</td>
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -122,7 +128,7 @@
                 </div>
                 {% endif %}
                 <span class="small text-muted">
-                    Soma selecionada: <strong class="soma-selecionada">—</strong>
+                    Soma dos saldos selecionados: <strong class="soma-selecionada">—</strong>
                     · Crédito: R$ {{ t.valor_absoluto|floatformat:2|intcomma }}
                 </span>
             </div>
@@ -133,8 +139,10 @@
             </div>
             {% endif %}
         </form>
+        {% endif %}
 
         {% else %}
+        {% if perms.financeiro.add_despesa %}
         <!-- Débito: lançar despesa -->
         <form method="post" class="mt-3">
             {% csrf_token %}
@@ -188,6 +196,7 @@
             </div>
         </form>
         {% endif %}
+        {% endif %}
     </div>
 </div>
 {% endwith %}
@@ -225,6 +234,7 @@
                         {% endif %}
                     </td>
                     <td class="text-end">
+                        {% if perms.conciliacao.change_transacaoextrato %}
                         {% if t.status == 'ignorada' %}
                         <form method="post" class="d-inline">
                             {% csrf_token %}
@@ -232,6 +242,17 @@
                             <input type="hidden" name="action" value="reabrir">
                             <button type="submit" class="btn btn-sm btn-outline-secondary py-0">Reabrir</button>
                         </form>
+                        {% elif t.status == 'conciliada' and not t.despesa %}
+                        <form method="post" class="d-inline">
+                            {% csrf_token %}
+                            <input type="hidden" name="transacao_id" value="{{ t.pk }}">
+                            <input type="hidden" name="action" value="desfazer">
+                            <button type="submit" class="btn btn-sm btn-outline-danger py-0"
+                                    onclick="return confirm('Desfazer esta conciliação? Os recebimentos criados por ela serão removidos e as receitas/comissões voltarão ao estado anterior.')">
+                                Desfazer
+                            </button>
+                        </form>
+                        {% endif %}
                         {% endif %}
                     </td>
                 </tr>

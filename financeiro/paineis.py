@@ -10,10 +10,11 @@ from collections import defaultdict
 from datetime import date
 from decimal import Decimal
 
-from django.db.models import Count, Sum
+from django.db.models import Count, DecimalField, ExpressionWrapper, F, Sum, Value
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
-from patrimonio.indicadores import competencias_ultimas, filtro_competencias
+from patrimonio.indicadores import competencias_ultimas, contrato_ocupa_mes, filtro_competencias
 from patrimonio.models import Contrato, Imovel
 from .models import ReceitaAluguel, Despesa
 
@@ -33,7 +34,7 @@ def serie_ocupacao_mensal(n_meses=12, referencia=None):
     total = len(imoveis_ids)
 
     contratos_por_imovel = defaultdict(list)
-    for contrato in Contrato.objects.filter(imovel_id__in=imoveis_ids).exclude(status='suspenso'):
+    for contrato in Contrato.objects.filter(imovel_id__in=imoveis_ids):
         contratos_por_imovel[contrato.imovel_id].append(contrato)
 
     serie = []
@@ -42,10 +43,7 @@ def serie_ocupacao_mensal(n_meses=12, referencia=None):
         ultimo = date(ano, mes, monthrange(ano, mes)[1])
         ocupados = sum(
             1 for pk in imoveis_ids
-            if any(
-                c.data_inicio <= ultimo and (c.data_fim_efetiva is None or c.data_fim_efetiva >= primeiro)
-                for c in contratos_por_imovel.get(pk, ())
-            )
+            if any(contrato_ocupa_mes(c, primeiro, ultimo) for c in contratos_por_imovel.get(pk, ()))
         )
         percentual = round(ocupados / total * 100, 1) if total else 0.0
         serie.append({
@@ -98,13 +96,18 @@ def serie_inadimplencia_mensal(n_meses=12, referencia=None):
     filtro = filtro_competencias(competencias)
     hoje = timezone.localdate()
 
+    saldo_expr = ExpressionWrapper(
+        F('valor_previsto') + F('multa') + F('juros') - F('desconto')
+        - Coalesce(F('valor_recebido'), Value(0, output_field=DecimalField())),
+        output_field=DecimalField(max_digits=14, decimal_places=2),
+    )
     em_aberto = {
         (linha['competencia_ano'], linha['competencia_mes']): linha
         for linha in (
             ReceitaAluguel.objects.filter(filtro, data_vencimento__lt=hoje)
             .exclude(status__in=ReceitaAluguel.STATUS_QUITADOS)
             .values('competencia_ano', 'competencia_mes')
-            .annotate(total=Sum('valor_previsto'), quantidade=Count('id'))
+            .annotate(total=Sum(saldo_expr), quantidade=Count('id'))
         )
     }
 

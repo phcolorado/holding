@@ -144,7 +144,10 @@ class ContratoAdmin(SimpleHistoryAdmin):
         Banco Central e cria um ReajusteContrato pendente (aplicado=False)
         para revisão. Não altera valores vigentes.
         """
-        from .indices import variacao_acumulada_12m, IndiceIndisponivelError, SERIES_SGS
+        from .indices import (
+            variacao_acumulada_12m, competencia_final_para_reajuste,
+            IndiceIndisponivelError, SERIES_SGS,
+        )
 
         hoje = timezone.localdate()
         criados = 0
@@ -163,11 +166,22 @@ class ContratoAdmin(SimpleHistoryAdmin):
                 ja_pendentes += 1
                 continue
 
+            # O período do índice é ancorado na data efetiva do reajuste do
+            # contrato (12 meses encerrados no mês anterior ao reajuste) —
+            # nunca nos "últimos 12 divulgados" da data de hoje.
+            data_reajuste = contrato.data_proximo_reajuste or hoje
             try:
-                resultado = variacao_acumulada_12m(contrato.indice_reajuste)
+                resultado = variacao_acumulada_12m(
+                    contrato.indice_reajuste,
+                    competencia_final=competencia_final_para_reajuste(data_reajuste),
+                )
             except IndiceIndisponivelError as exc:
-                self.message_user(request, str(exc), messages.ERROR)
-                return
+                self.message_user(
+                    request,
+                    f'{contrato}: {exc}',
+                    messages.ERROR,
+                )
+                continue
 
             percentual = resultado['percentual']
             valor_novo = (
@@ -176,16 +190,18 @@ class ContratoAdmin(SimpleHistoryAdmin):
 
             ReajusteContrato.objects.create(
                 contrato=contrato,
-                data_reajuste=contrato.data_proximo_reajuste or hoje,
+                data_reajuste=data_reajuste,
                 indice=contrato.indice_reajuste,
                 percentual_aplicado=percentual,
                 valor_anterior=contrato.valor_aluguel,
                 valor_novo=valor_novo,
                 aplicado=False,
+                periodo_indice=f'{resultado["inicio"]} a {resultado["fim"]}',
                 observacoes=(
                     f'Sugestão automática — {contrato.get_indice_reajuste_display()} acumulado '
-                    f'{resultado["inicio"]} a {resultado["fim"]}: {percentual}% (fonte: Banco Central/SGS). '
-                    'Revise e marque "Aplicado" para efetivar.'
+                    f'de {resultado["inicio"]} a {resultado["fim"]}: {percentual}% (fonte: Banco '
+                    'Central/SGS). Revise e marque "Aplicado" para efetivar. Atenção à defasagem '
+                    'de divulgação do índice (IPCA/INPC ~dia 10 do mês seguinte; IGP-M no fim do mês).'
                 ),
             )
             criados += 1
@@ -212,34 +228,64 @@ class ContratoAdmin(SimpleHistoryAdmin):
         if inativos:
             self.message_user(request, f'{inativos} contrato(s) ignorado(s) por não estarem ativos.', messages.WARNING)
 
-    @admin.action(description='Gerar receitas esperadas')
+    @admin.action(description='Gerar receitas esperadas (escolher mês/ano)')
     def gerar_receitas_esperadas(self, request, queryset):
+        """
+        Ação em duas etapas: primeiro pede a competência (mês/ano) explícita,
+        depois gera. Evita geração sem período definido — especialmente
+        ambígua em contratos por prazo indeterminado.
+        """
+        from calendar import monthrange
+        from datetime import date as date_cls
+
+        from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
+        from django.template.response import TemplateResponse
+
+        from core.utils import anos_para_filtro, int_param
+        from financeiro.models import MESES
         from financeiro.services import gerar_receitas_para_contrato
 
-        total_criadas = 0
-        total_existiam = 0
-        ignorados = 0
+        if 'aplicar_geracao' in request.POST:
+            mes = int_param(request.POST.get('mes'), 0, 1, 12)
+            ano = int_param(request.POST.get('ano'), 0, 1990, 2200)
+            if not mes or not ano:
+                self.message_user(request, 'Informe um mês e ano válidos.', messages.ERROR)
+                return None
 
-        for contrato in queryset:
-            if contrato.status != 'ativo':
-                ignorados += 1
-                continue
-            criadas, existiam = gerar_receitas_para_contrato(contrato)
-            total_criadas += criadas
-            total_existiam += existiam
+            inicio = date_cls(ano, mes, 1)
+            fim = date_cls(ano, mes, monthrange(ano, mes)[1])
+            total_criadas = total_existiam = ignorados = 0
+            for contrato in queryset:
+                if contrato.status != 'ativo':
+                    ignorados += 1
+                    continue
+                criadas, existiam = gerar_receitas_para_contrato(contrato, data_inicio=inicio, data_fim=fim)
+                total_criadas += criadas
+                total_existiam += existiam
 
-        if total_criadas:
-            self.message_user(request, f'{total_criadas} receita(s) gerada(s) com sucesso.', messages.SUCCESS)
-        if total_existiam:
-            self.message_user(request, f'{total_existiam} receita(s) já existiam e foram ignoradas.', messages.WARNING)
-        if ignorados:
-            self.message_user(
-                request,
-                f'{ignorados} contrato(s) ignorado(s) por não estar com status ativo.',
-                messages.ERROR,
-            )
-        if not total_criadas and not total_existiam and not ignorados:
-            self.message_user(request, 'Nenhuma receita para gerar.', messages.WARNING)
+            if total_criadas:
+                self.message_user(request, f'{total_criadas} receita(s) gerada(s) para {mes:02d}/{ano}.', messages.SUCCESS)
+            if total_existiam:
+                self.message_user(request, f'{total_existiam} receita(s) já existiam e foram ignoradas.', messages.WARNING)
+            if ignorados:
+                self.message_user(request, f'{ignorados} contrato(s) ignorado(s) por não estarem ativos.', messages.WARNING)
+            if not total_criadas and not total_existiam and not ignorados:
+                self.message_user(request, f'Nenhuma receita para gerar em {mes:02d}/{ano}.', messages.WARNING)
+            return None
+
+        hoje = timezone.localdate()
+        context = {
+            **self.admin_site.each_context(request),
+            'title': 'Gerar receitas esperadas',
+            'contratos': queryset,
+            'meses': MESES,
+            'anos': anos_para_filtro(),
+            'mes_atual': hoje.month,
+            'ano_atual': hoje.year,
+            'action_checkbox_name': ACTION_CHECKBOX_NAME,
+            'opts': self.model._meta,
+        }
+        return TemplateResponse(request, 'admin/patrimonio/gerar_receitas_confirm.html', context)
 
     fieldsets = (
         ('Imóvel e Vigência', {
@@ -278,16 +324,13 @@ class ContratoAdmin(SimpleHistoryAdmin):
         if formset.model is ReajusteContrato:
             instances = formset.save(commit=False)
             for obj in instances:
-                aplicado_anterior = False
-                if obj.pk is not None:
-                    aplicado_anterior = ReajusteContrato.objects.filter(pk=obj.pk).values_list(
-                        'aplicado', flat=True
-                    ).first() or False
+                marcado_para_aplicar = obj.aplicado
+                if obj.pk is None or obj.aplicado_em is None:
+                    # aplicado só é efetivado por aplicar() — evita marcar sem aplicar
+                    obj.aplicado = False
                 obj.save()
-                # Aplica quando o reajuste é novo com aplicado=True, ou quando
-                # um reajuste existente muda de aplicado=False para True.
-                # Um reajuste já aplicado nunca é reaplicado.
-                if obj.aplicado and not aplicado_anterior:
+                if marcado_para_aplicar:
+                    # aplicar() é idempotente (guard por aplicado_em) e atômico
                     obj.aplicar()
             for obj in formset.deleted_objects:
                 obj.delete()

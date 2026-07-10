@@ -10,9 +10,9 @@ from financeiro.models import ReceitaAluguel
 from .forms import UploadExtratoForm, DespesaExtratoForm
 from .models import ExtratoImportado, TransacaoExtrato, ContaBancaria
 from .services import (
-    ExtratoJaImportadoError, OFXInvalidoError,
+    ConciliacaoInvalidaError, ExtratoJaImportadoError, OFXInvalidoError,
     importar_ofx, receitas_candidatas, sugerir_receitas, sugerir_classificacao,
-    conciliar_com_receitas, lancar_despesa,
+    conciliar_com_receitas, desfazer_conciliacao, lancar_despesa,
 )
 
 
@@ -88,36 +88,53 @@ def conciliar_extrato(request, pk):
         )
         action = request.POST.get('action', '')
 
-        if action == 'conciliar' and transacao.status == 'pendente' and transacao.tipo == 'credito':
+        if action == 'conciliar':
             _exigir_permissao(request, 'financeiro.change_receitaaluguel')
             receita_ids = [pk_param(v) for v in request.POST.getlist('receita_ids') if pk_param(v)]
-            receitas = list(
-                ReceitaAluguel.objects.filter(pk__in=receita_ids)
-                .exclude(status__in=ReceitaAluguel.STATUS_QUITADOS)
-            )
-            if not receitas:
-                messages.error(request, 'Selecione ao menos uma receita em aberto para conciliar.')
+            receitas = list(ReceitaAluguel.objects.filter(pk__in=receita_ids))
+            marcar_comissoes = request.POST.get('marcar_comissoes') == '1'
+            try:
+                conciliar_com_receitas(
+                    transacao, receitas,
+                    marcar_comissoes=marcar_comissoes, usuario=request.user,
+                )
+            except ConciliacaoInvalidaError as exc:
+                messages.error(request, str(exc))
             else:
-                marcar_comissoes = request.POST.get('marcar_comissoes') == '1'
-                conciliar_com_receitas(transacao, receitas, marcar_comissoes=marcar_comissoes)
                 nomes = ', '.join(r.imovel.nome for r in receitas)
                 messages.success(request, f'Crédito de R$ {transacao.valor_absoluto} conciliado com: {nomes}.')
 
-        elif action == 'lancar_despesa' and transacao.status == 'pendente' and transacao.tipo == 'debito':
+        elif action == 'lancar_despesa':
             _exigir_permissao(request, 'financeiro.add_despesa')
             form = DespesaExtratoForm(request.POST)
             if form.is_valid():
-                despesa = lancar_despesa(
-                    transacao,
-                    categoria=form.cleaned_data['categoria'],
-                    descricao=form.cleaned_data['descricao'],
-                    fornecedor=form.cleaned_data['fornecedor'],
-                    imovel=form.cleaned_data['imovel'],
-                )
-                messages.success(request, f'Despesa lançada: {despesa.descricao} (R$ {despesa.valor}).')
+                try:
+                    despesa = lancar_despesa(
+                        transacao,
+                        categoria=form.cleaned_data['categoria'],
+                        descricao=form.cleaned_data['descricao'],
+                        fornecedor=form.cleaned_data['fornecedor'],
+                        imovel=form.cleaned_data['imovel'],
+                    )
+                except ConciliacaoInvalidaError as exc:
+                    messages.error(request, str(exc))
+                else:
+                    messages.success(request, f'Despesa lançada: {despesa.descricao} (R$ {despesa.valor}).')
             else:
                 erros = '; '.join(e for lista in form.errors.values() for e in lista)
                 messages.error(request, f'Despesa não lançada: {erros}')
+
+        elif action == 'desfazer':
+            _exigir_permissao(request, 'conciliacao.change_transacaoextrato')
+            try:
+                desfazer_conciliacao(transacao)
+            except ConciliacaoInvalidaError as exc:
+                messages.error(request, str(exc))
+            else:
+                messages.success(
+                    request,
+                    'Conciliação desfeita: recebimentos removidos, receitas e comissões restauradas.',
+                )
 
         elif action == 'ignorar' and transacao.status == 'pendente':
             _exigir_permissao(request, 'conciliacao.change_transacaoextrato')

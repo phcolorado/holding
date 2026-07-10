@@ -25,7 +25,7 @@ Construído com Python + Django + Bootstrap 5 + SQLite.
 - **Checklist Mensal**: tela `/financeiro/checklist-mensal/` com 11 etapas de fechamento (incluindo reajustes pendentes, validade de documentos e conciliação de extrato) e ação de marcar envio à contabilidade via `FechamentoMensal`
 - **Alertas de validade de documentos**: documentos com `data_validade` vencida ou vencendo em 30 dias aparecem no Dashboard, no Checklist Mensal e no filtro "Vencendo/vencidos" da lista de documentos
 - **Sugestão de reajuste pelo Banco Central**: action no Admin de Contratos que consulta o acumulado de 12 meses do IPCA/IGP-M/INPC na API SGS do BCB e cria um reajuste pendente para revisão
-- **Indicadores por imóvel**: yield bruto/líquido anual, receita/despesa/resultado de 12 meses e taxa de ocupação na tela de detalhe do imóvel
+- **Indicadores por imóvel**: yield bruto/líquido anual **sobre a receita locatícia** (só os itens de aluguel — reembolsos de IPTU/condomínio não inflam o yield), receita de caixa/despesa/resultado de 12 meses e taxa de ocupação na tela de detalhe do imóvel
 - **Auditoria de alterações** (django-simple-history): histórico de quem alterou o quê em imóveis, pessoas, contratos, encargos, reajustes, receitas, despesas e documentos — visível no botão "Histórico" de cada registro no Admin
 - **Relatório para contabilidade** em XLSX (6 abas: resumo, receitas, despesas, inadimplência aberta, documentos pendentes, resultado por imóvel)
 - **Documentos obrigatórios por imóvel**: controle de documentos esperados por imóvel com indicador de pendência
@@ -173,9 +173,19 @@ python manage.py backup_local
 ```
 
 O backup é salvo como `backups/backup_<timestamp>.zip` contendo:
-- `db.sqlite3` — banco de dados
+- `db.sqlite3` — cópia **consistente** do banco (feita com a API de backup do SQLite, segura mesmo com o sistema em uso)
 - `media/` — arquivos de upload
-- `manifest.txt` — metadados do backup
+- `manifest.txt` — metadados (engine, tamanho e SHA-256 do banco, nº de arquivos de mídia, data, commit)
+
+Ao lado do ZIP é gravado um arquivo `.sha256` com o checksum do próprio ZIP. Para conferir a integridade de um backup:
+
+```
+python manage.py verificar_backup backups/backup_<timestamp>.zip
+```
+
+O comando valida o manifest, recalcula o checksum do banco e abre o SQLite em modo somente-leitura conferindo as tabelas essenciais.
+
+> **Postgres:** o comando avisa que **não** faz backup do banco quando o engine não é SQLite — use `pg_dump` (a mídia e o manifest continuam entrando no ZIP).
 
 **Opções disponíveis:**
 
@@ -273,8 +283,12 @@ Diferença entre as duas operações:
 | **Baixa de Aluguéis** | Confere e atualiza os registros já criados — marca como recebido, registra valor e data. |
 
 Na tela de baixa é possível:
-- **Marcar como recebida** (botão verde ✓): preenche `valor_recebido = valor_previsto` e `data_recebimento = hoje` automaticamente.
+- **Marcar como recebida** (botão verde ✓): registra um recebimento do **saldo em aberto** (valor previsto + multa + juros − desconto − já recebido) com data de hoje.
 - **Editar**: abre modal para alterar valor recebido, data, status e observações.
+
+### Pagamentos parciais (múltiplos recebimentos)
+
+Cada receita pode ter **vários recebimentos** (model `RecebimentoReceita` — manual, por conciliação bancária ou migrado dos dados antigos). Os campos `valor_recebido`, `data_recebimento` e `status` da receita são **consolidados automaticamente** a partir dos recebimentos: soma dos valores, data do último e status `recebido` (saldo zerado), `parcial` (pago em parte) ou `previsto`/`atrasado`. Receita **parcial não é considerada quitada** — o saldo em aberto aparece na inadimplência quando vencido. Os recebimentos individuais podem ser vistos/editados no Admin, dentro da receita.
 
 ---
 
@@ -353,6 +367,8 @@ Documentos relacionados diretamente a um contrato (contrato assinado, aditivos, 
 
 - **Receitas já geradas não são recalculadas automaticamente.** Se você adicionar, remover ou alterar encargos (`EncargoContrato`) ou a taxa de administração de um contrato **depois** que a receita do mês já foi gerada, essa receita e seus itens **não são atualizados retroativamente** — o novo valor só vale a partir da próxima geração (próximo mês, ou meses futuros ainda não gerados). Isso é intencional, para preservar lançamentos já revisados/conferidos na baixa de aluguéis. Se for necessário corrigir uma receita já gerada, edite-a manualmente (ou seus itens) pelo Admin; não há, nesta fase, uma action de recálculo em massa.
 - A mesma lógica vale para reajustes: `ReajusteContrato.aplicar()` nunca altera receitas já existentes, mesmo as futuras já geradas para o mês seguinte — apenas receitas geradas **depois** do reajuste usam o novo valor.
+- **"Editar" na baixa de aluguéis grava o consolidado diretamente** (compatibilidade com o fluxo antigo): não cria um `RecebimentoReceita`, apenas ajusta `valor_recebido`/`status`. Para manter o histórico de recebimentos fiel, prefira o botão "Marcar como recebida", a conciliação bancária ou o inline de recebimentos no Admin.
+- **Desfazer conciliação só existe para créditos.** Débito conciliado como despesa é corrigido excluindo a despesa no Admin.
 
 ---
 
@@ -383,11 +399,13 @@ O Dashboard exibe um contador de documentos obrigatórios pendentes (obrigatóri
 
 ## Testes
 
-Para executar a suite de testes:
+Para executar a suíte completa (286 testes):
 
 ```
-python manage.py test financeiro patrimonio documentos
+python manage.py test
 ```
+
+A CI (GitHub Actions) roda a suíte em Python 3.11 e 3.12 com SQLite **e** com PostgreSQL 16, além de `manage.py check`, `makemigrations --check`, `migrate` em banco vazio e `check --deploy`.
 
 ---
 
@@ -423,7 +441,11 @@ Acesse `/financeiro/conciliacao/` (menu lateral: "Conciliação Bancária").
    Confirmar dá baixa nas receitas (`recebido`/`parcial`) com a data da transação.
 3. Para cada **débito**, lance como **despesa paga** com um clique (categoria/fornecedor/imóvel sugeridos pela regra), ou **ignore** (transferências entre contas próprias etc.).
 
-**Garantias de idempotência:** o mesmo arquivo não pode ser importado duas vezes (hash), e transações repetidas em extratos de períodos sobrepostos são ignoradas pelo `FITID` do OFX. O Dashboard e o Checklist Mensal alertam quando há transações pendentes de conciliação.
+**Conciliação por saldo:** a soma comparada com o crédito é sempre a dos **saldos em aberto** das receitas (não o valor previsto cheio), então receitas parcialmente pagas conciliam pelo que falta. Toda a validação é refeita no servidor dentro de uma transação com lock — a soma exibida na tela é apenas informativa.
+
+**Desfazer conciliação:** créditos conciliados têm o botão **"Desfazer"**, que remove os recebimentos criados, reconsolida as receitas e reabre as comissões que haviam sido marcadas como pagas. Débitos lançados como despesa devem ser corrigidos excluindo a despesa no Admin.
+
+**Garantias de idempotência:** o mesmo arquivo não pode ser importado duas vezes (hash), e transações repetidas em extratos de períodos sobrepostos são ignoradas pelo `FITID` do OFX (FITID vazio ganha um identificador determinístico). O arquivo precisa conter **uma única conta**, e o número da conta/banco é conferido com o cadastro da Conta Bancária. O Dashboard e o Checklist Mensal alertam quando há transações pendentes de conciliação.
 
 > PDF de extrato não é suportado nesta fase — o OFX é estruturado e confiável; exporte-o no internet banking (opção "OFX", "Money" ou "Open Financial Exchange").
 
@@ -434,9 +456,11 @@ Acesse `/financeiro/conciliacao/` (menu lateral: "Conciliação Bancária").
 No Admin → Contratos, selecione contratos e use a action **"Sugerir reajuste pelo índice acumulado 12m (Banco Central)"**. O sistema:
 
 1. Consulta a API pública SGS do Banco Central (IPCA = série 433, IGP-M = 189, INPC = 188) — resultado fica em cache por 12h.
-2. Calcula o acumulado de 12 meses por juros compostos.
+2. Calcula o acumulado de 12 meses **encerrado no mês anterior à data do reajuste** (competência histórica — um reajuste de junho usa os 12 meses até maio), por juros compostos. O período usado fica registrado no campo "Período do índice" do reajuste.
 3. Cria um `ReajusteContrato` **pendente** (`aplicado=False`) com percentual, valor anterior e valor novo calculados.
-4. Você revisa e marca "Aplicado" para efetivar (o fluxo normal de reajuste).
+4. Você revisa e marca "Aplicado" para efetivar — a aplicação é atômica e idempotente (o valor do contrato só é alterado uma vez, mesmo salvando de novo).
+
+Se o índice do período ainda não foi divulgado (defasagem de divulgação do IPCA/INPC/IGP-M), a action avisa e pula o contrato.
 
 Contratos com índice "Fixo"/"Outro", inativos ou que já têm reajuste pendente são ignorados (sem duplicação). Requer conexão com a internet.
 
@@ -452,7 +476,10 @@ O `settings.py` lê tudo do ambiente, com padrões de desenvolvimento:
 | `DJANGO_DEBUG` | `1` | Use `0` em produção (ativa cookies seguros automaticamente) |
 | `DJANGO_ALLOWED_HOSTS` | `localhost,127.0.0.1` | Lista separada por vírgula |
 | `DB_ENGINE` | sqlite3 | `django.db.backends.postgresql` para Postgres |
-| `DB_NAME` / `DB_USER` / `DB_PASSWORD` / `DB_HOST` / `DB_PORT` | — | Credenciais do Postgres |
+| `DB_NAME` / `DB_USER` / `DB_PASSWORD` / `DB_HOST` / `DB_PORT` | — | Credenciais do Postgres (driver `psycopg2-binary` já incluído no `requirements.txt`) |
+| `RUN_MIGRATIONS` | `1` | No container Docker: `0` desativa o `migrate` automático do entrypoint. Com **mais de uma réplica**, use `0` e rode as migrações num passo de release (`Procfile` já traz `release: python manage.py migrate`) |
+
+> Com `DJANGO_DEBUG=0`, a `DJANGO_SECRET_KEY` é **obrigatória** — o sistema se recusa a iniciar sem ela (evita subir produção com a chave de desenvolvimento).
 
 ## Publicando na internet (sócios, advogado e contador)
 

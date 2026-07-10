@@ -293,13 +293,18 @@ def baixa_receitas_mes_view(request):
             receita = get_object_or_404(ReceitaAluguel, pk=receita_id)
 
             if action == 'marcar_recebida':
-                if receita.valor_recebido is None:
-                    receita.valor_recebido = receita.valor_previsto
-                if not receita.data_recebimento:
-                    receita.data_recebimento = hoje
-                receita.status = 'recebido'
-                receita.save()
-                messages.success(request, f'{receita.imovel.nome} marcado como recebido.')
+                from .models import RecebimentoReceita
+                saldo = receita.saldo_em_aberto
+                if saldo > 0:
+                    # Registra o recebimento do saldo — soma-se aos anteriores
+                    # (parciais) e reconsolida valor_recebido/status.
+                    RecebimentoReceita.objects.create(
+                        receita=receita, data_recebimento=hoje, valor=saldo,
+                        origem='manual', criado_por=request.user,
+                    )
+                    messages.success(request, f'{receita.imovel.nome} marcado como recebido.')
+                else:
+                    messages.info(request, f'{receita.imovel.nome} já está sem saldo em aberto.')
 
             elif action == 'editar':
                 form = BaixaReceitaForm(request.POST)
@@ -374,8 +379,9 @@ def checklist_mensal_view(request):
 
     receitas_mes = ReceitaAluguel.objects.filter(competencia_mes=mes, competencia_ano=ano)
     total_receitas = receitas_mes.count()
-    receitas_recebidas = receitas_mes.filter(status__in=['recebido', 'parcial']).count()
-    receitas_pendentes = receitas_mes.exclude(status__in=['recebido', 'parcial', 'cancelado']).count()
+    # Pagamento parcial NÃO conta como confirmado — permanece pendente até quitar
+    receitas_recebidas = receitas_mes.filter(status='recebido').count()
+    receitas_pendentes = receitas_mes.exclude(status__in=['recebido', 'cancelado']).count()
 
     despesas_mes = Despesa.objects.filter(competencia_mes=mes, competencia_ano=ano)
     total_despesas = despesas_mes.count()

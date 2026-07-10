@@ -141,20 +141,21 @@ def exportar_contratos_xlsx(request, contratos):
 
 CABECALHO_RECEITAS = [
     'ID', 'Imóvel', 'Locatário', 'Mês', 'Ano',
-    'Vencimento', 'Valor Previsto', 'Valor Recebido',
-    'Data Recebimento', 'Multa', 'Juros', 'Desconto', 'Status',
+    'Vencimento', 'Valor Previsto', 'Multa', 'Juros', 'Desconto',
+    'Valor Total Devido', 'Valor Recebido', 'Saldo em Aberto',
+    'Data Recebimento', 'Status',
 ]
 
 
 def _linhas_receitas(receitas):
     for r in receitas:
-        locatario = r.contrato.locatario.nome if r.contrato else ''
+        locatario = r.contrato.locatarios_display if r.contrato else ''
         yield [
             r.pk, r.imovel.nome, locatario,
             r.get_competencia_mes_display(), r.competencia_ano,
-            r.data_vencimento, r.valor_previsto, r.valor_recebido,
-            r.data_recebimento, r.multa, r.juros, r.desconto,
-            r.get_status_display(),
+            r.data_vencimento, r.valor_previsto, r.multa, r.juros, r.desconto,
+            r.valor_total_devido, r.valor_recebido, r.saldo_em_aberto,
+            r.data_recebimento, r.get_status_display(),
         ]
 
 
@@ -232,7 +233,8 @@ def exportar_despesas_xlsx(request, despesas):
 # ─── inadimplência ─────────────────────────────────────────────────────────────
 
 CABECALHO_INADIMPLENCIA = [
-    'Imóvel', 'Locatário', 'Mês', 'Ano', 'Vencimento', 'Valor Previsto', 'Dias Atraso',
+    'Imóvel', 'Locatário', 'Mês', 'Ano', 'Vencimento',
+    'Valor Total Devido', 'Valor Recebido', 'Saldo em Aberto', 'Dias Atraso',
 ]
 
 
@@ -240,11 +242,12 @@ def _linhas_inadimplencia(receitas_atrasadas):
     hoje = timezone.localdate()
     for r in receitas_atrasadas:
         dias = (hoje - r.data_vencimento).days
-        locatario = r.contrato.locatario.nome if r.contrato else ''
+        locatario = r.contrato.locatarios_display if r.contrato else ''
         yield [
             r.imovel.nome, locatario,
             r.get_competencia_mes_display(), r.competencia_ano,
-            r.data_vencimento, r.valor_previsto, dias,
+            r.data_vencimento, r.valor_total_devido, r.valor_recebido or 0,
+            r.saldo_em_aberto, dias,
         ]
 
 
@@ -411,18 +414,19 @@ def exportar_relatorio_contabilidade_xlsx(request, mes, ano):
     ws_rec = wb.create_sheet('Receitas')
     cab_rec = [
         'Imóvel', 'Locatário', 'Competência', 'Vencimento',
-        'Valor Previsto', 'Valor Recebido', 'Data Recebimento',
-        'Status', 'Atrasada', 'Observações',
+        'Valor Previsto', 'Valor Total Devido', 'Valor Recebido', 'Saldo em Aberto',
+        'Data Recebimento', 'Status', 'Atrasada', 'Observações',
     ]
     ws_rec.append(cab_rec)
     _estilizar_cabecalho(ws_rec, len(cab_rec))
     for r in receitas:
-        loc = r.contrato.locatario.nome if r.contrato else ''
+        loc = r.contrato.locatarios_display if r.contrato else ''
         ws_rec.append([
             r.imovel.nome, loc,
             f'{r.get_competencia_mes_display()}/{r.competencia_ano}',
-            r.data_vencimento, float(r.valor_previsto),
+            r.data_vencimento, float(r.valor_previsto), float(r.valor_total_devido),
             float(r.valor_recebido) if r.valor_recebido else '',
+            float(r.saldo_em_aberto),
             r.data_recebimento, r.get_status_display(),
             'Sim' if r.esta_atrasada else 'Não',
             r.observacoes,
@@ -454,17 +458,17 @@ def exportar_relatorio_contabilidade_xlsx(request, mes, ano):
     ws_inad = wb.create_sheet('Inadimplência Aberta')
     cab_inad = [
         'Imóvel', 'Locatário', 'Competência', 'Vencimento',
-        'Valor Previsto', 'Dias de Atraso', 'Status', 'Observações',
+        'Valor Total Devido', 'Saldo em Aberto', 'Dias de Atraso', 'Status', 'Observações',
     ]
     ws_inad.append(cab_inad)
     _estilizar_cabecalho(ws_inad, len(cab_inad))
     for r in inadimplentes:
-        loc = r.contrato.locatario.nome if r.contrato else ''
+        loc = r.contrato.locatarios_display if r.contrato else ''
         dias = (hoje - r.data_vencimento).days
         ws_inad.append([
             r.imovel.nome, loc,
             f'{r.get_competencia_mes_display()}/{r.competencia_ano}',
-            r.data_vencimento, float(r.valor_previsto), dias,
+            r.data_vencimento, float(r.valor_total_devido), float(r.saldo_em_aberto), dias,
             r.get_status_display(), r.observacoes,
         ])
 

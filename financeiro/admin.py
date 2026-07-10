@@ -1,12 +1,19 @@
 from django.contrib import admin
 from simple_history.admin import SimpleHistoryAdmin
-from .models import ReceitaAluguel, ReceitaAluguelItem, Despesa, FechamentoMensal
+from .models import ReceitaAluguel, ReceitaAluguelItem, RecebimentoReceita, Despesa, FechamentoMensal
 
 
 class ReceitaAluguelItemInline(admin.TabularInline):
     model = ReceitaAluguelItem
     extra = 0
     fields = ('tipo', 'descricao', 'valor')
+
+
+class RecebimentoReceitaInline(admin.TabularInline):
+    model = RecebimentoReceita
+    extra = 0
+    fields = ('data_recebimento', 'valor', 'origem', 'transacao_extrato', 'observacoes')
+    readonly_fields = ('origem', 'transacao_extrato')
 
 
 @admin.register(ReceitaAluguel)
@@ -16,12 +23,12 @@ class ReceitaAluguelAdmin(SimpleHistoryAdmin):
         'valor_previsto', 'valor_recebido', 'data_vencimento', 'status',
     )
     list_filter = ('status', 'competencia_ano', 'competencia_mes', 'imovel')
-    search_fields = ('imovel__nome', 'contrato__locatario__nome')
+    search_fields = ('imovel__nome', 'contrato__locatario__nome', 'contrato__partes__pessoa__nome')
     date_hierarchy = 'data_vencimento'
     readonly_fields = ('criado_em', 'atualizado_em')
     ordering = ('-competencia_ano', '-competencia_mes')
     raw_id_fields = ('contrato',)
-    inlines = [ReceitaAluguelItemInline]
+    inlines = [ReceitaAluguelItemInline, RecebimentoReceitaInline]
 
     def get_readonly_fields(self, request, obj=None):
         return self.readonly_fields + ('imovel',)

@@ -143,7 +143,7 @@
                         {% for c in contratos_vencendo %}
                         <tr>
                             <td><a href="{% url 'imovel_detail' c.imovel.pk %}">{{ c.imovel.nome }}</a></td>
-                            <td>{{ c.locatario.nome }}</td>
+                            <td>{{ c.locatarios_display }}</td>
                             <td class="text-danger fw-semibold">{{ c.data_fim|date:"d/m/Y" }}</td>
                         </tr>
                         {% endfor %}

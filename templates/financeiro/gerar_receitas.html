@@ -71,11 +71,11 @@
                     </div>
 
                     <div class="d-grid mt-3">
-                        <button type="submit" class="btn btn-success btn-lg"
+                        {% if perms.financeiro.add_receitaaluguel %}<button type="submit" class="btn btn-success btn-lg"
                                 {% if contratos_ativos == 0 %}disabled{% endif %}>
                             <i class="bi bi-magic me-2"></i>
                             Gerar Receitas de {{ mes_atual|stringformat:"02d" }}/{{ ano_atual }}
-                        </button>
+                        </button>{% else %}<div class="alert alert-secondary py-2 mb-0">Seu perfil é somente leitura — a geração de receitas é feita por um usuário com permissão de edição.</div>{% endif %}
                     </div>
                 </form>
             </div>

@@ -39,20 +39,66 @@ def _percentual(parte, todo):
     return (Decimal(parte) / Decimal(todo) * 100).quantize(Decimal('0.01'))
 
 
+def periodo_fim_ocupacao(contrato):
+    """
+    Fim efetivo do contrato PARA FINS DE OCUPAÇÃO (regra defensiva):
+    - encerramento real sempre vence;
+    - contrato ATIVO por prazo indeterminado é aberto (None);
+    - contrato encerrado/rescindido por prazo indeterminado SEM encerramento
+      real não pode ocupar indefinidamente — usa a data_fim original.
+    """
+    if contrato.data_encerramento_real:
+        return contrato.data_encerramento_real
+    if contrato.prazo_indeterminado and contrato.status == 'ativo':
+        return None
+    return contrato.data_fim
+
+
+def contrato_ocupa_mes(contrato, primeiro_dia, ultimo_dia):
+    """Se o contrato ocupa (ao menos parte de) o mês — contratos suspensos não ocupam."""
+    if contrato.status == 'suspenso':
+        return False
+    fim = periodo_fim_ocupacao(contrato)
+    return contrato.data_inicio <= ultimo_dia and (fim is None or fim >= primeiro_dia)
+
+
+def receita_locaticia(receitas):
+    """
+    Parcela LOCATÍCIA (aluguel) do que foi recebido, excluindo reembolsos de
+    encargos (IPTU, condomínio etc.). Usa os itens tipo 'aluguel' da receita;
+    receitas antigas sem itens usam valor_previsto como fallback (antes dos
+    encargos, o previsto era só o aluguel). Considera que o aluguel é quitado
+    primeiro em pagamentos parciais.
+    """
+    total = Decimal('0.00')
+    for r in receitas:
+        itens = list(r.itens.all())
+        if itens:
+            base_aluguel = sum((i.valor for i in itens if i.tipo == 'aluguel'), Decimal('0.00'))
+        else:
+            base_aluguel = r.valor_previsto
+        total += min(r.valor_recebido or Decimal('0.00'), base_aluguel)
+    return total
+
+
 def indicadores_do_imovel(imovel, referencia=None):
     """
-    Calcula, para os últimos 12 meses de competência:
-    receita recebida, despesas pagas, resultado, yield bruto/líquido anual
-    (sobre valor estimado, com fallback para valor de aquisição) e ocupação.
+    Calcula, para os últimos 12 meses de competência: receita total de caixa,
+    receita locatícia (só aluguel), despesas pagas, resultado, yield
+    bruto/líquido anual sobre a receita LOCATÍCIA (valor estimado, com
+    fallback para valor de aquisição) e ocupação.
     """
     from financeiro.models import ReceitaAluguel, Despesa
 
     competencias = competencias_ultimos_12_meses(referencia)
     filtro = filtro_competencias(competencias)
 
-    receita_12m = ReceitaAluguel.objects.filter(
-        filtro, imovel=imovel, status__in=('recebido', 'parcial')
-    ).aggregate(total=Sum('valor_recebido'))['total'] or Decimal('0.00')
+    receitas_recebidas = list(
+        ReceitaAluguel.objects.filter(filtro, imovel=imovel, status__in=('recebido', 'parcial'))
+        .prefetch_related('itens')
+    )
+    receita_12m = sum((r.valor_recebido or Decimal('0.00') for r in receitas_recebidas), Decimal('0.00'))
+    receita_locaticia_12m = receita_locaticia(receitas_recebidas)
 
     despesa_12m = Despesa.objects.filter(
         filtro, imovel=imovel, status='paga'
@@ -61,14 +107,17 @@ def indicadores_do_imovel(imovel, referencia=None):
     resultado_12m = receita_12m - despesa_12m
 
     valor_base = imovel.valor_estimado or imovel.valor_aquisicao
-    yield_bruto = _percentual(receita_12m, valor_base)
-    yield_liquido = _percentual(resultado_12m, valor_base)
+    # Yield calculado sobre a receita locatícia — IPTU/condomínio repassados
+    # são valores transitórios e não remuneram o capital investido.
+    yield_bruto = _percentual(receita_locaticia_12m, valor_base)
+    yield_liquido = _percentual(receita_locaticia_12m - despesa_12m, valor_base)
 
     meses_ocupados = _meses_ocupados(imovel, competencias)
     ocupacao = _percentual(meses_ocupados, len(competencias))
 
     return {
         'receita_12m': receita_12m,
+        'receita_locaticia_12m': receita_locaticia_12m,
         'despesa_12m': despesa_12m,
         'resultado_12m': resultado_12m,
         'valor_base': valor_base,
@@ -82,13 +131,14 @@ def indicadores_do_imovel(imovel, referencia=None):
 
 def _meses_ocupados(imovel, competencias):
     """
-    Conta em quantas das competências houve contrato vigente (qualquer status
-    exceto suspenso), considerando encerramento real e prazo indeterminado.
+    Conta em quantas das competências houve contrato vigente, usando a regra
+    defensiva de periodo_fim_ocupacao (encerrado/rescindido nunca ocupa
+    indefinidamente; suspenso não ocupa).
     """
     from datetime import date
     from calendar import monthrange
 
-    contratos = list(imovel.contrato_set.exclude(status='suspenso'))
+    contratos = list(imovel.contrato_set.all())
     if not contratos:
         return 0
 
@@ -96,9 +146,6 @@ def _meses_ocupados(imovel, competencias):
     for ano, mes in competencias:
         primeiro = date(ano, mes, 1)
         ultimo = date(ano, mes, monthrange(ano, mes)[1])
-        for contrato in contratos:
-            fim = contrato.data_fim_efetiva  # None = aberto (prazo indeterminado)
-            if contrato.data_inicio <= ultimo and (fim is None or fim >= primeiro):
-                ocupados += 1
-                break
+        if any(contrato_ocupa_mes(c, primeiro, ultimo) for c in contratos):
+            ocupados += 1
     return ocupados

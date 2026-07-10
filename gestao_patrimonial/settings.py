@@ -12,13 +12,18 @@ def _env_bool(nome, padrao):
     return valor.strip().lower() in ('1', 'true', 'yes', 'sim')
 
 
-# Em produção, defina DJANGO_SECRET_KEY e DJANGO_DEBUG=0 no ambiente.
-SECRET_KEY = os.environ.get(
-    'DJANGO_SECRET_KEY',
-    'django-insecure-trocar-em-producao-gerar-chave-segura',
-)
-
 DEBUG = _env_bool('DJANGO_DEBUG', True)
+
+# Em produção (DJANGO_DEBUG=0) a SECRET_KEY é OBRIGATÓRIA — a aplicação não
+# sobe com a chave insegura de desenvolvimento.
+_CHAVE_DEV = 'django-insecure-trocar-em-producao-gerar-chave-segura'
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', _CHAVE_DEV if DEBUG else '')
+if not DEBUG and (not SECRET_KEY or SECRET_KEY == _CHAVE_DEV):
+    from django.core.exceptions import ImproperlyConfigured
+    raise ImproperlyConfigured(
+        'DJANGO_SECRET_KEY é obrigatória quando DJANGO_DEBUG=0. Gere uma chave com: '
+        'python -c "import secrets; print(secrets.token_hex(50))" e defina no ambiente.'
+    )
 
 ALLOWED_HOSTS = [
     h.strip() for h in os.environ.get('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')

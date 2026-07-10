@@ -7,6 +7,6 @@ ofxparse>=0.21
 django-axes>=6.0
 whitenoise>=6.6
 gunicorn>=21.2
-
-# Produção com Postgres (opcional — ver README):
-# psycopg2-binary>=2.9
+# Driver PostgreSQL incluído por padrão: "pip install -r requirements.txt" é
+# suficiente para subir com Postgres em qualquer deploy (com ou sem Docker).
+psycopg2-binary>=2.9

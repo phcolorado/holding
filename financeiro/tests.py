@@ -327,8 +327,17 @@ class EstaAtrasadaTest(TestCase):
         r = self._receita(self.ontem, 'recebido')
         self.assertFalse(r.esta_atrasada)
 
-    def test_receita_parcial_nao_esta_atrasada(self):
+    def test_receita_parcial_vencida_esta_atrasada(self):
+        """Parcial NÃO é quitada: vencida com saldo em aberto continua atrasada."""
         r = self._receita(self.ontem, 'parcial')
+        r.valor_recebido = Decimal('400.00')
+        self.assertTrue(r.esta_atrasada)
+        self.assertEqual(r.saldo_em_aberto, Decimal('600.00'))
+
+    def test_receita_parcial_quitada_pelo_valor_nao_esta_atrasada(self):
+        r = self._receita(self.ontem, 'parcial')
+        r.valor_recebido = Decimal('1000.00')
+        self.assertTrue(r.esta_quitada)
         self.assertFalse(r.esta_atrasada)
 
     def test_receita_cancelada_nao_esta_atrasada(self):
@@ -651,8 +660,12 @@ class BaixaReceitasViewTest(TestCase):
         self.assertEqual(self.receita.valor_recebido, Decimal('2000.00'))
         self.assertEqual(self.receita.data_recebimento, date.today())
 
-    def test_post_marcar_recebida_nao_sobrescreve_valor_existente(self):
-        """POST action=marcar_recebida preserva valor_recebido se já preenchido."""
+    def test_post_marcar_recebida_completa_o_saldo(self):
+        """
+        marcar_recebida agora registra um RecebimentoReceita do SALDO restante —
+        o valor parcial anterior (1800) é preservado como recebimento histórico
+        e o total consolidado passa a cobrir o previsto (2000).
+        """
         self.receita.valor_recebido = Decimal('1800.00')
         self.receita.save()
         self.client.login(username='baixa_user', password='pass')
@@ -665,7 +678,12 @@ class BaixaReceitasViewTest(TestCase):
             },
         )
         self.receita.refresh_from_db()
-        self.assertEqual(self.receita.valor_recebido, Decimal('1800.00'))
+        self.assertEqual(self.receita.valor_recebido, Decimal('2000.00'))
+        self.assertEqual(self.receita.status, 'recebido')
+        # dois recebimentos: o legado materializado (1800) + o do saldo (200)
+        self.assertEqual(self.receita.recebimentos.count(), 2)
+        valores = sorted(self.receita.recebimentos.values_list('valor', flat=True))
+        self.assertEqual(valores, [Decimal('200.00'), Decimal('1800.00')])
 
     def test_post_editar_atualiza_campos(self):
         """POST action=editar atualiza status, valor_recebido, data e observações."""
@@ -1692,7 +1710,8 @@ class BaixaReceitasValidacaoTest(TestCase):
         self.assertEqual(self.receita.status, 'recebido')
         self.assertEqual(self.receita.observacoes, 'pago com desconto')
 
-    def test_marcar_recebida_preserva_valor_zero(self):
+    def test_marcar_recebida_quita_o_saldo_integral(self):
+        """marcar_recebida registra o recebimento do saldo em aberto integral."""
         self.receita.valor_recebido = Decimal('0.00')
         self.receita.save()
         self.client.post(reverse('baixa_receitas_mes'), {
@@ -1700,8 +1719,9 @@ class BaixaReceitasValidacaoTest(TestCase):
             'receita_id': self.receita.pk, 'action': 'marcar_recebida',
         })
         self.receita.refresh_from_db()
-        self.assertEqual(self.receita.valor_recebido, Decimal('0.00'))
+        self.assertEqual(self.receita.valor_recebido, Decimal('2000.00'))
         self.assertEqual(self.receita.status, 'recebido')
+        self.assertEqual(self.receita.saldo_em_aberto, Decimal('0.00'))
 
     def test_post_sem_permissao_retorna_403(self):
         com_leitura(User.objects.create_user('sem_perm', password='pass'))
@@ -1965,3 +1985,228 @@ class PaineisViewTest(TestCase):
         response = self.client.get(reverse('paineis'), {'janela': '24'})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.context['ocupacao']), 24)
+
+
+# ─── Pagamentos parciais e RecebimentoReceita (rodada de correções) ───────────
+
+class PagamentosParciaisTest(TestCase):
+    def setUp(self):
+        from financeiro.models import RecebimentoReceita
+        self.RecebimentoReceita = RecebimentoReceita
+        self.imovel, self.locatario = _criar_base()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
+        )
+        self.ontem = timezone.localdate() - timedelta(days=1)
+        self.receita = ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=self.ontem.month, competencia_ano=self.ontem.year,
+            data_vencimento=self.ontem, valor_previsto=Decimal('2000.00'), status='previsto',
+        )
+
+    def _receber(self, valor):
+        return self.RecebimentoReceita.objects.create(
+            receita=self.receita, data_recebimento=timezone.localdate(), valor=Decimal(valor),
+        )
+
+    def test_parcial_continua_em_aberto_e_na_inadimplencia(self):
+        self._receber('1000.00')
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.status, 'parcial')
+        self.assertEqual(self.receita.saldo_em_aberto, Decimal('1000.00'))
+        self.assertFalse(self.receita.esta_quitada)
+        self.assertIn(self.receita, receitas_inadimplentes_qs())
+
+    def test_segundo_pagamento_soma_ao_primeiro(self):
+        self._receber('1000.00')
+        self._receber('1000.00')
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.valor_recebido, Decimal('2000.00'))
+        self.assertEqual(self.receita.status, 'recebido')
+        self.assertEqual(self.receita.saldo_em_aberto, Decimal('0.00'))
+        self.assertNotIn(self.receita, receitas_inadimplentes_qs())
+
+    def test_multa_juros_desconto_integram_o_saldo(self):
+        self.receita.multa = Decimal('40.00')
+        self.receita.juros = Decimal('10.00')
+        self.receita.desconto = Decimal('50.00')
+        self.receita.save()
+        self.assertEqual(self.receita.valor_total_devido, Decimal('2000.00'))
+        self._receber('2000.00')
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.status, 'recebido')
+        # com multa maior, 2000 não quita
+        self.receita.multa = Decimal('100.00')
+        self.receita.save()
+        self.assertEqual(self.receita.saldo_em_aberto, Decimal('60.00'))
+        self.assertFalse(self.receita.esta_quitada)
+
+    def test_cancelada_nao_aparece_como_divida(self):
+        self.receita.status = 'cancelado'
+        self.receita.save()
+        self.assertEqual(self.receita.saldo_em_aberto, Decimal('0.00'))
+        self.assertTrue(self.receita.esta_quitada)
+        self.assertNotIn(self.receita, receitas_inadimplentes_qs())
+
+    def test_recebimento_negativo_ou_acima_do_saldo_rejeitado(self):
+        rec = self.RecebimentoReceita(
+            receita=self.receita, data_recebimento=timezone.localdate(), valor=Decimal('-10.00'),
+        )
+        with self.assertRaises(ValidationError):
+            rec.full_clean()
+        rec2 = self.RecebimentoReceita(
+            receita=self.receita, data_recebimento=timezone.localdate(), valor=Decimal('2000.01'),
+        )
+        with self.assertRaises(ValidationError):
+            rec2.full_clean()
+
+    def test_excluir_recebimento_reconsolida(self):
+        r1 = self._receber('1000.00')
+        self._receber('1000.00')
+        r1.delete()
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.valor_recebido, Decimal('1000.00'))
+        self.assertEqual(self.receita.status, 'parcial')
+
+    def test_valor_recebido_legado_materializado_ao_receber(self):
+        # dado legado: consolidado sem recebimentos
+        self.receita.valor_recebido = Decimal('500.00')
+        self.receita.save()
+        self._receber('300.00')
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.valor_recebido, Decimal('800.00'))
+        self.assertEqual(self.receita.recebimentos.count(), 2)
+
+    def test_data_migration_recebimentos_iniciais_idempotente(self):
+        import importlib
+        from django.apps import apps as django_apps
+
+        self.receita.valor_recebido = Decimal('700.00')
+        self.receita.data_recebimento = self.ontem
+        self.receita.save()
+
+        mod = importlib.import_module('financeiro.migrations.0006_migrar_recebimentos_iniciais')
+        mod.criar_recebimentos_iniciais(django_apps, None)
+        mod.criar_recebimentos_iniciais(django_apps, None)  # segunda execução não duplica
+
+        recebimentos = self.receita.recebimentos.all()
+        self.assertEqual(recebimentos.count(), 1)
+        self.assertEqual(recebimentos.first().valor, Decimal('700.00'))
+        self.assertEqual(recebimentos.first().origem, 'migracao')
+
+
+class OcupacaoRegrasTest(TestCase):
+    """Regras defensivas de ocupação por status/encerramento (item 12)."""
+
+    def setUp(self):
+        self.imovel, self.locatario = _criar_base()
+        self.hoje = timezone.localdate()
+
+    def _ocupacao_atual(self):
+        from financeiro.paineis import serie_ocupacao_mensal
+        return serie_ocupacao_mensal(1, self.hoje)[0]['ocupados']
+
+    def test_determinado_vigente_ocupa(self):
+        _criar_contrato(self.imovel, self.locatario,
+                        data_inicio=self.hoje - timedelta(days=100),
+                        data_fim=self.hoje + timedelta(days=100))
+        self.assertEqual(self._ocupacao_atual(), 1)
+
+    def test_indeterminado_ativo_ocupa(self):
+        _criar_contrato(self.imovel, self.locatario,
+                        data_inicio=date(2020, 1, 1), data_fim=date(2020, 12, 31),
+                        prazo_indeterminado=True)
+        self.assertEqual(self._ocupacao_atual(), 1)
+
+    def test_indeterminado_encerrado_sem_data_real_nao_ocupa_indefinidamente(self):
+        _criar_contrato(self.imovel, self.locatario,
+                        data_inicio=date(2020, 1, 1), data_fim=date(2020, 12, 31),
+                        prazo_indeterminado=True, status='encerrado')
+        self.assertEqual(self._ocupacao_atual(), 0)
+
+    def test_rescindido_com_encerramento_no_meio_do_mes(self):
+        from financeiro.paineis import serie_ocupacao_mensal
+        meio_do_mes = self.hoje.replace(day=15)
+        _criar_contrato(self.imovel, self.locatario,
+                        data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
+                        status='rescindido', data_encerramento_real=meio_do_mes)
+        # ocupa o mês do encerramento (parcial), mas não o seguinte
+        self.assertEqual(serie_ocupacao_mensal(1, self.hoje)[0]['ocupados'], 1)
+        proximo = (self.hoje.replace(day=1) + timedelta(days=32)).replace(day=1)
+        self.assertEqual(serie_ocupacao_mensal(1, proximo)[0]['ocupados'], 0)
+
+    def test_suspenso_nao_ocupa(self):
+        _criar_contrato(self.imovel, self.locatario,
+                        data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
+                        status='suspenso')
+        self.assertEqual(self._ocupacao_atual(), 0)
+
+
+# ─── Backup consistente e verificação (item 15) ───────────────────────────────
+
+class BackupConsistenteTest(TestCase):
+    def _sqlite_com_tabelas(self, pasta):
+        import os
+        import sqlite3
+        db = os.path.join(pasta, 'real.sqlite3')
+        con = sqlite3.connect(db)
+        for tabela in ('patrimonio_imovel', 'patrimonio_contrato',
+                       'financeiro_receitaaluguel', 'financeiro_despesa'):
+            con.execute(f'CREATE TABLE {tabela} (id INTEGER PRIMARY KEY)')
+        con.execute('INSERT INTO patrimonio_imovel (id) VALUES (1)')
+        con.commit()
+        con.close()
+        return db
+
+    def test_backup_sqlite_manifest_checksum_e_verificacao(self):
+        import os
+        import tempfile
+        import zipfile
+        from io import StringIO
+        from django.core.management import call_command
+        from django.test import override_settings
+
+        pasta = tempfile.mkdtemp(prefix='bk_')
+        db = self._sqlite_com_tabelas(pasta)
+        media_vazia = tempfile.mkdtemp(prefix='bk_media_')
+
+        databases = {'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': db}}
+        with override_settings(DATABASES=databases, MEDIA_ROOT=media_vazia):
+            out = StringIO()
+            call_command('backup_local', destino=pasta, stdout=out)
+
+        zips = [f for f in os.listdir(pasta) if f.endswith('.zip')]
+        self.assertEqual(len(zips), 1)
+        zip_path = os.path.join(pasta, zips[0])
+        # checksum do ZIP gravado ao lado
+        self.assertTrue(os.path.exists(zip_path + '.sha256'))
+
+        with zipfile.ZipFile(zip_path) as zf:
+            self.assertIn('db.sqlite3', zf.namelist())
+            manifest = zf.read('manifest.txt').decode('utf-8')
+        self.assertIn('Engine do banco: django.db.backends.sqlite3', manifest)
+        self.assertIn('SHA-256 do banco:', manifest)
+        self.assertIn('Tamanho do banco (bytes):', manifest)
+        # backup sem mídia funciona (aviso, não erro)
+        self.assertIn('Arquivos de mídia: 0', manifest)
+
+        out2 = StringIO()
+        call_command('verificar_backup', zip_path, stdout=out2)
+        saida = out2.getvalue()
+        self.assertIn('Checksum SHA-256 do banco confere', saida)
+        self.assertIn('patrimonio_imovel: 1 registro(s)', saida)
+        self.assertIn('Backup válido', saida)
+
+    def test_postgres_avisa_que_nao_fez_backup_do_banco(self):
+        import tempfile
+        from io import StringIO
+        from django.core.management import call_command
+        from django.test import override_settings
+
+        databases = {'default': {'ENGINE': 'django.db.backends.postgresql', 'NAME': 'x'}}
+        pasta = tempfile.mkdtemp(prefix='bk_pg_')
+        with override_settings(DATABASES=databases, MEDIA_ROOT=tempfile.mkdtemp()):
+            out, err = StringIO(), StringIO()
+            call_command('backup_local', destino=pasta, stdout=out, stderr=err)
+        self.assertIn('pg_dump', err.getvalue())
+        self.assertIn('NÃO fez backup do banco', err.getvalue())

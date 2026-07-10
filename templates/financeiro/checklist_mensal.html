@@ -150,7 +150,8 @@
         <p class="text-muted mb-3">
             Quando todas as etapas estiverem concluídas, registre o envio à contabilidade:
         </p>
-        <form method="post">
+        {% if perms.financeiro.change_fechamentomensal %}
+<form method="post">
             {% csrf_token %}
             <input type="hidden" name="mes" value="{{ mes_atual }}">
             <input type="hidden" name="ano" value="{{ ano_atual }}">
@@ -159,6 +160,7 @@
                 <i class="bi bi-send-check me-2"></i>Marcar como Enviado à Contabilidade
             </button>
         </form>
+{% endif %}
         {% endif %}
     </div>
 </div>

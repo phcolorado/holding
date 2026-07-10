@@ -15,8 +15,15 @@ def upload_extrato_path(instance, filename):
 class ContaBancaria(models.Model):
     nome = models.CharField('Nome / Apelido', max_length=100, help_text='Ex.: "Itaú PJ Holding".')
     banco = models.CharField('Banco', max_length=100, blank=True)
+    bank_id = models.CharField(
+        'Código do Banco (OFX)', max_length=20, blank=True,
+        help_text='Código BANKID que aparece no arquivo OFX (ex.: 0341). Se preenchido, é conferido na importação.',
+    )
     agencia = models.CharField('Agência', max_length=20, blank=True)
-    numero_conta = models.CharField('Número da Conta', max_length=30, blank=True)
+    numero_conta = models.CharField(
+        'Número da Conta', max_length=30, blank=True,
+        help_text='Se preenchido, é conferido (só dígitos) com o ACCTID do arquivo OFX na importação.',
+    )
     ativo = models.BooleanField('Ativa', default=True)
     observacoes = models.TextField('Observações', blank=True)
     criado_em = models.DateTimeField('Criado em', auto_now_add=True)
@@ -95,6 +102,10 @@ class TransacaoExtrato(models.Model):
     descricao = models.CharField('Descrição', max_length=300, blank=True)
     memo = models.CharField('Memo', max_length=300, blank=True)
     status = models.CharField('Status', max_length=12, choices=STATUS_CHOICES, default='pendente')
+    comissoes_marcadas = models.BooleanField(
+        'Comissões Marcadas como Pagas', default=False,
+        help_text='Indica que esta conciliação (repasse líquido) marcou despesas de comissão como pagas — usado ao desfazer.',
+    )
     receitas = models.ManyToManyField(
         ReceitaAluguel, through='ConciliacaoReceita', related_name='transacoes_extrato',
         verbose_name='Receitas Conciliadas', blank=True,
