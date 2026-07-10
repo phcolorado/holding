@@ -1,5 +1,5 @@
 from django.contrib import messages
-from django.contrib.auth.decorators import login_required
+from django.contrib.auth.decorators import login_required, permission_required
 from django.core.exceptions import PermissionDenied
 from django.core.paginator import Paginator
 from django.db.models import Q
@@ -52,6 +52,7 @@ def _exigir_permissao(request, perm):
 
 
 @login_required
+@permission_required('financeiro.view_receitaaluguel', raise_exception=True)
 def receitas_list(request):
     mes, ano, imovel_id, status, _ = _filtros_periodo(request)
 
@@ -82,6 +83,7 @@ def receitas_list(request):
 
 
 @login_required
+@permission_required('financeiro.view_despesa', raise_exception=True)
 def despesas_list(request):
     mes, ano, imovel_id, status, categoria = _filtros_periodo(request)
 
@@ -116,6 +118,7 @@ def despesas_list(request):
 
 
 @login_required
+@permission_required('financeiro.view_receitaaluguel', raise_exception=True)
 def paineis(request):
     """Painéis gráficos: ocupação, receitas × despesas, inadimplência e categorias."""
     from datetime import date as date_cls
@@ -146,6 +149,7 @@ def paineis(request):
 
 
 @login_required
+@permission_required('financeiro.view_receitaaluguel', raise_exception=True)
 def relatorios(request):
     hoje = timezone.localdate()
 
@@ -166,6 +170,7 @@ def relatorios(request):
 # ─── exportações ───────────────────────────────────────────────────────────────
 
 @login_required
+@permission_required('patrimonio.view_imovel', raise_exception=True)
 def export_imoveis(request, formato):
     status = request.GET.get('status', '')
     imoveis = Imovel.objects.filter(status=status) if status else Imovel.objects.all()
@@ -175,6 +180,7 @@ def export_imoveis(request, formato):
 
 
 @login_required
+@permission_required('patrimonio.view_contrato', raise_exception=True)
 def export_contratos(request, formato):
     status = request.GET.get('status', '')
     imovel_id = pk_param(request.GET.get('imovel'))
@@ -196,6 +202,7 @@ def export_contratos(request, formato):
 
 
 @login_required
+@permission_required('financeiro.view_receitaaluguel', raise_exception=True)
 def export_receitas(request, formato):
     mes, ano, imovel_id, status, _ = _filtros_periodo(request)
     receitas = ReceitaAluguel.objects.select_related('imovel', 'contrato__locatario').filter(
@@ -211,6 +218,7 @@ def export_receitas(request, formato):
 
 
 @login_required
+@permission_required('financeiro.view_despesa', raise_exception=True)
 def export_despesas(request, formato):
     mes, ano, imovel_id, status, categoria = _filtros_periodo(request)
     despesas = Despesa.objects.select_related('imovel', 'fornecedor').filter(
@@ -228,6 +236,7 @@ def export_despesas(request, formato):
 
 
 @login_required
+@permission_required('financeiro.view_receitaaluguel', raise_exception=True)
 def export_inadimplencia(request, formato):
     from .models import receitas_inadimplentes_qs
     imovel_id = pk_param(request.GET.get('imovel'))
@@ -240,18 +249,21 @@ def export_inadimplencia(request, formato):
 
 
 @login_required
+@permission_required('financeiro.view_receitaaluguel', raise_exception=True)
 def export_relatorio_mensal(request, formato):
     mes, ano, _, _, _ = _filtros_periodo(request)
     return exportar_relatorio_mensal_xlsx(request, mes, ano)
 
 
 @login_required
+@permission_required('financeiro.view_receitaaluguel', raise_exception=True)
 def export_relatorio_contabilidade(request):
     mes, ano = mes_ano_da_request(request)
     return exportar_relatorio_contabilidade_xlsx(request, mes, ano)
 
 
 @login_required
+@permission_required('financeiro.view_receitaaluguel', raise_exception=True)
 def baixa_receitas_mes_view(request):
     """
     GET: lista as receitas do mês para conferência.
@@ -335,6 +347,7 @@ def baixa_receitas_mes_view(request):
 
 
 @login_required
+@permission_required('financeiro.view_receitaaluguel', raise_exception=True)
 def checklist_mensal_view(request):
     """
     GET: exibe checklist de fechamento mensal com indicadores de status.
@@ -507,6 +520,7 @@ def checklist_mensal_view(request):
 
 
 @login_required
+@permission_required('financeiro.view_receitaaluguel', raise_exception=True)
 def gerar_receitas_mes_view(request):
     """
     GET: exibe formulário de confirmação com seleção de mês/ano.

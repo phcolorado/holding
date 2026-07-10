@@ -31,6 +31,9 @@ Construído com Python + Django + Bootstrap 5 + SQLite.
 - **Documentos obrigatórios por imóvel**: controle de documentos esperados por imóvel com indicador de pendência
 - **Exportações** em CSV e XLSX (imóveis com tipo/uso, contratos com locatários/fiadores/imobiliária e filtro de status/imóvel/imobiliária, receitas, despesas, inadimplência, relatório mensal)
 - **Django Admin** completo com filtros, buscas, ordenação e inlines (partes do contrato, encargos, reajustes, documentos) para todos os modelos
+- **Perfis de acesso por área**: cada tela exige a permissão de leitura da sua área — grupos prontos para **sócio** (leitura geral), **advogado** (contratos, imóveis, pessoas e documentos) e **contador** (financeiro, conciliação, documentos e exportações); o menu lateral e o dashboard se adaptam ao perfil
+- **Proteção de login** (django-axes): 5 tentativas falhas de senha bloqueiam o usuário/IP por 1 hora
+- **Pronto para publicar**: whitenoise + gunicorn + Dockerfile/Procfile, HTTPS/HSTS automáticos com `DJANGO_DEBUG=0` — ver seção "Publicando na internet"
 
 ---
 
@@ -128,21 +131,29 @@ holding/
 
 ## Usuários e permissões
 
-O sistema usa a autenticação padrão do Django. Você pode criar grupos no Admin:
-
-| Grupo             | Permissão sugerida                          |
-|-------------------|---------------------------------------------|
-| administrador     | Acesso total                                |
-| familiar_edicao   | Adicionar e editar registros                |
-| familiar_leitura  | Somente visualização                        |
-
-Para criar grupos automaticamente via comando:
+Toda tela exige a permissão de leitura (`view_*`) da sua área — um usuário sem
+permissões não vê nada além do dashboard vazio. Crie os grupos prontos com:
 
 ```
 python manage.py criar_grupos
 ```
 
-Ou acesse manualmente: `/admin/` → Autenticação → Grupos.
+| Grupo             | O que enxerga                                                        |
+|-------------------|----------------------------------------------------------------------|
+| administrador     | Tudo (leitura e escrita, incluindo Admin)                            |
+| familiar_edicao   | Tudo em leitura + adicionar/editar registros                         |
+| familiar_leitura  | Tudo, somente leitura                                                |
+| **socio**         | Tudo, somente leitura (dashboard, painéis, financeiro, contratos)    |
+| **advogado**      | Contratos, imóveis, pessoas e documentos — **sem** financeiro        |
+| **contador**      | Financeiro, conciliação, documentos e exportações (+ contexto de imóveis/contratos) |
+
+Depois vincule cada usuário ao grupo em `/admin/` → Usuários. O menu lateral,
+o dashboard e a tela de detalhe do imóvel se adaptam automaticamente: o
+advogado, por exemplo, não vê o fluxo de caixa nem os valores de aluguel.
+
+**Proteção de login:** após 5 tentativas falhas, o par usuário+IP fica
+bloqueado por 1 hora (django-axes). Para desbloquear manualmente:
+`python manage.py axes_reset`.
 
 ---
 
@@ -442,6 +453,45 @@ O `settings.py` lê tudo do ambiente, com padrões de desenvolvimento:
 | `DJANGO_ALLOWED_HOSTS` | `localhost,127.0.0.1` | Lista separada por vírgula |
 | `DB_ENGINE` | sqlite3 | `django.db.backends.postgresql` para Postgres |
 | `DB_NAME` / `DB_USER` / `DB_PASSWORD` / `DB_HOST` / `DB_PORT` | — | Credenciais do Postgres |
+
+## Publicando na internet (sócios, advogado e contador)
+
+O código está pronto para os três cenários — escolha um:
+
+### Opção A — PaaS gerenciado (Railway, Render, Fly.io) — mais simples
+1. Crie o serviço apontando para o repositório GitHub; o `Procfile` e o `Dockerfile` já estão prontos.
+2. Adicione um Postgres gerenciado e defina as variáveis de ambiente (tabela abaixo).
+3. O `release`/entrypoint roda `migrate` automaticamente; rode uma vez `python manage.py criar_grupos` e crie os usuários.
+
+### Opção B — VPS próprio (DigitalOcean, Hetzner etc.)
+```
+docker build -t holding .
+docker run -d -p 8000:8000 \
+  -e DJANGO_DEBUG=0 -e DJANGO_SECRET_KEY=... -e DJANGO_ALLOWED_HOSTS=seu-dominio.com.br \
+  -e DJANGO_CSRF_TRUSTED_ORIGINS=https://seu-dominio.com.br \
+  -e DB_ENGINE=django.db.backends.postgresql -e DB_NAME=... -e DB_USER=... -e DB_PASSWORD=... -e DB_HOST=... \
+  -v /srv/holding/media:/app/media \
+  holding
+```
+Coloque um nginx/caddy na frente para TLS (Let's Encrypt) e para servir `/media/` **não** — os documentos já são servidos pela aplicação com login.
+
+### Opção C — Servidor local + VPN (Tailscale)
+Rode como hoje (`runserver` ou gunicorn) numa máquina da empresa e compartilhe o acesso via Tailscale. Nesse caso, use `DJANGO_SSL_REDIRECT=0` (a VPN já cifra o tráfego) e mantenha `DJANGO_DEBUG=0`.
+
+### Variáveis de ambiente em produção
+
+| Variável | Exemplo |
+|---|---|
+| `DJANGO_DEBUG` | `0` (obrigatório — liga cookies seguros, HTTPS/HSTS) |
+| `DJANGO_SECRET_KEY` | `python -c "import secrets; print(secrets.token_hex(50))"` |
+| `DJANGO_ALLOWED_HOSTS` | `holding.suafamilia.com.br` |
+| `DJANGO_CSRF_TRUSTED_ORIGINS` | `https://holding.suafamilia.com.br` |
+| `DJANGO_SSL_REDIRECT` | `0` apenas no cenário VPN/rede interna |
+| `DB_*` | credenciais do Postgres (ver seção abaixo) |
+
+Checklist final: `python manage.py check --deploy` deve apontar no máximo o
+aviso opcional de HSTS preload. Agende `backup_local` (ver seção de backup) —
+em produção com Postgres, use também `pg_dump` no cron.
 
 ### Migração para PostgreSQL
 

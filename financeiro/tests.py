@@ -6,6 +6,7 @@ from decimal import Decimal
 from django.core.exceptions import ValidationError
 from django.test import TestCase, Client
 from django.contrib.auth.models import User
+from core.test_utils import com_leitura
 from django.urls import reverse
 from django.utils import timezone
 
@@ -483,7 +484,7 @@ class GerarReceitasViewTest(TestCase):
 
     def setUp(self):
         self.client = Client()
-        self.user = User.objects.create_user('test', password='test')
+        self.user = com_leitura(User.objects.create_user('test', password='test'))
         _dar_permissoes(self.user, 'add_receitaaluguel')
         self.client.login(username='test', password='test')
         self.imovel, self.locatario = _criar_base()
@@ -558,7 +559,7 @@ class ExportContratosViewTest(TestCase):
 
     def setUp(self):
         self.client = Client()
-        self.user = User.objects.create_user('test2', password='test2')
+        self.user = com_leitura(User.objects.create_user('test2', password='test2'))
         self.client.login(username='test2', password='test2')
         self.imovel, self.locatario = _criar_base()
         self.imovel2 = Imovel.objects.create(nome='Casa Dois', endereco='Rua D', cidade='SP', estado='SP')
@@ -596,7 +597,7 @@ class BaixaReceitasViewTest(TestCase):
 
     def setUp(self):
         self.client = Client()
-        self.user = User.objects.create_user('baixa_user', password='pass')
+        self.user = com_leitura(User.objects.create_user('baixa_user', password='pass'))
         _dar_permissoes(self.user, 'add_receitaaluguel', 'change_receitaaluguel')
         self.imovel, self.locatario = _criar_base()
         hoje = date.today()
@@ -694,7 +695,7 @@ class RelatorioContabilidadeTest(TestCase):
 
     def setUp(self):
         self.client = Client()
-        self.user = User.objects.create_user('cont_user', password='pass')
+        self.user = com_leitura(User.objects.create_user('cont_user', password='pass'))
         self.client.login(username='cont_user', password='pass')
         self.imovel, self.locatario = _criar_base()
         self.contrato = _criar_contrato(
@@ -748,7 +749,7 @@ class DocumentoObrigatorioTest(TestCase):
 
     def setUp(self):
         self.client = Client()
-        self.user = User.objects.create_user('doc_user', password='pass')
+        self.user = com_leitura(User.objects.create_user('doc_user', password='pass'))
         self.client.login(username='doc_user', password='pass')
         self.imovel, self.locatario = _criar_base()
 
@@ -853,7 +854,7 @@ class BaixaReceitasFormTest(TestCase):
 
     def setUp(self):
         self.client = Client()
-        user = User.objects.create_user('form_user', password='pass')
+        user = com_leitura(User.objects.create_user('form_user', password='pass'))
         _dar_permissoes(user, 'add_receitaaluguel', 'change_receitaaluguel')
         self.client.login(username='form_user', password='pass')
 
@@ -1010,7 +1011,7 @@ class RelatorioContabilidadeNotaTest(TestCase):
 
     def setUp(self):
         self.client = Client()
-        User.objects.create_user('nota_user', password='pass')
+        com_leitura(User.objects.create_user('nota_user', password='pass'))
         self.client.login(username='nota_user', password='pass')
 
     def test_resumo_contem_nota_inadimplencia(self):
@@ -1052,7 +1053,7 @@ class ChecklistMensalViewTest(TestCase):
 
     def setUp(self):
         self.client = Client()
-        self.user = User.objects.create_user('chk_user', password='pass')
+        self.user = com_leitura(User.objects.create_user('chk_user', password='pass'))
         _dar_permissoes(self.user, 'change_fechamentomensal')
         self.imovel, self.locatario = _criar_base()
         hoje = date.today()
@@ -1176,7 +1177,7 @@ class BaixaReceitasFiltroImovelTest(TestCase):
 
     def setUp(self):
         self.client = Client()
-        user = User.objects.create_user('filtro_user', password='pass')
+        user = com_leitura(User.objects.create_user('filtro_user', password='pass'))
         _dar_permissoes(user, 'add_receitaaluguel', 'change_receitaaluguel')
         self.client.login(username='filtro_user', password='pass')
         locatario = Pessoa.objects.create(nome='Locatário Filtro', tipo='locatario')
@@ -1553,7 +1554,7 @@ class CalcularMultaJurosTest(TestCase):
 class ChecklistReajustesPendentesTest(TestCase):
     def setUp(self):
         self.client = Client()
-        User.objects.create_user('chk_reaj_user', password='pass')
+        com_leitura(User.objects.create_user('chk_reaj_user', password='pass'))
         self.client.login(username='chk_reaj_user', password='pass')
         self.imovel, self.locatario = _criar_base()
 
@@ -1596,7 +1597,7 @@ class MigracoesPendentesTest(TestCase):
 class ParametrosInvalidosViewTest(TestCase):
     def setUp(self):
         self.client = Client()
-        User.objects.create_user('param_user', password='pass')
+        com_leitura(User.objects.create_user('param_user', password='pass'))
         self.client.login(username='param_user', password='pass')
 
     def test_receitas_list_mes_nao_numerico_usa_padrao(self):
@@ -1631,7 +1632,7 @@ class ParametrosInvalidosViewTest(TestCase):
 class BaixaReceitasValidacaoTest(TestCase):
     def setUp(self):
         self.client = Client()
-        self.user = User.objects.create_user('valida_user', password='pass')
+        self.user = com_leitura(User.objects.create_user('valida_user', password='pass'))
         _dar_permissoes(self.user, 'add_receitaaluguel', 'change_receitaaluguel')
         self.client.login(username='valida_user', password='pass')
         self.imovel, self.locatario = _criar_base()
@@ -1703,7 +1704,7 @@ class BaixaReceitasValidacaoTest(TestCase):
         self.assertEqual(self.receita.status, 'recebido')
 
     def test_post_sem_permissao_retorna_403(self):
-        User.objects.create_user('sem_perm', password='pass')
+        com_leitura(User.objects.create_user('sem_perm', password='pass'))
         self.client.login(username='sem_perm', password='pass')
         response = self.client.post(reverse('baixa_receitas_mes'), {
             'mes': self.mes, 'ano': self.ano,
@@ -1714,7 +1715,7 @@ class BaixaReceitasValidacaoTest(TestCase):
         self.assertEqual(self.receita.status, 'previsto')
 
     def test_gerar_receitas_sem_permissao_retorna_403(self):
-        User.objects.create_user('sem_perm2', password='pass')
+        com_leitura(User.objects.create_user('sem_perm2', password='pass'))
         self.client.login(username='sem_perm2', password='pass')
         response = self.client.post(reverse('gerar_receitas_mes'), {'mes': self.mes, 'ano': self.ano})
         self.assertEqual(response.status_code, 403)
@@ -1936,7 +1937,7 @@ class PaineisSeriesTest(TestCase):
 class PaineisViewTest(TestCase):
     def setUp(self):
         self.client = Client()
-        User.objects.create_user('painel_user', password='pass')
+        com_leitura(User.objects.create_user('painel_user', password='pass'))
         self.client.login(username='painel_user', password='pass')
 
     def test_exige_login(self):

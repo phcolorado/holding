@@ -58,90 +58,124 @@
                 </li>
             </ul>
 
+            {% if perms.patrimonio.view_imovel or perms.patrimonio.view_pessoa or perms.patrimonio.view_contrato %}
             <div class="nav-section">Patrimônio</div>
             <ul class="nav flex-column mb-2">
+                {% if perms.patrimonio.view_imovel %}
                 <li class="nav-item">
                     <a class="nav-link {% if 'imovel' in request.resolver_match.url_name %}active{% endif %}"
                        href="{% url 'imovel_list' %}">
                         <i class="bi bi-buildings me-2"></i>Imóveis
                     </a>
                 </li>
+                {% endif %}
+                {% if perms.patrimonio.view_pessoa %}
                 <li class="nav-item">
                     <a class="nav-link {% if 'pessoa' in request.resolver_match.url_name %}active{% endif %}"
                        href="{% url 'pessoa_list' %}">
                         <i class="bi bi-people me-2"></i>Pessoas
                     </a>
                 </li>
+                {% endif %}
+                {% if perms.patrimonio.view_contrato %}
                 <li class="nav-item">
                     <a class="nav-link {% if 'contrato' in request.resolver_match.url_name %}active{% endif %}"
                        href="{% url 'contrato_list' %}">
                         <i class="bi bi-file-text me-2"></i>Contratos
                     </a>
                 </li>
+                {% endif %}
             </ul>
 
+            {% endif %}
+
+            {% if perms.financeiro.view_receitaaluguel or perms.financeiro.view_despesa or perms.conciliacao.view_extratoimportado %}
             <div class="nav-section">Financeiro</div>
             <ul class="nav flex-column mb-2">
+                {% if perms.financeiro.view_receitaaluguel %}
                 <li class="nav-item">
                     <a class="nav-link {% if request.resolver_match.url_name == 'baixa_receitas_mes' %}active{% endif %}"
                        href="{% url 'baixa_receitas_mes' %}">
                         <i class="bi bi-check2-circle me-2"></i>Baixa de Aluguéis
                     </a>
                 </li>
+                {% endif %}
+                {% if perms.financeiro.view_receitaaluguel %}
                 <li class="nav-item">
                     <a class="nav-link {% if 'receitas' in request.resolver_match.url_name and request.resolver_match.url_name != 'baixa_receitas_mes' %}active{% endif %}"
                        href="{% url 'receitas_list' %}">
                         <i class="bi bi-cash-coin me-2"></i>Receitas
                     </a>
                 </li>
+                {% endif %}
+                {% if perms.financeiro.view_despesa %}
                 <li class="nav-item">
                     <a class="nav-link {% if 'despesas' in request.resolver_match.url_name %}active{% endif %}"
                        href="{% url 'despesas_list' %}">
                         <i class="bi bi-credit-card me-2"></i>Despesas
                     </a>
                 </li>
+                {% endif %}
+                {% if perms.financeiro.view_receitaaluguel %}
                 <li class="nav-item">
                     <a class="nav-link {% if 'gerar_receitas' in request.resolver_match.url_name %}active{% endif %}"
                        href="{% url 'gerar_receitas_mes' %}">
                         <i class="bi bi-magic me-2"></i>Gerar Receitas
                     </a>
                 </li>
+                {% endif %}
+                {% if perms.conciliacao.view_extratoimportado %}
                 <li class="nav-item">
                     <a class="nav-link {% if 'extrato' in request.resolver_match.url_name or 'conciliar' in request.resolver_match.url_name %}active{% endif %}"
                        href="{% url 'extrato_list' %}">
                         <i class="bi bi-bank me-2"></i>Conciliação Bancária
                     </a>
                 </li>
+                {% endif %}
+                {% if perms.financeiro.view_receitaaluguel %}
                 <li class="nav-item">
                     <a class="nav-link {% if request.resolver_match.url_name == 'checklist_mensal' %}active{% endif %}"
                        href="{% url 'checklist_mensal' %}">
                         <i class="bi bi-clipboard2-check me-2"></i>Checklist Mensal
                     </a>
                 </li>
+                {% endif %}
+                {% if perms.financeiro.view_receitaaluguel %}
                 <li class="nav-item">
                     <a class="nav-link {% if request.resolver_match.url_name == 'paineis' %}active{% endif %}"
                        href="{% url 'paineis' %}">
                         <i class="bi bi-graph-up me-2"></i>Painéis
                     </a>
                 </li>
+                {% endif %}
+                {% if perms.financeiro.view_receitaaluguel %}
                 <li class="nav-item">
                     <a class="nav-link {% if 'relatorios' in request.resolver_match.url_name %}active{% endif %}"
                        href="{% url 'relatorios' %}">
                         <i class="bi bi-download me-2"></i>Relatórios / Exportar
                     </a>
                 </li>
+                {% endif %}
             </ul>
 
+            {% endif %}
+
+            {% if perms.documentos.view_documento %}
             <div class="nav-section">Documentos</div>
             <ul class="nav flex-column mb-2">
+                {% if perms.documentos.view_documento %}
                 <li class="nav-item">
                     <a class="nav-link {% if 'documento' in request.resolver_match.url_name %}active{% endif %}"
                        href="{% url 'documento_list' %}">
                         <i class="bi bi-folder2-open me-2"></i>Documentos
                     </a>
                 </li>
+                {% endif %}
             </ul>
 
+            {% endif %}
+
+            {% if user.is_staff %}
             <div class="nav-section">Admin</div>
             <ul class="nav flex-column">
                 <li class="nav-item">
@@ -150,6 +184,7 @@
                     </a>
                 </li>
             </ul>
+            {% endif %}
         </nav>
 
         <main class="col-md-10 col-lg-10 ms-sm-auto">

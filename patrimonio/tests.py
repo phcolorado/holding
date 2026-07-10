@@ -2,6 +2,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from django.contrib.auth.models import User
+from core.test_utils import com_leitura
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError
@@ -417,7 +418,7 @@ class ReajusteContratoTest(TestCase):
         self.contrato.data_proximo_reajuste = date.today() - timedelta(days=1)
         self.contrato.save()
         client = Client()
-        User.objects.create_user('dash_reajuste', password='pass')
+        com_leitura(User.objects.create_user('dash_reajuste', password='pass'))
         client.login(username='dash_reajuste', password='pass')
         response = client.get(reverse('dashboard'))
         self.assertEqual(response.status_code, 200)
@@ -447,7 +448,7 @@ class ImovelClassificacaoTest(TestCase):
 class ImovelListFiltrosTest(TestCase):
     def setUp(self):
         self.client = Client()
-        User.objects.create_user('imovel_user', password='pass')
+        com_leitura(User.objects.create_user('imovel_user', password='pass'))
         self.client.login(username='imovel_user', password='pass')
         _criar_imovel('Apto Residencial', tipo_imovel='apartamento', uso='residencial')
         _criar_imovel('Loja Comercial', tipo_imovel='loja', uso='comercial')
@@ -470,7 +471,7 @@ class ImovelListFiltrosTest(TestCase):
 class ContratoListViewTest(TestCase):
     def setUp(self):
         self.client = Client()
-        User.objects.create_user('contrato_user', password='pass')
+        com_leitura(User.objects.create_user('contrato_user', password='pass'))
         self.client.login(username='contrato_user', password='pass')
         self.imovel = _criar_imovel()
         self.locatario1 = _criar_pessoa('Ana Locatária')
@@ -642,7 +643,7 @@ class GarantirEncargoAluguelTest(TestCase):
         contrato = _criar_contrato(self.imovel, self.locatario, date(2024, 1, 1), date(2024, 12, 31))
         admin_instance = ContratoAdmin(Contrato, django_admin.site)
         request = RequestFactory().post('/admin/patrimonio/contrato/add/')
-        request.user = User.objects.create_user('admin_encargo', password='pass')
+        request.user = com_leitura(User.objects.create_user('admin_encargo', password='pass'))
         admin_instance.save_model(request=request, obj=contrato, form=None, change=False)
 
         self.assertFalse(contrato.encargos.filter(tipo='aluguel').exists())
@@ -842,7 +843,7 @@ class ReajusteAdminTransicaoTest(TestCase):
 class DashboardContratosVencendoTest(TestCase):
     def setUp(self):
         self.client = Client()
-        User.objects.create_user('dash_vencendo_user', password='pass')
+        com_leitura(User.objects.create_user('dash_vencendo_user', password='pass'))
         self.client.login(username='dash_vencendo_user', password='pass')
         self.imovel1 = _criar_imovel('Imóvel Determinado')
         self.imovel2 = _criar_imovel('Imóvel Indeterminado')
@@ -962,7 +963,7 @@ class IndicesBCBTest(TestCase):
 
         admin_instance = ContratoAdmin(Contrato, django_admin.site)
         request = RequestFactory().post('/admin/patrimonio/contrato/')
-        request.user = User.objects.create_user('reajuste_admin', password='pass')
+        request.user = com_leitura(User.objects.create_user('reajuste_admin', password='pass'))
         request.session = {}
         request._messages = FallbackStorage(request)
 
@@ -1026,3 +1027,91 @@ class IndicadoresImovelTest(TestCase):
         vazio = _criar_imovel('Imóvel Vazio')
         ind = indicadores_do_imovel(vazio)
         self.assertEqual(ind['meses_ocupados'], 0)
+
+
+# ─── Perfis de acesso (Fase 3) ────────────────────────────────────────────────
+
+class PerfisDeAcessoTest(TestCase):
+    """Advogado vê contratos/documentos mas não financeiro; contador vê financeiro."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from django.core.management import call_command
+        call_command('criar_grupos', verbosity=0)
+
+    def _usuario_no_grupo(self, username, grupo):
+        from django.contrib.auth.models import Group
+        user = User.objects.create_user(username, password='pass')
+        user.groups.add(Group.objects.get(name=grupo))
+        return user
+
+    def test_advogado_acessa_contratos_e_documentos(self):
+        self._usuario_no_grupo('adv', 'advogado')
+        client = Client()
+        client.login(username='adv', password='pass')
+
+        self.assertEqual(client.get(reverse('contrato_list')).status_code, 200)
+        self.assertEqual(client.get(reverse('imovel_list')).status_code, 200)
+        self.assertEqual(client.get(reverse('documento_list')).status_code, 200)
+
+    def test_advogado_nao_acessa_financeiro(self):
+        self._usuario_no_grupo('adv2', 'advogado')
+        client = Client()
+        client.login(username='adv2', password='pass')
+
+        self.assertEqual(client.get(reverse('receitas_list')).status_code, 403)
+        self.assertEqual(client.get(reverse('despesas_list')).status_code, 403)
+        self.assertEqual(client.get(reverse('paineis')).status_code, 403)
+        self.assertEqual(client.get(reverse('extrato_list')).status_code, 403)
+
+    def test_contador_acessa_financeiro_e_exports(self):
+        self._usuario_no_grupo('cont', 'contador')
+        client = Client()
+        client.login(username='cont', password='pass')
+
+        self.assertEqual(client.get(reverse('receitas_list')).status_code, 200)
+        self.assertEqual(client.get(reverse('checklist_mensal')).status_code, 200)
+        self.assertEqual(client.get(reverse('export_contratos', args=['csv'])).status_code, 200)
+        self.assertEqual(client.get(reverse('extrato_list')).status_code, 200)
+
+    def test_socio_ve_tudo_mas_nao_altera(self):
+        self._usuario_no_grupo('soc', 'socio')
+        client = Client()
+        client.login(username='soc', password='pass')
+
+        self.assertEqual(client.get(reverse('receitas_list')).status_code, 200)
+        self.assertEqual(client.get(reverse('contrato_list')).status_code, 200)
+        self.assertEqual(client.get(reverse('paineis')).status_code, 200)
+        # POST de escrita continua bloqueado (perfil só de leitura)
+        hoje = timezone.localdate()
+        resposta = client.post(reverse('gerar_receitas_mes'), {'mes': hoje.month, 'ano': hoje.year})
+        self.assertEqual(resposta.status_code, 403)
+
+    def test_dashboard_do_advogado_esconde_financeiro(self):
+        self._usuario_no_grupo('adv3', 'advogado')
+        client = Client()
+        client.login(username='adv3', password='pass')
+
+        resposta = client.get(reverse('dashboard'))
+        self.assertEqual(resposta.status_code, 200)
+        html = resposta.content.decode()
+        self.assertNotIn('Fluxo de Caixa', html)
+        self.assertNotIn('Receita Prevista', html)
+        self.assertIn('Contratos vencendo', html)
+
+    def test_menu_do_advogado_esconde_financeiro(self):
+        self._usuario_no_grupo('adv4', 'advogado')
+        client = Client()
+        client.login(username='adv4', password='pass')
+
+        html = client.get(reverse('dashboard')).content.decode()
+        self.assertNotIn('Baixa de Aluguéis', html)
+        self.assertNotIn('Conciliação Bancária', html)
+        self.assertIn('Contratos', html)
+        self.assertIn('Documentos', html)
+
+    def test_sem_login_view_protegida_redireciona(self):
+        client = Client()
+        resposta = client.get(reverse('contrato_list'))
+        self.assertEqual(resposta.status_code, 302)
+        self.assertIn('/login/', resposta['Location'])

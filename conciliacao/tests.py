@@ -3,6 +3,7 @@ from datetime import date
 from decimal import Decimal
 
 from django.contrib.auth.models import User, Permission
+from core.test_utils import com_leitura
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, Client, override_settings
 from django.urls import reverse
@@ -330,7 +331,7 @@ class ConciliarTest(TestCase):
 class ConciliacaoViewsTest(TestCase):
     def setUp(self):
         self.client = Client()
-        self.user = User.objects.create_user('conc_user', password='pass')
+        self.user = com_leitura(User.objects.create_user('conc_user', password='pass'))
         perms = Permission.objects.filter(codename__in=[
             'add_extratoimportado', 'change_transacaoextrato',
             'change_receitaaluguel', 'add_despesa',
@@ -354,7 +355,7 @@ class ConciliacaoViewsTest(TestCase):
         self.assertEqual(extrato.transacoes_novas, 1)
 
     def test_upload_sem_permissao_403(self):
-        User.objects.create_user('sem_perm_conc', password='pass')
+        com_leitura(User.objects.create_user('sem_perm_conc', password='pass'))
         self.client.login(username='sem_perm_conc', password='pass')
         arquivo = _arquivo_ofx([('t1', '20260310', '2000.00', 'PIX')])
         response = self.client.post(reverse('extrato_list'), {'conta': self.conta.pk, 'arquivo': arquivo})

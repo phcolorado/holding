@@ -1,4 +1,4 @@
-from django.contrib.auth.decorators import login_required
+from django.contrib.auth.decorators import login_required, permission_required
 from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404, render
 
@@ -8,6 +8,7 @@ from patrimonio.models import Imovel
 
 
 @login_required
+@permission_required('documentos.view_documento', raise_exception=True)
 def documento_list(request):
     tipo = request.GET.get('tipo', '')
     imovel_id = pk_param(request.GET.get('imovel'))
@@ -37,6 +38,7 @@ def documento_list(request):
 
 
 @login_required
+@permission_required('documentos.view_documento', raise_exception=True)
 def documento_download(request, pk):
     """
     Serve o arquivo do documento exigindo login — evita expor /media/

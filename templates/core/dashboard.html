@@ -11,6 +11,7 @@
 
 <!-- Cards principais -->
 <div class="row g-3 mb-4">
+    {% if perms.patrimonio.view_imovel %}
     <div class="col-sm-6 col-lg-3">
         <div class="card card-stat bg-primary text-white p-3 shadow-sm">
             <div class="d-flex justify-content-between align-items-center">
@@ -31,7 +32,9 @@
             </div>
         </div>
     </div>
+    {% endif %}
 
+    {% if perms.financeiro.view_receitaaluguel %}
     <div class="col-sm-6 col-lg-3">
         <div class="card card-stat bg-success text-white p-3 shadow-sm">
             <div class="d-flex justify-content-between align-items-center">
@@ -59,7 +62,9 @@
             <div class="small mt-1 text-white-50">no mês atual</div>
         </div>
     </div>
+    {% endif %}
 
+    {% if perms.financeiro.view_despesa %}
     <div class="col-sm-6 col-lg-3">
         <div class="card card-stat bg-warning text-dark p-3 shadow-sm">
             <div class="d-flex justify-content-between align-items-center">
@@ -72,9 +77,11 @@
             <div class="small mt-1" style="opacity:.6">previstas + atrasadas</div>
         </div>
     </div>
+    {% endif %}
 </div>
 
 <!-- Fluxo de caixa 12 meses -->
+{% if perms.financeiro.view_receitaaluguel %}
 <div class="card shadow-sm mb-4">
     <div class="card-header bg-white fw-semibold border-bottom d-flex justify-content-between align-items-center">
         <span><i class="bi bi-bar-chart-line me-2 text-primary"></i>Fluxo de Caixa — últimos 12 meses</span>
@@ -110,7 +117,9 @@
     </div>
 </div>
 {{ fluxo_caixa|json_script:"fluxo-caixa-data" }}
+{% endif %}
 
+{% if perms.patrimonio.view_contrato %}
 <div class="row g-3 mb-4">
     <!-- Contratos vencendo -->
     <div class="col-md-6">
@@ -182,8 +191,10 @@
         </div>
     </div>
 </div>
+{% endif %}
 
 <div class="row g-3 mb-4">
+    {% if perms.documentos.view_documento %}
     <!-- Documentos com validade vencendo -->
     <div class="col-md-6">
         <div class="card shadow-sm h-100">
@@ -222,7 +233,9 @@
             </div>
         </div>
     </div>
+    {% endif %}
 
+    {% if perms.patrimonio.view_manutencao %}
     <!-- Manutenções em aberto -->
     <div class="col-md-6">
         <div class="card shadow-sm h-100">
@@ -253,6 +266,7 @@
             </div>
         </div>
     </div>
+    {% endif %}
 
     <!-- Ações rápidas -->
     <div class="col-md-6">
@@ -262,60 +276,74 @@
             </div>
             <div class="card-body">
                 <div class="d-grid gap-2">
+                    {% if perms.financeiro.view_receitaaluguel %}
                     <a href="{% url 'baixa_receitas_mes' %}" class="btn btn-success">
                         <i class="bi bi-check2-circle me-2"></i>Conferir Recebimentos
                     </a>
                     <a href="{% url 'gerar_receitas_mes' %}" class="btn btn-outline-success">
                         <i class="bi bi-magic me-2"></i>Gerar Receitas do Mês Atual
                     </a>
+                    {% endif %}
+                    {% if user.is_staff %}
+                    {% if perms.patrimonio.add_imovel %}
                     <a href="{% url 'admin:patrimonio_imovel_add' %}" class="btn btn-outline-primary">
                         <i class="bi bi-plus-circle me-2"></i>Cadastrar Imóvel
                     </a>
+                    {% endif %}
+                    {% if perms.financeiro.add_receitaaluguel %}
                     <a href="{% url 'admin:financeiro_receitaaluguel_add' %}" class="btn btn-outline-success">
                         <i class="bi bi-plus-circle me-2"></i>Lançar Receita Manualmente
                     </a>
+                    {% endif %}
+                    {% if perms.financeiro.add_despesa %}
                     <a href="{% url 'admin:financeiro_despesa_add' %}" class="btn btn-outline-warning">
                         <i class="bi bi-plus-circle me-2"></i>Lançar Despesa
                     </a>
+                    {% endif %}
+                    {% if perms.documentos.add_documento %}
                     <a href="{% url 'admin:documentos_documento_add' %}" class="btn btn-outline-secondary">
                         <i class="bi bi-upload me-2"></i>Enviar Documento
                     </a>
+                    {% endif %}
+                    {% endif %}
+                    {% if perms.financeiro.view_receitaaluguel %}
                     <a href="{% url 'checklist_mensal' %}" class="btn btn-outline-info">
                         <i class="bi bi-clipboard2-check me-2"></i>Checklist Mensal
                     </a>
                     <a href="{% url 'relatorios' %}" class="btn btn-outline-dark">
                         <i class="bi bi-download me-2"></i>Exportar Relatórios
                     </a>
+                    {% endif %}
                 </div>
-                {% if docs_pendentes_contabilidade > 0 %}
+                {% if docs_pendentes_contabilidade > 0 and perms.documentos.view_documento %}
                 <div class="alert alert-warning mt-3 mb-0 py-2">
                     <i class="bi bi-exclamation-circle me-1"></i>
                     <strong>{{ docs_pendentes_contabilidade }}</strong> documento(s) pendente(s) de envio à contabilidade.
                     <a href="{% url 'documento_list' %}?pendente=1" class="alert-link ms-1">Ver</a>
                 </div>
                 {% endif %}
-                {% if docs_obrigatorios_pendentes > 0 %}
+                {% if docs_obrigatorios_pendentes > 0 and perms.documentos.view_documento %}
                 <div class="alert alert-danger mt-2 mb-0 py-2">
                     <i class="bi bi-file-earmark-x me-1"></i>
                     <strong>{{ docs_obrigatorios_pendentes }}</strong> documento(s) obrigatório(s) pendente(s).
                     <a href="{% url 'admin:documentos_documentoobrigatorio_changelist' %}" class="alert-link ms-1">Ver</a>
                 </div>
                 {% endif %}
-                {% if reajustes_pendentes > 0 %}
+                {% if reajustes_pendentes > 0 and perms.patrimonio.view_contrato %}
                 <div class="alert alert-warning mt-2 mb-0 py-2">
                     <i class="bi bi-arrow-up-circle me-1"></i>
                     <strong>{{ reajustes_pendentes }}</strong> contrato(s) com reajuste pendente.
                     <a href="{% url 'contrato_list' %}?reajuste_pendente=1" class="alert-link ms-1">Ver</a>
                 </div>
                 {% endif %}
-                {% if docs_vencendo_cnt > 0 %}
+                {% if docs_vencendo_cnt > 0 and perms.documentos.view_documento %}
                 <div class="alert alert-danger mt-2 mb-0 py-2">
                     <i class="bi bi-calendar2-x me-1"></i>
                     <strong>{{ docs_vencendo_cnt }}</strong> documento(s) com validade vencida ou vencendo em 30 dias.
                     <a href="{% url 'documento_list' %}?vencendo=1" class="alert-link ms-1">Ver</a>
                 </div>
                 {% endif %}
-                {% if extrato_pendentes > 0 %}
+                {% if extrato_pendentes > 0 and perms.conciliacao.view_extratoimportado %}
                 <div class="alert alert-warning mt-2 mb-0 py-2">
                     <i class="bi bi-bank me-1"></i>
                     <strong>{{ extrato_pendentes }}</strong> transação(ões) de extrato bancário pendente(s) de conciliação.

@@ -13,24 +13,32 @@
         <span class="text-muted small">{{ imovel.endereco }}, {{ imovel.cidade }}/{{ imovel.estado }}</span>
     </div>
     <div class="d-flex gap-2 flex-wrap">
+        {% if user.is_staff and perms.patrimonio.change_imovel %}
         <a href="{% url 'admin:patrimonio_imovel_change' imovel.pk %}" class="btn btn-sm btn-outline-secondary">
             <i class="bi bi-pencil"></i> Editar
         </a>
+        {% endif %}
+        {% if perms.financeiro.view_receitaaluguel %}
         <a href="{% url 'baixa_receitas_mes' %}?imovel={{ imovel.pk }}" class="btn btn-sm btn-outline-success">
             <i class="bi bi-check2-circle"></i> Baixa de Aluguéis
         </a>
         <a href="{% url 'receitas_list' %}?imovel={{ imovel.pk }}" class="btn btn-sm btn-outline-primary">
             <i class="bi bi-cash-coin"></i> Receitas
         </a>
+        {% endif %}
+        {% if user.is_staff and perms.financeiro.add_despesa %}
         <a href="{% url 'admin:financeiro_despesa_add' %}?imovel={{ imovel.pk }}" class="btn btn-sm btn-outline-warning">
             <i class="bi bi-plus-circle"></i> Lançar Despesa
         </a>
+        {% endif %}
+        {% if user.is_staff and perms.documentos.add_documento %}
         <a href="{% url 'admin:documentos_documento_add' %}?imovel={{ imovel.pk }}" class="btn btn-sm btn-outline-dark">
             <i class="bi bi-upload"></i> Adicionar Documento
         </a>
         <a href="{% url 'admin:documentos_documentoobrigatorio_add' %}?imovel={{ imovel.pk }}" class="btn btn-sm btn-outline-dark">
             <i class="bi bi-file-earmark-plus"></i> Doc. Obrigatório
         </a>
+        {% endif %}
     </div>
 </div>
 
@@ -98,6 +106,7 @@
     </div>
 
     <div class="col-md-4">
+        {% if perms.financeiro.view_receitaaluguel %}
         <div class="card shadow-sm bg-success text-white">
             <div class="card-body text-center py-4">
                 <div class="small text-white-50">Resultado Financeiro (histórico)</div>
@@ -160,6 +169,7 @@
                 {% endif %}
             </div>
         </div>
+        {% endif %}
 
         {% if contrato_ativo %}
         <div class="card shadow-sm mt-3">
@@ -178,21 +188,27 @@
 
 <!-- Tabs -->
 <ul class="nav nav-tabs mb-3" id="detalheTab">
+    {% if perms.financeiro.view_receitaaluguel %}
     <li class="nav-item">
         <a class="nav-link active" data-bs-toggle="tab" href="#receitas-tab">
             <i class="bi bi-cash-coin me-1"></i>Receitas <span class="badge bg-secondary">{{ receitas|length }}</span>
         </a>
     </li>
+    {% endif %}
+    {% if perms.financeiro.view_despesa %}
     <li class="nav-item">
         <a class="nav-link" data-bs-toggle="tab" href="#despesas-tab">
             <i class="bi bi-credit-card me-1"></i>Despesas <span class="badge bg-secondary">{{ despesas|length }}</span>
         </a>
     </li>
+    {% endif %}
+    {% if perms.documentos.view_documento %}
     <li class="nav-item">
-        <a class="nav-link" data-bs-toggle="tab" href="#documentos-tab">
+        <a class="nav-link {% if not perms.financeiro.view_receitaaluguel %}active{% endif %}" data-bs-toggle="tab" href="#documentos-tab">
             <i class="bi bi-folder2 me-1"></i>Documentos <span class="badge bg-secondary">{{ documentos|length }}</span>
         </a>
     </li>
+    {% endif %}
     <li class="nav-item">
         <a class="nav-link" data-bs-toggle="tab" href="#manutencoes-tab">
             <i class="bi bi-tools me-1"></i>Manutenções <span class="badge bg-secondary">{{ manutencoes|length }}</span>
@@ -214,6 +230,7 @@
 </ul>
 
 <div class="tab-content">
+    {% if perms.financeiro.view_receitaaluguel %}
     <div class="tab-pane fade show active" id="receitas-tab">
         <div class="card shadow-sm">
             <div class="card-body p-0">
@@ -245,6 +262,8 @@
         </div>
     </div>
 
+    {% endif %}
+    {% if perms.financeiro.view_despesa %}
     <div class="tab-pane fade" id="despesas-tab">
         <div class="card shadow-sm">
             <div class="card-body p-0">
@@ -275,7 +294,9 @@
         </div>
     </div>
 
-    <div class="tab-pane fade" id="documentos-tab">
+    {% endif %}
+    {% if perms.documentos.view_documento %}
+    <div class="tab-pane fade {% if not perms.financeiro.view_receitaaluguel %}show active{% endif %}" id="documentos-tab">
         <div class="card shadow-sm">
             <div class="card-body p-0">
                 <table class="table table-sm table-hover mb-0">
@@ -296,7 +317,7 @@
                                 {% endif %}
                             </td>
                             <td>
-                                <a href="{{ doc.arquivo.url }}" target="_blank" class="btn btn-sm btn-outline-secondary">
+                                <a href="{% url 'documento_download' doc.pk %}" target="_blank" class="btn btn-sm btn-outline-secondary">
                                     <i class="bi bi-download"></i>
                                 </a>
                             </td>
@@ -310,6 +331,7 @@
         </div>
     </div>
 
+    {% endif %}
     <div class="tab-pane fade" id="manutencoes-tab">
         <div class="card shadow-sm">
             <div class="card-body p-0">

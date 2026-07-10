@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -34,6 +35,7 @@ INSTALLED_APPS = [
     'django.contrib.humanize',
     'widget_tweaks',
     'simple_history',
+    'axes',
     'core',
     'patrimonio',
     'financeiro',
@@ -43,6 +45,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -50,7 +53,21 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'simple_history.middleware.HistoryRequestMiddleware',
+    'axes.middleware.AxesMiddleware',
 ]
+
+# Proteção contra força bruta no login (django-axes):
+# 5 tentativas falhas por usuário+IP → bloqueio de 1 hora.
+AUTHENTICATION_BACKENDS = [
+    'axes.backends.AxesStandaloneBackend',
+    'django.contrib.auth.backends.ModelBackend',
+]
+AXES_FAILURE_LIMIT = 5
+AXES_COOLOFF_TIME = 1  # horas
+AXES_RESET_ON_SUCCESS = True
+AXES_LOCKOUT_PARAMETERS = [['username', 'ip_address']]
+# Desabilitado durante os testes — o test client não passa o request ao autenticar.
+AXES_ENABLED = 'test' not in sys.argv
 
 ROOT_URLCONF = 'gestao_patrimonial.urls'
 
@@ -113,6 +130,16 @@ STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_DIRS = []
 
+# Whitenoise serve os arquivos estáticos (admin etc.) direto pelo gunicorn,
+# sem precisar de nginx para static em produção. Rode collectstatic no deploy.
+STORAGES = {
+    'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+    'staticfiles': {'BACKEND': 'whitenoise.storage.CompressedStaticFilesStorage'},
+}
+# Em desenvolvimento, serve os estáticos direto dos apps (sem exigir collectstatic)
+WHITENOISE_AUTOREFRESH = DEBUG
+WHITENOISE_USE_FINDERS = DEBUG
+
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
@@ -128,3 +155,16 @@ if not DEBUG:
     CSRF_COOKIE_SECURE = True
     SECURE_CONTENT_TYPE_NOSNIFF = True
     SECURE_REFERRER_POLICY = 'same-origin'
+    # Redirecionamento para HTTPS e HSTS. Defina DJANGO_SSL_REDIRECT=0 quando
+    # o acesso for por rede interna/VPN sem certificado (ex.: Tailscale).
+    SECURE_SSL_REDIRECT = _env_bool('DJANGO_SSL_REDIRECT', True)
+    if SECURE_SSL_REDIRECT:
+        SECURE_HSTS_SECONDS = 60 * 60 * 24 * 30  # 30 dias
+        SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    # Atrás de proxy/PaaS (Railway, Render, nginx), o TLS termina no proxy:
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    # Cookies e CSRF exigem a origem explícita quando servido em domínio próprio
+    CSRF_TRUSTED_ORIGINS = [
+        origem.strip() for origem in os.environ.get('DJANGO_CSRF_TRUSTED_ORIGINS', '').split(',')
+        if origem.strip()
+    ]

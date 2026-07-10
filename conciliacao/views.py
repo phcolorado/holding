@@ -1,5 +1,5 @@
 from django.contrib import messages
-from django.contrib.auth.decorators import login_required
+from django.contrib.auth.decorators import login_required, permission_required
 from django.core.exceptions import PermissionDenied
 from django.http import HttpResponseRedirect
 from django.shortcuts import get_object_or_404, render
@@ -22,6 +22,7 @@ def _exigir_permissao(request, perm):
 
 
 @login_required
+@permission_required('conciliacao.view_extratoimportado', raise_exception=True)
 def extrato_list(request):
     """GET: lista extratos importados. POST: importa um novo arquivo OFX."""
     if request.method == 'POST':
@@ -76,6 +77,7 @@ def _contexto_transacao(transacao):
 
 
 @login_required
+@permission_required('conciliacao.view_extratoimportado', raise_exception=True)
 def conciliar_extrato(request, pk):
     """Tela de conciliação de um extrato: créditos ↔ receitas, débitos → despesas."""
     extrato = get_object_or_404(ExtratoImportado.objects.select_related('conta'), pk=pk)

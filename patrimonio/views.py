@@ -1,4 +1,4 @@
-from django.contrib.auth.decorators import login_required
+from django.contrib.auth.decorators import login_required, permission_required
 from django.shortcuts import render, get_object_or_404
 from django.db.models import Sum, Q
 from django.utils import timezone
@@ -11,6 +11,7 @@ from documentos.models import Documento, DocumentoObrigatorio
 
 
 @login_required
+@permission_required('patrimonio.view_imovel', raise_exception=True)
 def imovel_list(request):
     status = request.GET.get('status', '')
     cidade = request.GET.get('cidade', '')
@@ -41,6 +42,7 @@ def imovel_list(request):
 
 
 @login_required
+@permission_required('patrimonio.view_imovel', raise_exception=True)
 def imovel_detail(request, pk):
     imovel = get_object_or_404(Imovel, pk=pk)
     contrato_ativo = imovel.get_contrato_ativo()
@@ -80,6 +82,7 @@ def imovel_detail(request, pk):
 
 
 @login_required
+@permission_required('patrimonio.view_pessoa', raise_exception=True)
 def pessoa_list(request):
     tipo = request.GET.get('tipo', '')
     q = request.GET.get('q', '')
@@ -100,6 +103,7 @@ def pessoa_list(request):
 
 
 @login_required
+@permission_required('patrimonio.view_contrato', raise_exception=True)
 def contrato_list(request):
     status = request.GET.get('status', '')
     imovel_id = pk_param(request.GET.get('imovel'))

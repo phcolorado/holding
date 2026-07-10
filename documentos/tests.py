@@ -1,6 +1,7 @@
 from datetime import timedelta
 
 from django.contrib.auth.models import User
+from core.test_utils import com_leitura
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, Client, override_settings
@@ -64,7 +65,7 @@ class ValidadeDocumentoTest(TestCase):
         self.assertNotIn(sem_validade.pk, pks)
 
     def test_filtro_vencendo_na_lista(self):
-        User.objects.create_user('doc_venc_user', password='pass')
+        com_leitura(User.objects.create_user('doc_venc_user', password='pass'))
         client = Client()
         client.login(username='doc_venc_user', password='pass')
 
@@ -77,7 +78,7 @@ class ValidadeDocumentoTest(TestCase):
         self.assertNotIn(distante, docs)
 
     def test_checklist_inclui_item_de_validade(self):
-        User.objects.create_user('doc_chk_user', password='pass')
+        com_leitura(User.objects.create_user('doc_chk_user', password='pass'))
         client = Client()
         client.login(username='doc_chk_user', password='pass')
 
@@ -126,7 +127,7 @@ class DownloadProtegidoTest(TestCase):
         self.assertIn('/login/', response['Location'])
 
     def test_download_autenticado_serve_arquivo(self):
-        User.objects.create_user('down_user', password='pass')
+        com_leitura(User.objects.create_user('down_user', password='pass'))
         self.client.login(username='down_user', password='pass')
         response = self.client.get(reverse('documento_download', args=[self.doc.pk]))
         self.assertEqual(response.status_code, 200)
