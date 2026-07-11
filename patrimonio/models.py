@@ -137,6 +137,16 @@ class Pessoa(models.Model):
         verbose_name = 'Pessoa'
         verbose_name_plural = 'Pessoas'
         ordering = ['nome']
+        constraints = [
+            # Unicidade garantida no BANCO (a validação em clean() não protege
+            # contra concorrência nem contra criação direta via ORM). Vazio
+            # continua permitido em qualquer quantidade — CPF/CNPJ é opcional.
+            models.UniqueConstraint(
+                fields=['cpf_cnpj_normalizado'],
+                condition=~Q(cpf_cnpj_normalizado=''),
+                name='pessoa_cpf_cnpj_normalizado_unico_quando_preenchido',
+            ),
+        ]
 
     def __str__(self):
         return self.nome
@@ -564,14 +574,46 @@ class ReajusteContrato(models.Model):
     def __str__(self):
         return f'Reajuste {self.contrato} em {self.data_reajuste:%d/%m/%Y}'
 
+    # Campos financeiros que ficam imutáveis depois da aplicação do reajuste.
+    CAMPOS_PROTEGIDOS_APOS_APLICACAO = (
+        'contrato_id', 'data_reajuste', 'indice', 'percentual_aplicado',
+        'valor_anterior', 'valor_novo', 'periodo_indice',
+    )
+
     def clean(self):
         erros = {}
         if self.valor_novo is not None and self.valor_novo <= 0:
             erros['valor_novo'] = 'O valor novo deve ser maior que zero.'
         if self.valor_anterior is not None and self.valor_anterior <= 0:
             erros['valor_anterior'] = 'O valor anterior deve ser maior que zero.'
+
+        if self.pk:
+            persistido = ReajusteContrato.objects.filter(pk=self.pk).first()
+            if persistido and persistido.aplicado_em is not None:
+                if not self.aplicado:
+                    erros['aplicado'] = (
+                        'Este reajuste já foi aplicado — não é possível desmarcá-lo. '
+                        'Para corrigir um reajuste aplicado, registre um novo reajuste.'
+                    )
+                for campo in self.CAMPOS_PROTEGIDOS_APOS_APLICACAO:
+                    if getattr(self, campo) != getattr(persistido, campo):
+                        nome = campo[:-3] if campo.endswith('_id') else campo
+                        erros[nome] = (
+                            'Este reajuste já foi aplicado — os campos financeiros são '
+                            'imutáveis. Apenas as observações podem ser alteradas.'
+                        )
         if erros:
             raise ValidationError(erros)
+
+    def save(self, *args, **kwargs):
+        # Um reajuste com aplicado_em preenchido é, por definição, aplicado —
+        # nunca pode voltar a aplicado=False (mesmo por saves diretos via ORM).
+        if self.aplicado_em is not None and not self.aplicado:
+            self.aplicado = True
+            update_fields = kwargs.get('update_fields')
+            if update_fields is not None and 'aplicado' not in update_fields:
+                kwargs['update_fields'] = list(update_fields) + ['aplicado']
+        super().save(*args, **kwargs)
 
     def aplicar(self):
         """
@@ -582,7 +624,9 @@ class ReajusteContrato(models.Model):
 
         Idempotente e atômico: se o reajuste já foi aplicado (aplicado_em
         preenchido no banco), retorna False sem reaplicar. Usa
-        select_for_update para impedir aplicação simultânea.
+        select_for_update e opera sobre os valores do REGISTRO BLOQUEADO no
+        banco (não sobre self, que pode estar desatualizado); ao final, self
+        é sincronizado com o estado persistido.
         Retorna True quando aplicou nesta chamada.
         """
         from django.db import transaction
@@ -590,24 +634,28 @@ class ReajusteContrato(models.Model):
         with transaction.atomic():
             atual = ReajusteContrato.objects.select_for_update().get(pk=self.pk)
             if atual.aplicado_em is not None:
+                # sincroniza o objeto em memória com o estado real
+                self.aplicado = True
+                self.aplicado_em = atual.aplicado_em
                 return False
 
-            contrato = Contrato.objects.select_for_update().get(pk=self.contrato_id)
-            contrato.valor_aluguel = self.valor_novo
+            contrato = Contrato.objects.select_for_update().get(pk=atual.contrato_id)
+            contrato.valor_aluguel = atual.valor_novo
             update_fields = ['valor_aluguel']
-            if self.indice != 'fixo':
-                contrato.data_proximo_reajuste = _avancar_12_meses(self.data_reajuste)
+            if atual.indice != 'fixo':
+                contrato.data_proximo_reajuste = _avancar_12_meses(atual.data_reajuste)
                 update_fields.append('data_proximo_reajuste')
             contrato.save(update_fields=update_fields)
 
             encargo_aluguel = contrato.encargos.filter(tipo='aluguel', ativo=True).first()
             if encargo_aluguel:
-                encargo_aluguel.valor = self.valor_novo
+                encargo_aluguel.valor = atual.valor_novo
                 encargo_aluguel.save(update_fields=['valor'])
 
-            self.aplicado = True
-            self.aplicado_em = timezone.now()
-            self.save(update_fields=['aplicado', 'aplicado_em'])
+            atual.aplicado = True
+            atual.aplicado_em = timezone.now()
+            atual.save(update_fields=['aplicado', 'aplicado_em'])
+        self.refresh_from_db()
         return True
 
 

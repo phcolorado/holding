@@ -2,6 +2,8 @@ from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models import DecimalField, ExpressionWrapper, F, Q, Value
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from simple_history.models import HistoricalRecords
 from patrimonio.models import Imovel, Pessoa, Contrato
@@ -11,6 +13,45 @@ MESES = [
     (5, 'Maio'), (6, 'Junho'), (7, 'Julho'), (8, 'Agosto'),
     (9, 'Setembro'), (10, 'Outubro'), (11, 'Novembro'), (12, 'Dezembro'),
 ]
+
+
+def saldo_em_aberto_expr():
+    """
+    Expressão de banco do saldo em aberto de uma receita:
+    valor_previsto + multa + juros − desconto − COALESCE(valor_recebido, 0).
+    Fonte única da regra financeira — usada pelo queryset centralizado,
+    pelos painéis e por qualquer agregação de inadimplência.
+    """
+    return ExpressionWrapper(
+        F('valor_previsto') + F('multa') + F('juros') - F('desconto')
+        - Coalesce(F('valor_recebido'), Value(Decimal('0'), output_field=DecimalField())),
+        output_field=DecimalField(max_digits=14, decimal_places=2),
+    )
+
+
+class ReceitaAluguelQuerySet(models.QuerySet):
+    """
+    Consultas centralizadas de situação financeira das receitas.
+
+    A regra oficial é o SALDO calculado no banco (não o campo status): se
+    status e saldo ficarem temporariamente divergentes, o saldo é a fonte
+    financeira. O campo status permanece para visualização/compatibilidade.
+    """
+
+    def com_saldo(self):
+        return self.annotate(saldo_calc=saldo_em_aberto_expr())
+
+    def em_aberto(self):
+        """Não canceladas com saldo estritamente maior que zero."""
+        return self.com_saldo().exclude(status='cancelado').filter(saldo_calc__gt=0)
+
+    def inadimplentes(self):
+        """Em aberto e vencidas em relação à data local atual."""
+        return self.em_aberto().filter(data_vencimento__lt=timezone.localdate())
+
+    def quitadas(self):
+        """Canceladas, ou não canceladas com saldo menor ou igual a zero."""
+        return self.com_saldo().filter(Q(status='cancelado') | Q(saldo_calc__lte=0))
 
 
 class ReceitaAluguel(models.Model):
@@ -47,6 +88,8 @@ class ReceitaAluguel(models.Model):
     criado_em = models.DateTimeField('Criado em', auto_now_add=True)
     atualizado_em = models.DateTimeField('Atualizado em', auto_now=True)
     history = HistoricalRecords()
+
+    objects = ReceitaAluguelQuerySet.as_manager()
 
     class Meta:
         verbose_name = 'Receita de Aluguel'
@@ -98,6 +141,15 @@ class ReceitaAluguel(models.Model):
         if self.contrato_id and self.imovel_id:
             if self.imovel_id != self.contrato.imovel_id:
                 raise ValidationError({'imovel': 'O imóvel deve ser o mesmo imóvel do contrato.'})
+        # Desconto não pode tornar o total devido negativo — crédito ao
+        # locatário deve ser tratado explicitamente, não por desconto excedente.
+        if self.valor_previsto is not None and self.valor_total_devido < 0:
+            raise ValidationError({
+                'desconto': (
+                    'O desconto não pode superar o valor previsto + multa + juros '
+                    f'(total devido ficaria negativo: R$ {self.valor_total_devido}).'
+                )
+            })
 
     def save(self, *args, **kwargs):
         # Garante que imovel é sempre o imóvel do contrato — nunca permite inconsistência
@@ -128,27 +180,72 @@ class ReceitaAluguel(models.Model):
             legado._eh_legado = True
             legado.save()
 
-    def recalcular_recebimentos(self):
+    def recalcular_recebimentos(self, preservar_legado=True):
         """
         Reconsolida valor_recebido/data_recebimento/status a partir dos
-        RecebimentoReceita vinculados. Chamada sempre que um recebimento é
-        criado, alterado ou excluído. Nunca mexe em receita cancelada.
+        RecebimentoReceita vinculados (fonte oficial dos pagamentos).
+        Chamada sempre que um recebimento é criado, alterado ou excluído,
+        e também quando multa/juros/desconto mudam (o saldo total muda).
+        Nunca mexe em receita cancelada.
+
+        Guarda de compatibilidade (preservar_legado=True): um valor_recebido
+        legado que ainda não foi materializado como recebimento
+        (garantir_recebimento_legado) nunca é apagado — nesse caso só o status
+        é rederivado do saldo. A exclusão do ÚLTIMO recebimento passa
+        preservar_legado=False: ali a consolidação já era derivada dos
+        recebimentos e deve refletir a exclusão (zerar).
         """
         if self.status == 'cancelado':
             return
         agregados = self.recebimentos.aggregate(
             total=models.Sum('valor'), ultima=models.Max('data_recebimento')
         )
-        total = agregados['total'] or Decimal('0.00')
-        self.valor_recebido = total if total > 0 else None
-        self.data_recebimento = agregados['ultima']
+        possui_recebimentos = agregados['total'] is not None
+        if (
+            preservar_legado
+            and not possui_recebimentos
+            and (self.valor_recebido or Decimal('0')) > 0
+        ):
+            # Valor consolidado legado sem recebimentos: preserva valor/data e
+            # apenas rederiva o status a partir do saldo e do vencimento.
+            total = self.valor_recebido
+            campos = ['status']
+        else:
+            total = agregados['total'] or Decimal('0.00')
+            self.valor_recebido = total if total > 0 else None
+            self.data_recebimento = agregados['ultima']
+            campos = ['valor_recebido', 'data_recebimento', 'status']
         if total >= self.valor_total_devido and total > 0:
             self.status = 'recebido'
         elif total > 0:
             self.status = 'parcial'
         else:
             self.status = 'atrasado' if self.data_vencimento < timezone.localdate() else 'previsto'
-        self.save(update_fields=['valor_recebido', 'data_recebimento', 'status'])
+        self.save(update_fields=campos)
+
+    def cancelar(self):
+        """
+        Cancela a receita — encerra a cobrança (saldo em aberto passa a ser 0 e
+        esta_quitada True) SEM apagar recebimentos já registrados. A mudança
+        fica no histórico (simple-history). Idempotente.
+        """
+        if self.status == 'cancelado':
+            return False
+        self.status = 'cancelado'
+        self.save(update_fields=['status'])
+        return True
+
+    def reabrir(self):
+        """
+        Reabre uma receita cancelada, recalculando o status com base no saldo,
+        no vencimento e nos recebimentos já existentes. Idempotente.
+        """
+        if self.status != 'cancelado':
+            return False
+        self.status = 'previsto'  # valor provisório — recalcular define o real
+        self.save(update_fields=['status'])
+        self.recalcular_recebimentos()
+        return True
 
     def calcular_multa_juros(self, data_recebimento=None):
         """
@@ -232,7 +329,10 @@ class RecebimentoReceita(models.Model):
     def delete(self, *args, **kwargs):
         receita = self.receita
         super().delete(*args, **kwargs)
-        receita.recalcular_recebimentos()
+        # preservar_legado=False: se este era o último recebimento, o
+        # consolidado deve zerar (a exclusão é uma decisão explícita), e não
+        # ser confundido com um valor legado não materializado.
+        receita.recalcular_recebimentos(preservar_legado=False)
 
 
 class ReceitaAluguelItem(models.Model):
@@ -355,11 +455,8 @@ class FechamentoMensal(models.Model):
 
 def receitas_inadimplentes_qs():
     """
-    Retorna QuerySet de receitas vencidas e não quitadas.
-    Usa regra de vencimento — independe do campo status.
+    QuerySet de receitas vencidas com saldo em aberto (regra centralizada de
+    saldo no banco — independe do campo status). Mantida como função por
+    compatibilidade; equivale a ReceitaAluguel.objects.inadimplentes().
     """
-    return ReceitaAluguel.objects.filter(
-        data_vencimento__lt=timezone.localdate()
-    ).exclude(
-        status__in=ReceitaAluguel.STATUS_QUITADOS
-    )
+    return ReceitaAluguel.objects.inadimplentes()

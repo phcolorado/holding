@@ -16,7 +16,10 @@ from decimal import Decimal
 from django.db import transaction
 
 from financeiro.models import ReceitaAluguel, RecebimentoReceita, Despesa
-from .models import ExtratoImportado, TransacaoExtrato, ConciliacaoReceita, RegraClassificacao
+from .models import (
+    ExtratoImportado, TransacaoExtrato, ConciliacaoReceita, ConciliacaoComissao,
+    RegraClassificacao,
+)
 
 JANELA_DIAS = 15
 TOLERANCIA = Decimal('0.05')
@@ -42,12 +45,41 @@ def _somente_digitos(valor):
     return ''.join(c for c in str(valor or '') if c.isdigit())
 
 
+# Valores de FITID considerados ausentes/inválidos (após strip/lower)
+_FITIDS_INVALIDOS = frozenset({'', 'none', 'null'})
+
+
+def _campo_ofx(bloco, tag):
+    """Valor textual de uma tag SGML/XML dentro de um bloco OFX ('' se ausente)."""
+    import re
+    m = re.search(rf'<{tag}>\s*([^<\r\n]*)', bloco, flags=re.I)
+    return m.group(1).strip() if m else ''
+
+
+def _fitid_gerado(assinatura_base, contadores):
+    """
+    Identificador determinístico para transação sem FITID:
+    gerado-<sha256(assinatura)[:32]>-<nº de ocorrência da mesma assinatura>.
+
+    A assinatura usa só os DADOS da transação (data, valor, descrição, memo,
+    tipo) — nunca a posição global no arquivo, para que a mesma transação
+    gere o MESMO id em extratos sobrepostos com ordenação diferente. O
+    contador de ocorrência distingue duas transações realmente idênticas no
+    mesmo arquivo (mantém o mesmo id quando a ordem relativa entre idênticas
+    se preserva).
+    """
+    assinatura = hashlib.sha256(assinatura_base.encode('utf-8')).hexdigest()[:32]
+    contadores[assinatura] = contadores.get(assinatura, 0) + 1
+    return f'gerado-{assinatura}-{contadores[assinatura]}'
+
+
 def _preencher_fitids_vazios(conteudo):
     """
-    Bancos às vezes exportam <FITID> vazio — o ofxparse rejeita (ou descarta)
-    essas transações. Injeta um identificador DETERMINÍSTICO no texto antes do
-    parse: hash do próprio bloco da transação (data+valor+descrição+memo) +
-    posição no arquivo — reimportações geram o mesmo id e não duplicam.
+    Bancos às vezes exportam <FITID> vazio (ou omitem a tag) — o ofxparse
+    DESCARTA silenciosamente essas transações (fail_fast=False) ou lança erro
+    (fail_fast=True), por isso o texto é corrigido ANTES do parse. Injeta um
+    identificador determinístico baseado na assinatura da transação
+    (data+valor+descrição+memo+tipo) + contador de ocorrência.
     """
     import re
 
@@ -58,29 +90,46 @@ def _preencher_fitids_vazios(conteudo):
         except UnicodeDecodeError:
             continue
 
-    if not re.search(r'<FITID>\s*(?:</FITID>)?\s*(?=<|$)', texto):
-        return conteudo
-
-    posicao = [0]
+    contadores = {}
+    alterou = [False]
 
     def substituir(m):
         bloco = m.group(0)
-        posicao[0] += 1
-        if re.search(r'<FITID>\s*(?:</FITID>)?\s*(?=<|$)', bloco):
-            gerado = 'gerado-' + hashlib.sha256(
-                f'{bloco}|{posicao[0]}'.encode('utf-8')
-            ).hexdigest()[:40]
-            bloco = re.sub(r'<FITID>\s*(?=<|$)', f'<FITID>{gerado}', bloco, count=1)
-        return bloco
+        fitid_atual = _campo_ofx(bloco, 'FITID')
+        if fitid_atual.lower() not in _FITIDS_INVALIDOS:
+            return bloco
+        assinatura_base = '|'.join((
+            _campo_ofx(bloco, 'DTPOSTED'),
+            _campo_ofx(bloco, 'TRNAMT'),
+            _campo_ofx(bloco, 'NAME') or _campo_ofx(bloco, 'PAYEE'),
+            _campo_ofx(bloco, 'MEMO'),
+            _campo_ofx(bloco, 'TRNTYPE'),
+        ))
+        gerado = _fitid_gerado(assinatura_base, contadores)
+        alterou[0] = True
+        if re.search(r'<FITID>', bloco, flags=re.I):
+            return re.sub(r'<FITID>\s*(?=<|$)', f'<FITID>{gerado}', bloco, count=1, flags=re.I)
+        # tag totalmente ausente — injeta logo após a abertura do bloco
+        return bloco.replace('<STMTTRN>', f'<STMTTRN>\n<FITID>{gerado}', 1)
 
-    texto = re.sub(r'<STMTTRN>.*?</STMTTRN>', substituir, texto, flags=re.S)
+    texto = re.sub(r'<STMTTRN>.*?</STMTTRN>', substituir, texto, flags=re.S | re.I)
+    if not alterou[0]:
+        return conteudo
     return texto.encode(codec)
 
 
 def _validar_conta_ofx(contas_ofx, conta):
     """
-    Rejeita arquivos com múltiplas contas e, quando a ContaBancaria tem
-    bank_id/numero_conta preenchidos, confere com o BANKID/ACCTID do OFX.
+    Rejeita arquivos com múltiplas contas e confere o arquivo com a
+    ContaBancaria cadastrada:
+    - cadastro tem numero_conta e o OFX não traz ACCTID → erro;
+    - cadastro tem bank_id e o OFX não traz BANKID → erro;
+    - valores presentes dos dois lados e diferentes → erro;
+    - campo não preenchido no cadastro → não é exigido/comparado.
+
+    A comparação usa somente os dígitos (remove pontuação/hífen do DV), mas
+    NUNCA converte para inteiro — zeros à esquerda são significativos e devem
+    coincidir com o OFX.
     """
     if len(contas_ofx) > 1:
         raise OFXInvalidoError(
@@ -92,17 +141,32 @@ def _validar_conta_ofx(contas_ofx, conta):
     bankid = _somente_digitos(getattr(conta_ofx, 'routing_number', '') or getattr(conta_ofx, 'bank_id', ''))
 
     numero_cadastrado = _somente_digitos(conta.numero_conta)
-    if numero_cadastrado and acctid and numero_cadastrado != acctid:
-        raise OFXInvalidoError(
-            f'A conta do arquivo OFX ({acctid}) não corresponde à conta cadastrada '
-            f'"{conta.nome}" ({numero_cadastrado}). Selecione a conta correta.'
-        )
+    if numero_cadastrado:
+        if not acctid:
+            raise OFXInvalidoError(
+                f'O arquivo OFX não informa o número da conta (ACCTID), mas a conta '
+                f'cadastrada "{conta.nome}" exige conferência ({conta.numero_conta}). '
+                'Confirme se o arquivo é da conta correta ou limpe o número no cadastro '
+                'para importar sem conferência.'
+            )
+        if numero_cadastrado != acctid:
+            raise OFXInvalidoError(
+                f'A conta do arquivo OFX ({acctid}) não corresponde à conta cadastrada '
+                f'"{conta.nome}" ({numero_cadastrado}). Selecione a conta correta.'
+            )
     bank_cadastrado = _somente_digitos(conta.bank_id)
-    if bank_cadastrado and bankid and bank_cadastrado != bankid:
-        raise OFXInvalidoError(
-            f'O banco do arquivo OFX (código {bankid}) não corresponde ao banco da conta '
-            f'"{conta.nome}" (código {bank_cadastrado}).'
-        )
+    if bank_cadastrado:
+        if not bankid:
+            raise OFXInvalidoError(
+                f'O arquivo OFX não informa o código do banco (BANKID), mas a conta '
+                f'cadastrada "{conta.nome}" exige conferência (código {conta.bank_id}). '
+                'Confirme o arquivo ou limpe o código do banco no cadastro.'
+            )
+        if bank_cadastrado != bankid:
+            raise OFXInvalidoError(
+                f'O banco do arquivo OFX (código {bankid}) não corresponde ao banco da conta '
+                f'"{conta.nome}" (código {bank_cadastrado}).'
+            )
 
 
 @transaction.atomic
@@ -150,11 +214,23 @@ def importar_ofx(arquivo, conta, usuario=None):
     novas = 0
     duplicadas = 0
     datas = []
+    contadores_fallback = {}
 
     for t in contas_ofx[0].statement.transactions:
         data = t.date.date() if hasattr(t.date, 'date') else t.date
         valor = Decimal(str(t.amount))
-        fitid = str(t.id).strip()
+        descricao = (t.payee or t.memo or '').strip()
+        # Fallback obrigatório pós-parse: se mesmo após o pré-processamento o
+        # FITID vier ausente (None/''/'None'/'null'), gera o identificador
+        # determinístico pela assinatura da transação (inclui a conta).
+        fitid_original = t.id
+        fitid = '' if fitid_original is None else str(fitid_original).strip()
+        if fitid.lower() in _FITIDS_INVALIDOS:
+            assinatura_base = '|'.join((
+                str(conta.pk), str(data), str(valor), descricao,
+                (t.memo or '').strip(), str(getattr(t, 'type', '') or ''),
+            ))
+            fitid = _fitid_gerado(assinatura_base, contadores_fallback)
         if TransacaoExtrato.objects.filter(conta=conta, fitid=fitid).exists():
             duplicadas += 1
             continue
@@ -184,15 +260,15 @@ def receitas_candidatas(transacao):
     """Receitas com saldo em aberto e vencimento na janela de ±JANELA_DIAS da transação."""
     inicio = transacao.data - timedelta(days=JANELA_DIAS)
     fim = transacao.data + timedelta(days=JANELA_DIAS)
-    receitas = (
-        ReceitaAluguel.objects
-        .exclude(status__in=ReceitaAluguel.STATUS_QUITADOS)
+    # Regra centralizada em ReceitaAluguel.objects.em_aberto(): não canceladas
+    # com saldo calculado no banco maior que zero — independe do campo status.
+    return list(
+        ReceitaAluguel.objects.em_aberto()
         .filter(data_vencimento__gte=inicio, data_vencimento__lte=fim)
         .select_related('imovel', 'contrato')
         .prefetch_related('contrato__partes__pessoa')
         .order_by('data_vencimento', 'imovel__nome')
     )
-    return [r for r in receitas if r.saldo_em_aberto > 0]
 
 
 def _comissoes_em_aberto(receitas):
@@ -271,7 +347,8 @@ def _validar_conciliacao(transacao, receitas):
     inicio = transacao.data - timedelta(days=JANELA_DIAS)
     fim = transacao.data + timedelta(days=JANELA_DIAS)
     for r in receitas:
-        if r.status in ReceitaAluguel.STATUS_QUITADOS or r.saldo_em_aberto <= 0:
+        # saldo_em_aberto já é 0 para canceladas — regra de saldo, não de status
+        if r.saldo_em_aberto <= 0:
             raise ConciliacaoInvalidaError(f'A receita de {r.imovel.nome} não tem mais saldo em aberto.')
         if not (inicio <= r.data_vencimento <= fim):
             raise ConciliacaoInvalidaError(
@@ -302,13 +379,49 @@ def conciliar_com_receitas(transacao, receitas, marcar_comissoes=False, usuario=
 
     if marcar_comissoes:
         # Repasse líquido: inquilinos pagaram o bruto; a imobiliária reteve as
-        # comissões. Exige correspondência exata: crédito = soma(saldos) − comissões.
+        # comissões. Regras estritas:
+        # 1) todas as receitas devem ser da MESMA imobiliária principal (mesmo
+        #    que a soma matemática coincidisse com outra combinação);
+        # 2) receita sem imobiliária não participa de repasse líquido;
+        # 3) só comissões automáticas, em aberto, vinculadas a cada receita;
+        # 4) comissão >= saldo da própria receita é rejeitada (líquido <= 0);
+        # 5) crédito = soma(saldos brutos) − soma(comissões), exato.
+        imobiliarias = set()
+        for r in receitas:
+            imobiliaria = r.contrato.get_imobiliaria_principal() if r.contrato_id else None
+            if imobiliaria is None:
+                raise ConciliacaoInvalidaError(
+                    f'Repasse líquido indisponível: a receita de {r.imovel.nome} não tem '
+                    'imobiliária vinculada ao contrato.'
+                )
+            imobiliarias.add(imobiliaria.pk)
+        if len(imobiliarias) > 1:
+            raise ConciliacaoInvalidaError(
+                'Repasse líquido indisponível: as receitas selecionadas pertencem a '
+                'imobiliárias diferentes — um repasse é sempre de uma única imobiliária.'
+            )
+
         comissoes = list(_comissoes_em_aberto(receitas).select_for_update())
         if not comissoes:
             raise ConciliacaoInvalidaError(
                 'Repasse líquido indisponível: não há despesas de comissão em aberto '
                 'vinculadas às receitas selecionadas.'
             )
+
+        comissao_por_receita_chk = {}
+        for c in comissoes:
+            comissao_por_receita_chk[c.receita_id] = (
+                comissao_por_receita_chk.get(c.receita_id, Decimal('0')) + c.valor
+            )
+        for r in receitas:
+            comissao_r = comissao_por_receita_chk.get(r.pk, Decimal('0'))
+            if comissao_r >= r.saldo_em_aberto:
+                raise ConciliacaoInvalidaError(
+                    f'A comissão vinculada à receita de {r.imovel.nome} (R$ {comissao_r}) é '
+                    f'maior ou igual ao saldo em aberto (R$ {r.saldo_em_aberto}) — o valor '
+                    'líquido seria zero ou negativo. Revise a despesa de comissão.'
+                )
+
         total_bruto = sum((r.saldo_em_aberto for r in receitas), Decimal('0.00'))
         total_comissoes = sum((c.valor for c in comissoes), Decimal('0.00'))
         esperado = total_bruto - total_comissoes
@@ -363,6 +476,10 @@ def conciliar_com_receitas(transacao, receitas, marcar_comissoes=False, usuario=
             comissao.status = 'paga'
             comissao.data_pagamento = transacao.data
             comissao.save(update_fields=['status', 'data_pagamento'])
+            # Vínculo explícito: ao desfazer, SOMENTE estas despesas reabrem.
+            ConciliacaoComissao.objects.create(
+                transacao=transacao, despesa=comissao, valor=comissao.valor,
+            )
         transacao.comissoes_marcadas = True
 
     transacao.status = 'conciliada'
@@ -387,16 +504,39 @@ def desfazer_conciliacao(transacao):
             'receitas. Para débitos, exclua a despesa vinculada pelo Admin.'
         )
 
-    receitas_ids = list(transacao.itens_receita.values_list('receita_id', flat=True))
-
     if transacao.comissoes_marcadas:
-        Despesa.objects.filter(
-            receita_id__in=receitas_ids,
-            origem_automatica=True,
-            categoria='comissao_imobiliaria',
-            status='paga',
-            data_pagamento=transacao.data,
-        ).update(status='prevista', data_pagamento=None)
+        # Reabre EXCLUSIVAMENTE as comissões vinculadas por ConciliacaoComissao
+        # a esta transação — nunca por heurística de receita/categoria/data, que
+        # poderia reabrir uma comissão paga manualmente no mesmo dia.
+        vinculos = list(transacao.itens_comissao.select_related('despesa').select_for_update())
+        if vinculos:
+            for vinculo in vinculos:
+                despesa = vinculo.despesa
+                despesa.status = 'prevista'
+                despesa.data_pagamento = None
+                despesa.save(update_fields=['status', 'data_pagamento'])
+            transacao.itens_comissao.all().delete()
+        else:
+            # Conciliação antiga, anterior ao vínculo explícito: não é possível
+            # identificar com segurança quais comissões ELA pagou — exige revisão
+            # manual (não inventamos vínculos). Se as comissões suspeitas já
+            # foram reabertas manualmente, o desfazer prossegue sem tocar nelas.
+            receitas_ids_chk = list(transacao.itens_receita.values_list('receita_id', flat=True))
+            suspeitas = Despesa.objects.filter(
+                receita_id__in=receitas_ids_chk,
+                origem_automatica=True,
+                categoria='comissao_imobiliaria',
+                status='paga',
+                data_pagamento=transacao.data,
+            )
+            if suspeitas.exists():
+                raise ConciliacaoInvalidaError(
+                    'Esta conciliação (feita antes do vínculo explícito de comissões) marcou '
+                    'comissões como pagas, e não é possível identificar com segurança quais '
+                    'foram. Revisão manual necessária: reabra no Admin de Despesas as comissões '
+                    'que pertencem a este repasse (status "Prevista", sem data de pagamento) e '
+                    'então desfaça a conciliação novamente.'
+                )
 
     # delete() individual para disparar o recálculo consolidado de cada receita
     for recebimento in list(RecebimentoReceita.objects.filter(transacao_extrato=transacao)):

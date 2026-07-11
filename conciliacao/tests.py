@@ -675,3 +675,293 @@ class ImportarOFXContasTest(TestCase):
         )
         self.assertEqual(extrato2.transacoes_novas, 1)
         self.assertEqual(TransacaoExtrato.objects.filter(fitid='t1').count(), 2)
+
+
+# ─── Repasse líquido rigoroso e vínculo explícito de comissões (rodada 2) ──────
+
+@override_settings(MEDIA_ROOT=MEDIA_TEMP)
+class RepasseLiquidoRigorosoTest(TestCase):
+    def setUp(self):
+        self.conta = ContaBancaria.objects.create(nome='Conta RL')
+        self.extrato = ExtratoImportado.objects.create(conta=self.conta, hash_arquivo='hrl')
+        _, self.locatario = _base()
+
+    def _tx(self, valor, fitid):
+        return TransacaoExtrato.objects.create(
+            extrato=self.extrato, conta=self.conta, fitid=fitid,
+            data=date(2026, 3, 12), valor=Decimal(valor), tipo='credito', descricao='REPASSE',
+        )
+
+    def _contrato_com_imob(self, nome, imob, aluguel='2000.00', pct='10.00'):
+        from financeiro.services import gerar_receitas_para_contrato
+        c = _contrato(
+            Imovel.objects.create(nome=nome, endereco='X', cidade='BH', estado='MG'),
+            self.locatario, valor_aluguel=Decimal(aluguel), imobiliaria=imob,
+            comissao_imobiliaria_percentual=Decimal(pct) if pct else None,
+            data_inicio=date(2026, 1, 1), data_fim=date(2026, 12, 31),
+        )
+        gerar_receitas_para_contrato(c, data_inicio=date(2026, 3, 1), data_fim=date(2026, 3, 31))
+        receita = ReceitaAluguel.objects.get(contrato=c)
+        comissao = Despesa.objects.filter(contrato=c, origem_automatica=True).first()
+        return c, receita, comissao
+
+    def test_receitas_da_mesma_imobiliaria_aceitas(self):
+        from .models import ConciliacaoComissao
+        imob = Pessoa.objects.create(nome='Imob Única', tipo='imobiliaria')
+        _, r1, c1 = self._contrato_com_imob('Sala RL1', imob)
+        _, r2, c2 = self._contrato_com_imob('Sala RL2', imob)
+        tx = self._tx('3600.00', 'rl-ok')  # 2×(2000 − 200)
+        conciliar_com_receitas(tx, [r1, r2], marcar_comissoes=True)
+        r1.refresh_from_db(); r2.refresh_from_db(); c1.refresh_from_db(); c2.refresh_from_db()
+        self.assertEqual(r1.status, 'recebido')
+        self.assertEqual(r2.status, 'recebido')
+        self.assertEqual(c1.status, 'paga')
+        self.assertEqual(c2.status, 'paga')
+        # vínculo explícito criado para cada comissão marcada
+        vinculos = ConciliacaoComissao.objects.filter(transacao=tx)
+        self.assertEqual(vinculos.count(), 2)
+        self.assertEqual(
+            sorted(v.despesa_id for v in vinculos), sorted([c1.pk, c2.pk])
+        )
+
+    def test_imobiliarias_diferentes_rejeitadas_mesmo_com_soma_correta(self):
+        from .services import ConciliacaoInvalidaError
+        imob_a = Pessoa.objects.create(nome='Imob A', tipo='imobiliaria')
+        imob_b = Pessoa.objects.create(nome='Imob B', tipo='imobiliaria')
+        _, r1, _ = self._contrato_com_imob('Sala RA', imob_a)
+        _, r2, _ = self._contrato_com_imob('Sala RB', imob_b)
+        tx = self._tx('3600.00', 'rl-mix')  # soma bate, mas imobiliárias diferem
+        with self.assertRaises(ConciliacaoInvalidaError) as ctx:
+            conciliar_com_receitas(tx, [r1, r2], marcar_comissoes=True)
+        self.assertIn('imobiliárias diferentes', str(ctx.exception))
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'pendente')
+
+    def test_receita_sem_imobiliaria_rejeitada_no_liquido(self):
+        from .services import ConciliacaoInvalidaError
+        _, receita, _ = self._contrato_com_imob('Sala SI', None, pct=None)
+        tx = self._tx('2000.00', 'rl-semimob')
+        with self.assertRaises(ConciliacaoInvalidaError) as ctx:
+            conciliar_com_receitas(tx, [receita], marcar_comissoes=True)
+        self.assertIn('não tem imobiliária', str(ctx.exception))
+
+    def test_comissao_maior_ou_igual_ao_saldo_rejeitada(self):
+        from .services import ConciliacaoInvalidaError
+        imob = Pessoa.objects.create(nome='Imob C100', tipo='imobiliaria')
+        _, receita, comissao = self._contrato_com_imob('Sala C100', imob)
+        Despesa.objects.filter(pk=comissao.pk).update(valor=Decimal('2000.00'))
+        tx = self._tx('1.00', 'rl-c100')
+        with self.assertRaises(ConciliacaoInvalidaError) as ctx:
+            conciliar_com_receitas(tx, [receita], marcar_comissoes=True)
+        self.assertIn('maior ou igual ao saldo', str(ctx.exception))
+
+    def test_comissao_manual_nao_vinculada_nao_e_usada(self):
+        from .services import ConciliacaoInvalidaError
+        imob = Pessoa.objects.create(nome='Imob Manual', tipo='imobiliaria')
+        _, receita, _ = self._contrato_com_imob('Sala Man', imob, pct=None)
+        # comissão manual (origem_automatica=False) vinculada à receita: ignorada
+        Despesa.objects.create(
+            imovel=receita.imovel, receita=receita, categoria='comissao_imobiliaria',
+            descricao='Comissão manual', data_vencimento=date(2026, 3, 12),
+            valor=Decimal('200.00'), status='prevista', origem_automatica=False,
+        )
+        tx = self._tx('1800.00', 'rl-man')
+        with self.assertRaises(ConciliacaoInvalidaError) as ctx:
+            conciliar_com_receitas(tx, [receita], marcar_comissoes=True)
+        self.assertIn('não há despesas de comissão em aberto', str(ctx.exception))
+
+    def test_desfazer_reabre_somente_comissoes_vinculadas(self):
+        from .services import desfazer_conciliacao
+        imob = Pessoa.objects.create(nome='Imob DV', tipo='imobiliaria')
+        _, receita, comissao = self._contrato_com_imob('Sala DV', imob)
+        # outra comissão da MESMA receita, paga MANUALMENTE na mesma data da
+        # transação — a heurística antiga (receita+categoria+status+data) a
+        # reabriria por engano; o vínculo explícito não a toca.
+        paga_manual = Despesa.objects.create(
+            imovel=receita.imovel, receita=receita, contrato=receita.contrato,
+            categoria='comissao_imobiliaria', descricao='Comissão avulsa paga à parte',
+            data_vencimento=date(2026, 3, 12), data_pagamento=date(2026, 3, 12),
+            valor=Decimal('50.00'), status='paga', origem_automatica=True,
+        )
+        tx = self._tx('1800.00', 'rl-dv')
+        conciliar_com_receitas(tx, [receita], marcar_comissoes=True)
+        desfazer_conciliacao(tx)
+        comissao.refresh_from_db(); paga_manual.refresh_from_db(); tx.refresh_from_db()
+        self.assertEqual(comissao.status, 'prevista')
+        self.assertIsNone(comissao.data_pagamento)
+        # a comissão paga manualmente na mesma data permanece intocada
+        self.assertEqual(paga_manual.status, 'paga')
+        self.assertEqual(paga_manual.data_pagamento, date(2026, 3, 12))
+        self.assertEqual(tx.itens_comissao.count(), 0)
+        self.assertEqual(tx.status, 'pendente')
+
+    def test_desfazer_conciliacao_antiga_sem_vinculo_exige_revisao_manual(self):
+        from .models import ConciliacaoReceita
+        from .services import ConciliacaoInvalidaError, desfazer_conciliacao
+        from financeiro.models import RecebimentoReceita
+        imob = Pessoa.objects.create(nome='Imob Legada', tipo='imobiliaria')
+        _, receita, comissao = self._contrato_com_imob('Sala Leg', imob)
+        # simula conciliação ANTIGA: sem ConciliacaoComissao
+        tx = self._tx('1800.00', 'rl-leg')
+        ConciliacaoReceita.objects.create(transacao=tx, receita=receita, valor_atribuido=Decimal('1800.00'))
+        RecebimentoReceita.objects.create(
+            receita=receita, data_recebimento=tx.data, valor=Decimal('2000.00'),
+            transacao_extrato=tx, origem='conciliacao',
+        )
+        Despesa.objects.filter(pk=comissao.pk).update(status='paga', data_pagamento=tx.data)
+        tx.comissoes_marcadas = True
+        tx.status = 'conciliada'
+        tx.save()
+
+        with self.assertRaises(ConciliacaoInvalidaError) as ctx:
+            desfazer_conciliacao(tx)
+        self.assertIn('Revisão manual', str(ctx.exception))
+
+        # após reabrir manualmente a comissão, o desfazer prossegue
+        Despesa.objects.filter(pk=comissao.pk).update(status='prevista', data_pagamento=None)
+        desfazer_conciliacao(tx)
+        tx.refresh_from_db(); receita.refresh_from_db()
+        self.assertEqual(tx.status, 'pendente')
+        self.assertEqual(receita.recebimentos.count(), 0)
+
+
+# ─── FITID por assinatura + conferência rigorosa da conta (rodada 2) ──────────
+
+def _ofx_conta_bruta(corpo_transacoes, bankid='0341', acctid='12345-6', nome='bruto.ofx'):
+    """Como _ofx_conta, mas recebe o bloco <STMTTRN> pronto (para casos sem FITID)."""
+    conteudo = f"""OFXHEADER:100
+DATA:OFXSGML
+VERSION:102
+SECURITY:NONE
+ENCODING:USASCII
+CHARSET:1252
+COMPRESSION:NONE
+OLDFILEUID:NONE
+NEWFILEUID:NONE
+
+<OFX>
+<SIGNONMSGSRSV1><SONRS><STATUS><CODE>0<SEVERITY>INFO</STATUS>
+<DTSERVER>20260101<LANGUAGE>POR</SONRS></SIGNONMSGSRSV1>
+<BANKMSGSRSV1><STMTTRNRS><TRNUID>1
+<STATUS><CODE>0<SEVERITY>INFO</STATUS>
+<STMTRS><CURDEF>BRL
+<BANKACCTFROM><BANKID>{bankid}<ACCTID>{acctid}<ACCTTYPE>CHECKING</BANKACCTFROM>
+<BANKTRANLIST><DTSTART>20260101<DTEND>20261231
+{corpo_transacoes}
+</BANKTRANLIST>
+<LEDGERBAL><BALAMT>0.00<DTASOF>20261231</LEDGERBAL>
+</STMTRS></STMTTRNRS></BANKMSGSRSV1>
+</OFX>
+"""
+    return SimpleUploadedFile(nome, conteudo.encode('cp1252'))
+
+
+@override_settings(MEDIA_ROOT=MEDIA_TEMP)
+class FitidAssinaturaTest(TestCase):
+    def setUp(self):
+        self.conta = ContaBancaria.objects.create(nome='Conta FA')
+
+    def test_fitid_none_apos_parse_ganha_fallback_deterministico(self):
+        """t.id None (parser não achou FITID) → fallback pós-parse por assinatura."""
+        from datetime import datetime
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        def _fake_ofx():
+            t = SimpleNamespace(
+                id=None, date=datetime(2026, 3, 10), amount='150.00',
+                payee='PIX SEM ID', memo='PIX SEM ID', type='credit',
+            )
+            acct = SimpleNamespace(
+                statement=SimpleNamespace(transactions=[t]),
+                account_id='', routing_number='', number='', bank_id='',
+            )
+            return SimpleNamespace(accounts=[acct], account=acct)
+
+        with patch('ofxparse.OfxParser.parse', return_value=_fake_ofx()):
+            e1 = importar_ofx(SimpleUploadedFile('f1.ofx', b'conteudo-1'), self.conta)
+            self.assertEqual(e1.transacoes_novas, 1)
+            tx = e1.transacoes.get()
+            self.assertTrue(tx.fitid.startswith('gerado-'))
+            # mesma transação em outro arquivo → mesmo id → duplicada
+            e2 = importar_ofx(SimpleUploadedFile('f2.ofx', b'conteudo-2'), self.conta)
+            self.assertEqual(e2.transacoes_novas, 0)
+            self.assertEqual(e2.transacoes_duplicadas, 1)
+
+    def test_fitid_tag_ausente_no_arquivo(self):
+        corpo = '<STMTTRN><TRNTYPE>CREDIT<DTPOSTED>20260310<TRNAMT>150.00<MEMO>SEM TAG</STMTTRN>'
+        extrato = importar_ofx(_ofx_conta_bruta(corpo, nome='semtag.ofx'), self.conta)
+        self.assertEqual(extrato.transacoes_novas, 1)
+        self.assertTrue(extrato.transacoes.get().fitid.startswith('gerado-'))
+
+    def test_mesma_transacao_em_posicao_diferente_gera_mesmo_id(self):
+        """Extratos sobrepostos com a transação sem FITID em outra posição não duplicam."""
+        e1 = importar_ofx(_ofx_conta([
+            ('', '20260310', '150.00', 'SEM FITID'),
+            ('t9', '20260311', '10.00', 'OUTRA'),
+        ], nome='pos1.ofx'), self.conta)
+        self.assertEqual(e1.transacoes_novas, 2)
+
+        # no segundo arquivo a transação sem FITID vem DEPOIS de t9 e de uma nova
+        e2 = importar_ofx(_ofx_conta([
+            ('t9', '20260311', '10.00', 'OUTRA'),
+            ('t10', '20260312', '20.00', 'NOVA'),
+            ('', '20260310', '150.00', 'SEM FITID'),
+        ], nome='pos2.ofx'), self.conta)
+        self.assertEqual(e2.transacoes_duplicadas, 2)  # t9 + a sem FITID
+        self.assertEqual(e2.transacoes_novas, 1)       # só t10
+
+    def test_duas_transacoes_identicas_no_mesmo_arquivo_sao_distintas(self):
+        extrato = importar_ofx(_ofx_conta([
+            ('', '20260310', '150.00', 'DUPLA'),
+            ('', '20260310', '150.00', 'DUPLA'),
+        ], nome='dupla.ofx'), self.conta)
+        self.assertEqual(extrato.transacoes_novas, 2)
+        fitids = sorted(extrato.transacoes.values_list('fitid', flat=True))
+        self.assertNotEqual(fitids[0], fitids[1])
+        self.assertTrue(fitids[0].endswith('-1'))
+        self.assertTrue(fitids[1].endswith('-2'))
+
+    def test_mesma_assinatura_em_contas_diferentes_permitida(self):
+        conta2 = ContaBancaria.objects.create(nome='Conta FA2')
+        e1 = importar_ofx(
+            _ofx_conta([('', '20260310', '150.00', 'IGUAL')], nome='ca.ofx'), self.conta
+        )
+        e2 = importar_ofx(
+            _ofx_conta([('', '20260310', '150.00', 'IGUAL')], acctid='22222-2', nome='cb.ofx'), conta2
+        )
+        self.assertEqual(e1.transacoes_novas, 1)
+        self.assertEqual(e2.transacoes_novas, 1)
+
+
+@override_settings(MEDIA_ROOT=MEDIA_TEMP)
+class ContaOFXRigorosaTest(TestCase):
+    def test_cadastro_com_numero_e_ofx_sem_acctid_rejeitado(self):
+        conta = ContaBancaria.objects.create(nome='Exigente', numero_conta='12345-6')
+        with self.assertRaises(OFXInvalidoError) as ctx:
+            importar_ofx(_ofx_conta([('t1', '20260310', '100.00', 'PIX')], acctid='', nome='sa.ofx'), conta)
+        self.assertIn('ACCTID', str(ctx.exception))
+
+    def test_cadastro_com_bank_id_e_ofx_sem_bankid_rejeitado(self):
+        conta = ContaBancaria.objects.create(nome='Exigente B', bank_id='0341')
+        with self.assertRaises(OFXInvalidoError) as ctx:
+            importar_ofx(_ofx_conta([('t1', '20260310', '100.00', 'PIX')], bankid='', nome='sb.ofx'), conta)
+        self.assertIn('BANKID', str(ctx.exception))
+
+    def test_zeros_a_esquerda_sao_significativos(self):
+        # '0341' ≠ '341': dígitos comparados como texto, nunca como inteiro
+        conta = ContaBancaria.objects.create(nome='Zeros', bank_id='0341')
+        with self.assertRaises(OFXInvalidoError):
+            importar_ofx(_ofx_conta([('t1', '20260310', '100.00', 'PIX')], bankid='341', nome='z1.ofx'), conta)
+        # coincidência exata (com zeros) é aceita
+        extrato = importar_ofx(
+            _ofx_conta([('t2', '20260310', '100.00', 'PIX')], bankid='0341', nome='z2.ofx'), conta
+        )
+        self.assertEqual(extrato.transacoes_novas, 1)
+
+    def test_cadastro_sem_numero_nao_exige_acctid(self):
+        conta = ContaBancaria.objects.create(nome='Livre')
+        extrato = importar_ofx(
+            _ofx_conta([('t1', '20260310', '100.00', 'PIX')], acctid='', nome='livre.ofx'), conta
+        )
+        self.assertEqual(extrato.transacoes_novas, 1)

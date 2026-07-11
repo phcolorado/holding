@@ -6,12 +6,13 @@ from core.test_utils import com_leitura
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError
-from django.test import TestCase, Client
+from django.test import TestCase, TransactionTestCase, Client
 from django.urls import reverse
 from django.utils import timezone
 
 from .models import (
     Imovel, Pessoa, Contrato, ContratoParte, EncargoContrato, ReajusteContrato,
+    Manutencao,
 )
 
 
@@ -1376,3 +1377,227 @@ class YieldLocaticioTest(TestCase):
         self.assertEqual(ind['receita_locaticia_12m'], Decimal('2000.00'))  # só aluguel
         # 2000 / 240000 * 100 = 0.83 — IPTU repassado não infla o yield
         self.assertEqual(ind['yield_bruto'], Decimal('0.83'))
+
+
+# ─── Rodada 2: reajuste aplicado é imutável ────────────────────────────────────
+
+class ReajusteProtegidoTest(TestCase):
+    def setUp(self):
+        self.imovel = _criar_imovel('Imóvel Protegido')
+        self.locatario = _criar_pessoa('Locatário P')
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, date(2024, 1, 1), date(2026, 12, 31),
+            valor_aluguel=Decimal('2000.00'), indice_reajuste='ipca',
+        )
+        self.reajuste = ReajusteContrato.objects.create(
+            contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'), aplicado=False,
+        )
+
+    def test_nao_e_possivel_desmarcar_reajuste_aplicado(self):
+        self.reajuste.aplicar()
+        self.reajuste.aplicado = False
+        with self.assertRaises(ValidationError):
+            self.reajuste.full_clean()
+        # mesmo um save direto via ORM força aplicado=True
+        self.reajuste.aplicado = False
+        self.reajuste.save()
+        self.reajuste.refresh_from_db()
+        self.assertTrue(self.reajuste.aplicado)
+
+    def test_campos_financeiros_imutaveis_apos_aplicacao(self):
+        self.reajuste.aplicar()
+        self.reajuste.refresh_from_db()
+        self.reajuste.valor_novo = Decimal('9999.00')
+        with self.assertRaises(ValidationError) as ctx:
+            self.reajuste.full_clean()
+        self.assertIn('valor_novo', ctx.exception.message_dict)
+
+    def test_observacoes_continuam_editaveis_apos_aplicacao(self):
+        self.reajuste.aplicar()
+        self.reajuste.refresh_from_db()
+        self.reajuste.observacoes = 'nota posterior'
+        self.reajuste.full_clean()  # não deve levantar
+        self.reajuste.save()
+        self.reajuste.refresh_from_db()
+        self.assertEqual(self.reajuste.observacoes, 'nota posterior')
+
+    def test_aplicar_usa_valores_do_registro_bloqueado_no_banco(self):
+        # altera o objeto EM MEMÓRIA sem salvar — aplicar() deve ignorar e usar o banco
+        self.reajuste.valor_novo = Decimal('9999.00')
+        aplicou = self.reajuste.aplicar()
+        self.assertTrue(aplicou)
+        self.contrato.refresh_from_db()
+        self.assertEqual(self.contrato.valor_aluguel, Decimal('2150.00'))
+        # objeto em memória foi sincronizado com o estado persistido
+        self.assertTrue(self.reajuste.aplicado)
+        self.assertIsNotNone(self.reajuste.aplicado_em)
+        self.assertEqual(self.reajuste.valor_novo, Decimal('2150.00'))
+
+    def test_chamada_repetida_nao_reaplica(self):
+        self.assertTrue(self.reajuste.aplicar())
+        primeiro_aplicado_em = ReajusteContrato.objects.get(pk=self.reajuste.pk).aplicado_em
+        self.contrato.refresh_from_db()
+        proximo = self.contrato.data_proximo_reajuste
+        self.assertFalse(self.reajuste.aplicar())
+        self.contrato.refresh_from_db()
+        self.assertEqual(self.contrato.valor_aluguel, Decimal('2150.00'))
+        self.assertEqual(self.contrato.data_proximo_reajuste, proximo)
+        self.assertEqual(
+            ReajusteContrato.objects.get(pk=self.reajuste.pk).aplicado_em, primeiro_aplicado_em
+        )
+
+    def test_pendencia_e_definida_por_aplicado_em(self):
+        # flag aplicado=True marcada manualmente sem aplicar (dado antigo):
+        # continua PENDENTE pela regra oficial (aplicado_em IS NULL)
+        avulso = ReajusteContrato.objects.create(
+            contrato=self.contrato, data_reajuste=date(2025, 6, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2100.00'), aplicado=True,
+        )
+        pendentes = self.contrato.reajustes.filter(aplicado_em__isnull=True)
+        self.assertIn(avulso, pendentes)
+        self.assertIn(self.reajuste, pendentes)
+
+
+# ─── Rodada 2: unicidade de CPF/CNPJ no banco ─────────────────────────────────
+
+class CpfCnpjUnicidadeTest(TestCase):
+    def test_duplicado_via_objects_create_bloqueado_pelo_banco(self):
+        from django.db import transaction
+        Pessoa.objects.create(nome='Titular', cpf_cnpj='123.456.789-09')
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                # objects.create não passa por clean() — a constraint pega
+                Pessoa.objects.create(nome='Cópia', cpf_cnpj='12345678909')
+
+    def test_clean_detecta_cpf_com_formatacao_diferente(self):
+        Pessoa.objects.create(nome='Titular', cpf_cnpj='123.456.789-09')
+        duplicada = Pessoa(nome='Cópia', cpf_cnpj='12345678909')
+        with self.assertRaises(ValidationError):
+            duplicada.full_clean()
+
+    def test_clean_detecta_cnpj_com_formatacao_diferente(self):
+        Pessoa.objects.create(nome='Empresa', cpf_cnpj='12.345.678/0001-95')
+        duplicada = Pessoa(nome='Empresa 2', cpf_cnpj='12345678000195')
+        with self.assertRaises(ValidationError):
+            duplicada.full_clean()
+
+    def test_cpf_vazio_repetido_permitido(self):
+        Pessoa.objects.create(nome='Sem Doc 1')
+        Pessoa.objects.create(nome='Sem Doc 2')
+        self.assertEqual(Pessoa.objects.filter(cpf_cnpj_normalizado='').count(), 2)
+
+    def test_atualizacao_da_propria_pessoa_sem_falso_positivo(self):
+        pessoa = Pessoa.objects.create(nome='Titular', cpf_cnpj='123.456.789-09')
+        pessoa.nome = 'Titular Renomeado'
+        pessoa.full_clean()  # não deve levantar
+        pessoa.save()
+
+
+class CpfCnpjMigrationCheckTest(TransactionTestCase):
+    """
+    Testa a checagem de duplicidade da migration 0009 num banco "antigo"
+    (sem a constraint). Usa TransactionTestCase porque o schema editor do
+    SQLite não pode rodar dentro da transação do TestCase comum.
+    """
+
+    def test_migration_interrompe_com_duplicidade_preexistente(self):
+        import importlib
+        from django.apps import apps as django_apps
+        from django.db import connection
+        _0009 = importlib.import_module(
+            'patrimonio.migrations.0009_pessoa_pessoa_cpf_cnpj_normalizado_unico_quando_preenchido'
+        )
+        constraint = Pessoa._meta.constraints[0]
+        # remove temporariamente a constraint para simular um banco antigo
+        with connection.schema_editor() as editor:
+            editor.remove_constraint(Pessoa, constraint)
+        try:
+            Pessoa.objects.create(nome='Dup A', cpf_cnpj='123.456.789-09')
+            Pessoa.objects.create(nome='Dup B', cpf_cnpj='12345678909')
+            with self.assertRaises(RuntimeError) as ctx:
+                _0009.verificar_duplicidades(django_apps, None)
+            self.assertIn('Dup A', str(ctx.exception))
+            self.assertIn('Dup B', str(ctx.exception))
+            # sem duplicidade, a verificação passa
+            Pessoa.objects.filter(nome='Dup B').delete()
+            _0009.verificar_duplicidades(django_apps, None)
+        finally:
+            Pessoa.objects.filter(nome__in=['Dup A', 'Dup B']).delete()
+            with connection.schema_editor() as editor:
+                editor.add_constraint(Pessoa, constraint)
+
+
+# ─── Rodada 2: combinações de permissão no detalhe do imóvel ──────────────────
+
+class ImovelDetailPermCombinacoesTest(TestCase):
+    def setUp(self):
+        from django.contrib.auth.models import Permission
+        self.Permission = Permission
+        self.client = Client()
+        self.imovel = _criar_imovel('Imóvel Perm')
+        Manutencao.objects.create(
+            imovel=self.imovel, descricao='Troca de telhado',
+            data_solicitacao=date(2026, 1, 5),
+        )
+
+    def _usuario(self, nome, *perms):
+        user = User.objects.create_user(nome, password='pass')
+        codenames = ('view_imovel',) + perms
+        user.user_permissions.add(*self.Permission.objects.filter(codename__in=codenames))
+        self.client.login(username=nome, password='pass')
+        return user
+
+    def _get(self):
+        return self.client.get(reverse('imovel_detail', args=[self.imovel.pk]))
+
+    def test_apenas_imovel_sem_cards_financeiros_e_sem_manutencao(self):
+        self._usuario('perm_so_imovel')
+        resposta = self._get()
+        self.assertEqual(resposta.status_code, 200)
+        self.assertIsNone(resposta.context['total_recebido'])
+        self.assertIsNone(resposta.context['total_despesas'])
+        self.assertIsNone(resposta.context['resultado'])
+        self.assertIsNone(resposta.context['indicadores'])
+        conteudo = resposta.content.decode()
+        self.assertNotIn('Resultado Financeiro', conteudo)
+        self.assertNotIn('manutencoes-tab', conteudo)
+        self.assertNotIn('Troca de telhado', conteudo)
+
+    def test_somente_receitas_mostra_recebido_sem_liquido(self):
+        self._usuario('perm_receitas', 'view_receitaaluguel')
+        resposta = self._get()
+        conteudo = resposta.content.decode()
+        self.assertIsNotNone(resposta.context['total_recebido'])
+        self.assertIsNone(resposta.context['resultado'])
+        self.assertIn('Total Recebido (histórico)', conteudo)
+        self.assertNotIn('Resultado Financeiro', conteudo)
+        self.assertNotIn('Yield líquido', conteudo)
+        # indicadores não consultaram despesas
+        self.assertIsNone(resposta.context['indicadores']['despesa_12m'])
+        self.assertIsNone(resposta.context['indicadores']['yield_liquido'])
+
+    def test_somente_despesas_mostra_total_despesas(self):
+        self._usuario('perm_despesas', 'view_despesa')
+        resposta = self._get()
+        conteudo = resposta.content.decode()
+        self.assertIsNone(resposta.context['total_recebido'])
+        self.assertIsNotNone(resposta.context['total_despesas'])
+        self.assertIsNone(resposta.context['resultado'])
+        self.assertIn('Total de Despesas Pagas', conteudo)
+        self.assertNotIn('Resultado Financeiro', conteudo)
+
+    def test_receitas_e_despesas_mostra_resultado_completo(self):
+        self._usuario('perm_completo', 'view_receitaaluguel', 'view_despesa')
+        resposta = self._get()
+        conteudo = resposta.content.decode()
+        self.assertIsNotNone(resposta.context['resultado'])
+        self.assertIn('Resultado Financeiro', conteudo)
+        self.assertIn('Yield líquido', conteudo)
+
+    def test_com_permissao_de_manutencao_aba_aparece(self):
+        self._usuario('perm_manut', 'view_manutencao')
+        resposta = self._get()
+        conteudo = resposta.content.decode()
+        self.assertIn('manutencoes-tab', conteudo)
+        self.assertIn('Troca de telhado', conteudo)

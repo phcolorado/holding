@@ -1,4 +1,5 @@
 import csv
+from decimal import Decimal
 
 from django.http import HttpResponse
 from django.utils import timezone
@@ -293,9 +294,10 @@ def _resumo_por_imovel(receitas, despesas):
     for r in receitas:
         item = dados[r.imovel.nome]
         item['rec_prev'] += r.valor_previsto
-        if r.status in ('recebido', 'parcial'):
+        if r.status != 'cancelado':
             item['rec_rec'] += r.valor_recebido or Decimal('0.00')
-        if r.status not in ReceitaAluguel.STATUS_QUITADOS:
+        # Em aberto pelo SALDO real (cancelada tem saldo 0) — não pelo status
+        if r.saldo_em_aberto > 0:
             item['em_aberto'] += 1
     for d in despesas:
         if d.imovel_id and d.status == 'paga':
@@ -360,7 +362,9 @@ def exportar_relatorio_contabilidade_xlsx(request, mes, ano):
 
     from documentos.models import Documento
 
-    hoje = timezone.now().date()
+    # timezone.localdate(): data de negócio no fuso do Django (America/Sao_Paulo)
+    # — timezone.now().date() seria a data UTC e viraria o dia às 21h locais.
+    hoje = timezone.localdate()
     receitas = list(
         ReceitaAluguel.objects.filter(competencia_mes=mes, competencia_ano=ano)
         .select_related('imovel', 'contrato__locatario')
@@ -388,23 +392,31 @@ def exportar_relatorio_contabilidade_xlsx(request, mes, ano):
     ws_res.append(['Campo', 'Valor'])
     _estilizar_cabecalho(ws_res, 2)
     total_prev = sum(r.valor_previsto for r in receitas)
-    total_rec = sum(r.valor_recebido or 0 for r in receitas if r.status in ('recebido', 'parcial'))
+    total_rec = sum(r.valor_recebido or 0 for r in receitas if r.status != 'cancelado')
     total_desp = sum(d.valor for d in despesas if d.status == 'paga')
-    rec_aberto = sum(1 for r in receitas if r.status not in ReceitaAluguel.STATUS_QUITADOS)
-    rec_vencidas = sum(1 for r in receitas if r.esta_atrasada)
+    # Identificação pelo SALDO real (regra centralizada), não pelo status:
+    # cancelada tem saldo 0; parcial/'recebido' com saldo > 0 conta como aberta.
+    abertas = [r for r in receitas if r.saldo_em_aberto > 0]
+    vencidas = [r for r in abertas if r.data_vencimento < hoje]
+    rec_aberto = len(abertas)
+    rec_vencidas = len(vencidas)
+    saldo_aberto = sum((r.saldo_em_aberto for r in abertas), Decimal('0.00'))
+    saldo_vencido = sum((r.saldo_em_aberto for r in vencidas), Decimal('0.00'))
     docs_pend_cnt = len(docs_pendentes)
     nome_mes = dict(ReceitaAluguel.MESES).get(mes, str(mes))
     for row in [
-        (f'Mês/Ano', f'{nome_mes}/{ano}'),
+        ('Mês/Ano', f'{nome_mes}/{ano}'),
         ('Total Receitas Previstas (R$)', float(total_prev)),
         ('Total Receitas Recebidas (R$)', float(total_rec)),
         ('Total Despesas Pagas (R$)', float(total_desp)),
         ('Resultado Líquido (R$)', float(total_rec - total_desp)),
         ('Receitas em Aberto', rec_aberto),
         ('Receitas Vencidas (inadimplência)', rec_vencidas),
+        ('Saldo Total em Aberto (R$)', float(saldo_aberto)),
+        ('Saldo Total Vencido (R$)', float(saldo_vencido)),
         ('Documentos Pendentes para Contabilidade', docs_pend_cnt),
         ('', ''),
-        ('Nota — Inadimplência Aberta', 'A aba "Inadimplência Aberta" lista todas as receitas vencidas e não quitadas, independente do mês de competência.'),
+        ('Nota — Inadimplência Aberta', 'A aba "Inadimplência Aberta" lista todas as receitas vencidas com saldo em aberto, independente do mês de competência.'),
     ]:
         ws_res.append(row)
     ws_res.column_dimensions['A'].width = 40

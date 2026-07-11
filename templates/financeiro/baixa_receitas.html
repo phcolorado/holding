@@ -160,7 +160,8 @@
                         <td class="small text-muted">{{ r.observacoes|truncatechars:30|default:"—" }}</td>
                         <td class="text-center text-nowrap">
                             {% if perms.financeiro.change_receitaaluguel %}
-                            {% if r.status != 'recebido' and r.status != 'cancelado' %}
+                            {% if r.status != 'cancelado' %}
+                            {% if r.saldo_em_aberto > 0 %}
                             <form method="post" class="d-inline">
                                 {% csrf_token %}
                                 <input type="hidden" name="mes" value="{{ mes_atual }}">
@@ -169,28 +170,63 @@
                                 <input type="hidden" name="receita_id" value="{{ r.pk }}">
                                 <input type="hidden" name="action" value="marcar_recebida">
                                 <button type="submit" class="btn btn-xs btn-success py-0 px-2 me-1"
-                                        title="Marcar como recebida"
-                                        onclick="return confirm('Marcar como recebida?')">
+                                        title="Quitar saldo em aberto (R$ {{ r.saldo_em_aberto|floatformat:2 }})"
+                                        onclick="return confirm('Registrar recebimento do saldo em aberto (R$ {{ r.saldo_em_aberto|floatformat:2 }})?')">
                                     <i class="bi bi-check-lg"></i>
                                 </button>
                             </form>
-                            {% endif %}
                             <button type="button"
-                                    class="btn btn-xs btn-outline-primary py-0 px-2"
-                                    data-bs-toggle="modal" data-bs-target="#editarModal"
+                                    class="btn btn-xs btn-outline-success py-0 px-2 me-1"
+                                    data-bs-toggle="modal" data-bs-target="#recebimentoModal"
                                     data-id="{{ r.pk }}"
                                     data-imovel="{{ r.imovel.nome }}"
-                                    data-valor="{{ r.valor_recebido|default:'' }}"
-                                    data-data="{{ r.data_recebimento|date:'Y-m-d'|default:'' }}"
-                                    data-status="{{ r.status }}"
+                                    data-saldo="{{ r.saldo_em_aberto|floatformat:2 }}"
+                                    title="Registrar recebimento parcial">
+                                <i class="bi bi-cash-coin"></i>
+                            </button>
+                            {% endif %}
+                            <button type="button"
+                                    class="btn btn-xs btn-outline-primary py-0 px-2 me-1"
+                                    data-bs-toggle="modal" data-bs-target="#encargosModal"
+                                    data-id="{{ r.pk }}"
+                                    data-imovel="{{ r.imovel.nome }}"
                                     data-obs="{{ r.observacoes }}"
                                     data-multa="{{ r.multa|default:'0' }}"
                                     data-juros="{{ r.juros|default:'0' }}"
+                                    data-desconto="{{ r.desconto|default:'0' }}"
                                     data-sugestao-multa="{% if r.sugestao %}{{ r.sugestao.multa }}{% endif %}"
                                     data-sugestao-juros="{% if r.sugestao %}{{ r.sugestao.juros }}{% endif %}"
-                                    title="Editar">
+                                    title="Editar multa/juros/desconto/observações">
                                 <i class="bi bi-pencil"></i>
                             </button>
+                            <form method="post" class="d-inline">
+                                {% csrf_token %}
+                                <input type="hidden" name="mes" value="{{ mes_atual }}">
+                                <input type="hidden" name="ano" value="{{ ano_atual }}">
+                                {% if imovel_atual %}<input type="hidden" name="imovel" value="{{ imovel_atual }}">{% endif %}
+                                <input type="hidden" name="receita_id" value="{{ r.pk }}">
+                                <input type="hidden" name="action" value="cancelar">
+                                <button type="submit" class="btn btn-xs btn-outline-dark py-0 px-2"
+                                        title="Cancelar receita (encerra a cobrança; recebimentos são preservados)"
+                                        onclick="return confirm('Cancelar esta receita? A cobrança é encerrada e os recebimentos já registrados são preservados.')">
+                                    <i class="bi bi-x-circle"></i>
+                                </button>
+                            </form>
+                            {% else %}
+                            <form method="post" class="d-inline">
+                                {% csrf_token %}
+                                <input type="hidden" name="mes" value="{{ mes_atual }}">
+                                <input type="hidden" name="ano" value="{{ ano_atual }}">
+                                {% if imovel_atual %}<input type="hidden" name="imovel" value="{{ imovel_atual }}">{% endif %}
+                                <input type="hidden" name="receita_id" value="{{ r.pk }}">
+                                <input type="hidden" name="action" value="reabrir">
+                                <button type="submit" class="btn btn-xs btn-outline-secondary py-0 px-2"
+                                        title="Reabrir receita cancelada"
+                                        onclick="return confirm('Reabrir esta receita? O status será recalculado pelo saldo, vencimento e recebimentos.')">
+                                    <i class="bi bi-arrow-counterclockwise"></i>
+                                </button>
+                            </form>
+                            {% endif %}
                             {% endif %}
                         </td>
                     </tr>
@@ -209,8 +245,55 @@
     </div>
 </div>
 
-<!-- Modal de Edição -->
-<div class="modal fade" id="editarModal" tabindex="-1">
+<!-- Modal: Registrar Recebimento manual -->
+<div class="modal fade" id="recebimentoModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <form method="post">
+                {% csrf_token %}
+                <input type="hidden" name="mes" value="{{ mes_atual }}">
+                <input type="hidden" name="ano" value="{{ ano_atual }}">
+                {% if imovel_atual %}<input type="hidden" name="imovel" value="{{ imovel_atual }}">{% endif %}
+                <input type="hidden" name="receita_id" id="receb-id">
+                <input type="hidden" name="action" value="registrar_recebimento">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="bi bi-cash-coin me-2"></i>Registrar Recebimento — <span id="receb-imovel"></span></h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="alert alert-info py-2 small mb-3">
+                        Saldo em aberto: <strong>R$ <span id="receb-saldo"></span></strong>.
+                        O valor informado é somado aos recebimentos anteriores — não pode ser zero,
+                        negativo nem superar o saldo.
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Valor Recebido (R$)</label>
+                        <input type="number" step="0.01" min="0.01" name="valor"
+                               id="receb-valor" class="form-control" placeholder="0,00" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Data do Recebimento</label>
+                        <input type="date" name="data_recebimento" id="receb-data" class="form-control"
+                               value="{{ hoje|date:'Y-m-d' }}" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Observações</label>
+                        <textarea name="observacoes" id="receb-obs" class="form-control" rows="2"></textarea>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+                    <button type="submit" class="btn btn-success">
+                        <i class="bi bi-save me-1"></i>Registrar
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Modal: Editar multa/juros/desconto/observações -->
+<div class="modal fade" id="encargosModal" tabindex="-1">
     <div class="modal-dialog">
         <div class="modal-content">
             <form method="post">
@@ -219,37 +302,29 @@
                 <input type="hidden" name="ano" value="{{ ano_atual }}">
                 {% if imovel_atual %}<input type="hidden" name="imovel" value="{{ imovel_atual }}">{% endif %}
                 <input type="hidden" name="receita_id" id="edit-id">
-                <input type="hidden" name="action" value="editar">
+                <input type="hidden" name="action" value="editar_encargos">
                 <div class="modal-header">
-                    <h5 class="modal-title"><i class="bi bi-pencil me-2"></i>Editar Recebimento — <span id="edit-imovel"></span></h5>
+                    <h5 class="modal-title"><i class="bi bi-pencil me-2"></i>Editar Receita — <span id="edit-imovel"></span></h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body">
-                    <div class="mb-3">
-                        <label class="form-label fw-semibold">Valor Recebido (R$)</label>
-                        <input type="number" step="0.01" min="0" name="valor_recebido"
-                               id="edit-valor" class="form-control" placeholder="0,00">
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label fw-semibold">Data de Recebimento</label>
-                        <input type="date" name="data_recebimento" id="edit-data" class="form-control">
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label fw-semibold">Status</label>
-                        <select name="status" id="edit-status" class="form-select">
-                            {% for val, label in status_choices %}
-                            <option value="{{ val }}">{{ label }}</option>
-                            {% endfor %}
-                        </select>
+                    <div class="alert alert-secondary py-2 small mb-3">
+                        Valor recebido, data e status são calculados automaticamente a partir dos
+                        recebimentos registrados. Aqui você ajusta apenas multa, juros, desconto e observações
+                        (o status é reconsolidado, pois o saldo total muda).
                     </div>
                     <div class="row g-2 mb-1">
-                        <div class="col-6">
+                        <div class="col-4">
                             <label class="form-label fw-semibold">Multa (R$)</label>
                             <input type="number" step="0.01" min="0" name="multa" id="edit-multa" class="form-control">
                         </div>
-                        <div class="col-6">
+                        <div class="col-4">
                             <label class="form-label fw-semibold">Juros (R$)</label>
                             <input type="number" step="0.01" min="0" name="juros" id="edit-juros" class="form-control">
+                        </div>
+                        <div class="col-4">
+                            <label class="form-label fw-semibold">Desconto (R$)</label>
+                            <input type="number" step="0.01" min="0" name="desconto" id="edit-desconto" class="form-control">
                         </div>
                     </div>
                     <div class="mb-3">
@@ -280,18 +355,30 @@
 
 {% block extra_js %}
 <script>
-const editarModal = document.getElementById('editarModal');
-if (editarModal) {
-    editarModal.addEventListener('show.bs.modal', event => {
+const recebimentoModal = document.getElementById('recebimentoModal');
+if (recebimentoModal) {
+    recebimentoModal.addEventListener('show.bs.modal', event => {
+        const btn = event.relatedTarget;
+        document.getElementById('receb-id').value = btn.dataset.id;
+        document.getElementById('receb-imovel').textContent = btn.dataset.imovel;
+        document.getElementById('receb-saldo').textContent = btn.dataset.saldo;
+        const valor = document.getElementById('receb-valor');
+        valor.value = '';
+        valor.max = btn.dataset.saldo;
+        document.getElementById('receb-obs').value = '';
+    });
+}
+
+const encargosModal = document.getElementById('encargosModal');
+if (encargosModal) {
+    encargosModal.addEventListener('show.bs.modal', event => {
         const btn = event.relatedTarget;
         document.getElementById('edit-id').value = btn.dataset.id;
         document.getElementById('edit-imovel').textContent = btn.dataset.imovel;
-        document.getElementById('edit-valor').value = btn.dataset.valor;
-        document.getElementById('edit-data').value = btn.dataset.data;
-        document.getElementById('edit-status').value = btn.dataset.status;
         document.getElementById('edit-obs').value = btn.dataset.obs;
         document.getElementById('edit-multa').value = btn.dataset.multa;
         document.getElementById('edit-juros').value = btn.dataset.juros;
+        document.getElementById('edit-desconto').value = btn.dataset.desconto;
 
         const sugestaoEl = document.getElementById('edit-sugestao');
         const sm = btn.dataset.sugestaoMulta, sj = btn.dataset.sugestaoJuros;

@@ -10,13 +10,11 @@ from collections import defaultdict
 from datetime import date
 from decimal import Decimal
 
-from django.db.models import Count, DecimalField, ExpressionWrapper, F, Sum, Value
-from django.db.models.functions import Coalesce
-from django.utils import timezone
+from django.db.models import Count, Sum
 
 from patrimonio.indicadores import competencias_ultimas, contrato_ocupa_mes, filtro_competencias
 from patrimonio.models import Contrato, Imovel
-from .models import ReceitaAluguel, Despesa
+from .models import ReceitaAluguel, Despesa, saldo_em_aberto_expr
 
 
 def serie_ocupacao_mensal(n_meses=12, referencia=None):
@@ -94,20 +92,15 @@ def serie_inadimplencia_mensal(n_meses=12, referencia=None):
     """Valor e quantidade de receitas vencidas e não quitadas, por competência."""
     competencias = competencias_ultimas(n_meses, referencia)
     filtro = filtro_competencias(competencias)
-    hoje = timezone.localdate()
 
-    saldo_expr = ExpressionWrapper(
-        F('valor_previsto') + F('multa') + F('juros') - F('desconto')
-        - Coalesce(F('valor_recebido'), Value(0, output_field=DecimalField())),
-        output_field=DecimalField(max_digits=14, decimal_places=2),
-    )
+    # Regra centralizada: ReceitaAluguel.objects.inadimplentes() (vencidas com
+    # saldo em aberto — independe do campo status).
     em_aberto = {
         (linha['competencia_ano'], linha['competencia_mes']): linha
         for linha in (
-            ReceitaAluguel.objects.filter(filtro, data_vencimento__lt=hoje)
-            .exclude(status__in=ReceitaAluguel.STATUS_QUITADOS)
+            ReceitaAluguel.objects.inadimplentes().filter(filtro)
             .values('competencia_ano', 'competencia_mes')
-            .annotate(total=Sum(saldo_expr), quantidade=Count('id'))
+            .annotate(total=Sum(saldo_em_aberto_expr()), quantidade=Count('id'))
         )
     }
 

@@ -3,6 +3,7 @@ Comando opcional para popular o banco com dados fictícios de demonstração.
 Uso: python manage.py popular_banco
 """
 from datetime import date
+from django.utils import timezone
 from decimal import Decimal
 
 from django.core.management.base import BaseCommand
@@ -124,7 +125,7 @@ class Command(BaseCommand):
         self.stdout.write(f'  ✓ {Contrato.objects.count()} contratos')
 
         # Receitas (últimos 3 meses para cada contrato)
-        hoje = date.today()
+        hoje = timezone.localdate()
         for contrato, imovel in [(c1, i1), (c2, i2)]:
             for delta in range(3):
                 mes = (hoje.month - delta - 1) % 12 + 1

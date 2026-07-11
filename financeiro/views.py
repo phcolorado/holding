@@ -9,7 +9,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from .models import ReceitaAluguel, Despesa, FechamentoMensal
-from .forms import BaixaReceitaForm
+from .forms import RegistrarRecebimentoForm, EditarEncargosForm
 from .exports import (
     exportar_imoveis_csv, exportar_imoveis_xlsx,
     exportar_contratos_csv, exportar_contratos_xlsx,
@@ -306,17 +306,71 @@ def baixa_receitas_mes_view(request):
                 else:
                     messages.info(request, f'{receita.imovel.nome} já está sem saldo em aberto.')
 
-            elif action == 'editar':
-                form = BaixaReceitaForm(request.POST)
+            elif action == 'registrar_recebimento':
+                from django.core.exceptions import ValidationError
+                from .models import RecebimentoReceita
+                form = RegistrarRecebimentoForm(request.POST)
+                if form.is_valid():
+                    recebimento = RecebimentoReceita(
+                        receita=receita,
+                        valor=form.cleaned_data['valor'],
+                        data_recebimento=form.cleaned_data['data_recebimento'],
+                        observacoes=form.cleaned_data['observacoes'],
+                        origem='manual',
+                        criado_por=request.user,
+                    )
+                    try:
+                        # valida valor > 0 e valor <= saldo em aberto
+                        recebimento.full_clean()
+                        recebimento.save()
+                        messages.success(
+                            request,
+                            f'{receita.imovel.nome}: recebimento de R$ {recebimento.valor} registrado.'
+                        )
+                    except ValidationError as exc:
+                        erros = '; '.join(e for lista in exc.message_dict.values() for e in lista)
+                        messages.error(request, f'{receita.imovel.nome}: {erros}')
+                else:
+                    erros = '; '.join(e for lista in form.errors.values() for e in lista)
+                    messages.error(request, f'{receita.imovel.nome}: {erros}')
+
+            elif action == 'editar_encargos':
+                from django.core.exceptions import ValidationError
+                form = EditarEncargosForm(request.POST)
                 if form.is_valid():
                     form.aplicar(receita)
-                    receita.save()
-                    messages.success(request, f'{receita.imovel.nome} atualizado.')
+                    try:
+                        receita.full_clean()  # impede desconto que torne o total devido negativo
+                        receita.save()
+                        # multa/juros/desconto mudam o saldo total → reconsolida o status
+                        receita.recalcular_recebimentos()
+                        messages.success(request, f'{receita.imovel.nome} atualizado.')
+                    except ValidationError as exc:
+                        erros = '; '.join(e for lista in exc.message_dict.values() for e in lista)
+                        messages.error(request, f'{receita.imovel.nome} não foi atualizado: {erros}')
                 else:
-                    erros = '; '.join(
-                        erro for lista in form.errors.values() for erro in lista
-                    )
+                    erros = '; '.join(e for lista in form.errors.values() for e in lista)
                     messages.error(request, f'{receita.imovel.nome} não foi atualizado: {erros}')
+
+            elif action == 'cancelar':
+                if receita.cancelar():
+                    messages.success(
+                        request,
+                        f'{receita.imovel.nome}: receita cancelada (cobrança encerrada — '
+                        'os recebimentos já registrados foram preservados).'
+                    )
+                else:
+                    messages.info(request, f'{receita.imovel.nome} já estava cancelada.')
+
+            elif action == 'reabrir':
+                if receita.reabrir():
+                    messages.success(
+                        request,
+                        f'{receita.imovel.nome}: receita reaberta — status recalculado '
+                        f'({receita.get_status_display()}).'
+                    )
+                else:
+                    messages.info(request, f'{receita.imovel.nome} não estava cancelada.')
 
         url = f"{reverse('baixa_receitas_mes')}?mes={mes}&ano={ano}"
         if imovel_id:
@@ -379,9 +433,10 @@ def checklist_mensal_view(request):
 
     receitas_mes = ReceitaAluguel.objects.filter(competencia_mes=mes, competencia_ano=ano)
     total_receitas = receitas_mes.count()
-    # Pagamento parcial NÃO conta como confirmado — permanece pendente até quitar
-    receitas_recebidas = receitas_mes.filter(status='recebido').count()
-    receitas_pendentes = receitas_mes.exclude(status__in=['recebido', 'cancelado']).count()
+    # Regra centralizada de SALDO (não de status): pagamento parcial NÃO conta
+    # como confirmado — permanece pendente até o saldo em aberto zerar.
+    receitas_recebidas = receitas_mes.quitadas().exclude(status='cancelado').count()
+    receitas_pendentes = receitas_mes.em_aberto().count()
 
     despesas_mes = Despesa.objects.filter(competencia_mes=mes, competencia_ano=ano)
     total_despesas = despesas_mes.count()

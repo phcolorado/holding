@@ -81,12 +81,16 @@ def receita_locaticia(receitas):
     return total
 
 
-def indicadores_do_imovel(imovel, referencia=None):
+def indicadores_do_imovel(imovel, referencia=None, incluir_despesas=True):
     """
     Calcula, para os últimos 12 meses de competência: receita total de caixa,
     receita locatícia (só aluguel), despesas pagas, resultado, yield
     bruto/líquido anual sobre a receita LOCATÍCIA (valor estimado, com
     fallback para valor de aquisição) e ocupação.
+
+    Com incluir_despesas=False (usuário sem permissão de despesas), os valores
+    que dependem de despesas (despesa_12m, resultado_12m, yield_liquido) nem
+    são consultados — retornam None.
     """
     from financeiro.models import ReceitaAluguel, Despesa
 
@@ -100,17 +104,23 @@ def indicadores_do_imovel(imovel, referencia=None):
     receita_12m = sum((r.valor_recebido or Decimal('0.00') for r in receitas_recebidas), Decimal('0.00'))
     receita_locaticia_12m = receita_locaticia(receitas_recebidas)
 
-    despesa_12m = Despesa.objects.filter(
-        filtro, imovel=imovel, status='paga'
-    ).aggregate(total=Sum('valor'))['total'] or Decimal('0.00')
-
-    resultado_12m = receita_12m - despesa_12m
+    if incluir_despesas:
+        despesa_12m = Despesa.objects.filter(
+            filtro, imovel=imovel, status='paga'
+        ).aggregate(total=Sum('valor'))['total'] or Decimal('0.00')
+        resultado_12m = receita_12m - despesa_12m
+    else:
+        despesa_12m = None
+        resultado_12m = None
 
     valor_base = imovel.valor_estimado or imovel.valor_aquisicao
     # Yield calculado sobre a receita locatícia — IPTU/condomínio repassados
     # são valores transitórios e não remuneram o capital investido.
     yield_bruto = _percentual(receita_locaticia_12m, valor_base)
-    yield_liquido = _percentual(receita_locaticia_12m - despesa_12m, valor_base)
+    yield_liquido = (
+        _percentual(receita_locaticia_12m - despesa_12m, valor_base)
+        if incluir_despesas else None
+    )
 
     meses_ocupados = _meses_ocupados(imovel, competencias)
     ocupacao = _percentual(meses_ocupados, len(competencias))

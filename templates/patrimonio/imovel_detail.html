@@ -106,7 +106,7 @@
     </div>
 
     <div class="col-md-4">
-        {% if perms.financeiro.view_receitaaluguel %}
+        {% if ve_receitas and ve_despesas %}
         <div class="card shadow-sm bg-success text-white">
             <div class="card-body text-center py-4">
                 <div class="small text-white-50">Resultado Financeiro (histórico)</div>
@@ -122,7 +122,23 @@
                 </div>
             </div>
         </div>
+        {% elif ve_receitas %}
+        <div class="card shadow-sm bg-success text-white">
+            <div class="card-body text-center py-4">
+                <div class="small text-white-50">Total Recebido (histórico)</div>
+                <div class="fs-3 fw-bold mt-1">R$ {{ total_recebido|floatformat:2|intcomma }}</div>
+            </div>
+        </div>
+        {% elif ve_despesas %}
+        <div class="card shadow-sm bg-warning">
+            <div class="card-body text-center py-4">
+                <div class="small text-muted">Total de Despesas Pagas (histórico)</div>
+                <div class="fs-3 fw-bold mt-1">R$ {{ total_despesas|floatformat:2|intcomma }}</div>
+            </div>
+        </div>
+        {% endif %}
 
+        {% if ve_receitas %}
         <div class="card shadow-sm mt-3">
             <div class="card-header fw-semibold bg-white">
                 <i class="bi bi-graph-up-arrow me-1 text-primary"></i>Indicadores — últimos 12 meses
@@ -136,6 +152,7 @@
                     <span class="text-muted">Receita locatícia (só aluguel)</span>
                     <span class="fw-semibold">R$ {{ indicadores.receita_locaticia_12m|floatformat:2|intcomma }}</span>
                 </div>
+                {% if ve_despesas %}
                 <div class="d-flex justify-content-between mb-1">
                     <span class="text-muted">Despesas pagas</span>
                     <span class="fw-semibold">R$ {{ indicadores.despesa_12m|floatformat:2|intcomma }}</span>
@@ -146,6 +163,7 @@
                         R$ {{ indicadores.resultado_12m|floatformat:2|intcomma }}
                     </span>
                 </div>
+                {% endif %}
                 <hr class="my-2">
                 <div class="d-flex justify-content-between mb-1">
                     <span class="text-muted">Yield bruto (a.a.)</span>
@@ -153,12 +171,14 @@
                         {% if indicadores.yield_bruto is not None %}{{ indicadores.yield_bruto }}%{% else %}<span class="text-muted" title="Informe o valor estimado ou de aquisição do imóvel">—</span>{% endif %}
                     </span>
                 </div>
+                {% if ve_despesas %}
                 <div class="d-flex justify-content-between mb-1">
                     <span class="text-muted">Yield líquido (a.a.)</span>
                     <span class="fw-semibold">
                         {% if indicadores.yield_liquido is not None %}{{ indicadores.yield_liquido }}%{% else %}<span class="text-muted">—</span>{% endif %}
                     </span>
                 </div>
+                {% endif %}
                 <div class="d-flex justify-content-between">
                     <span class="text-muted">Ocupação</span>
                     <span class="fw-semibold">
@@ -215,11 +235,13 @@
         </a>
     </li>
     {% endif %}
+    {% if ve_manutencoes %}
     <li class="nav-item">
         <a class="nav-link" data-bs-toggle="tab" href="#manutencoes-tab">
             <i class="bi bi-tools me-1"></i>Manutenções <span class="badge bg-secondary">{{ manutencoes|length }}</span>
         </a>
     </li>
+    {% endif %}
     {% if ve_obrigatorios %}
     <li class="nav-item">
         <a class="nav-link" data-bs-toggle="tab" href="#obrigatorios-tab">
@@ -340,6 +362,7 @@
     </div>
 
     {% endif %}
+    {% if ve_manutencoes %}
     <div class="tab-pane fade" id="manutencoes-tab">
         <div class="card shadow-sm">
             <div class="card-body p-0">
@@ -364,6 +387,7 @@
             </div>
         </div>
     </div>
+    {% endif %}
 
     {% if ve_obrigatorios %}
     <div class="tab-pane fade" id="obrigatorios-tab">

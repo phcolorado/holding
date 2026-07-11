@@ -388,7 +388,7 @@ class ReceitasInadimplentesQsTest(TestCase):
         self.ontem = timezone.localdate() - timedelta(days=1)
         self.amanha = timezone.localdate() + timedelta(days=1)
 
-    def _criar_receita(self, vencimento, status, mes=1):
+    def _criar_receita(self, vencimento, status, mes=1, valor_recebido=None):
         return ReceitaAluguel.objects.create(
             contrato=self.contrato,
             imovel=self.imovel,
@@ -396,6 +396,7 @@ class ReceitasInadimplentesQsTest(TestCase):
             competencia_ano=2024,
             data_vencimento=vencimento,
             valor_previsto=Decimal('1000.00'),
+            valor_recebido=valor_recebido,
             status=status,
         )
 
@@ -407,9 +408,15 @@ class ReceitasInadimplentesQsTest(TestCase):
         self._criar_receita(self.ontem, 'atrasado')
         self.assertEqual(receitas_inadimplentes_qs().count(), 1)
 
-    def test_vencida_recebido_nao_aparece(self):
-        self._criar_receita(self.ontem, 'recebido')
+    def test_vencida_quitada_pelo_saldo_nao_aparece(self):
+        # Regra de SALDO: só sai da inadimplência quando o recebido cobre o devido
+        self._criar_receita(self.ontem, 'recebido', valor_recebido=Decimal('1000.00'))
         self.assertEqual(receitas_inadimplentes_qs().count(), 0)
+
+    def test_vencida_status_recebido_com_saldo_aparece(self):
+        # Status divergente do saldo: a fonte financeira é o saldo → aparece
+        self._criar_receita(self.ontem, 'recebido', valor_recebido=Decimal('400.00'))
+        self.assertEqual(receitas_inadimplentes_qs().count(), 1)
 
     def test_nao_vencida_nao_aparece(self):
         self._criar_receita(self.amanha, 'previsto', mes=2)
@@ -685,17 +692,20 @@ class BaixaReceitasViewTest(TestCase):
         valores = sorted(self.receita.recebimentos.values_list('valor', flat=True))
         self.assertEqual(valores, [Decimal('200.00'), Decimal('1800.00')])
 
-    def test_post_editar_atualiza_campos(self):
-        """POST action=editar atualiza status, valor_recebido, data e observações."""
+    def test_post_registrar_recebimento_parcial(self):
+        """
+        POST action=registrar_recebimento cria um RecebimentoReceita e a
+        consolidação (valor_recebido/status) é derivada dele — não há mais
+        edição direta dos campos consolidados na tela de baixa.
+        """
         self.client.login(username='baixa_user', password='pass')
         self.client.post(
             reverse('baixa_receitas_mes'),
             {
                 'mes': self.mes, 'ano': self.ano,
                 'receita_id': self.receita.pk,
-                'action': 'editar',
-                'status': 'parcial',
-                'valor_recebido': '1500.00',
+                'action': 'registrar_recebimento',
+                'valor': '1500.00',
                 'data_recebimento': date.today().isoformat(),
                 'observacoes': 'Pagamento parcial acordado.',
             },
@@ -703,7 +713,11 @@ class BaixaReceitasViewTest(TestCase):
         self.receita.refresh_from_db()
         self.assertEqual(self.receita.status, 'parcial')
         self.assertEqual(self.receita.valor_recebido, Decimal('1500.00'))
-        self.assertEqual(self.receita.observacoes, 'Pagamento parcial acordado.')
+        recebimento = self.receita.recebimentos.get()
+        self.assertEqual(recebimento.valor, Decimal('1500.00'))
+        self.assertEqual(recebimento.origem, 'manual')
+        self.assertEqual(recebimento.observacoes, 'Pagamento parcial acordado.')
+        self.assertEqual(recebimento.criado_por.username, 'baixa_user')
 
 
 # ─── Testes do relatório de contabilidade ────────────────────────────────────
@@ -1669,46 +1683,98 @@ class BaixaReceitasValidacaoTest(TestCase):
             valor_previsto=Decimal('2000.00'), status='previsto',
         )
 
-    def _post_editar(self, **campos):
+    def _post_recebimento(self, **campos):
         dados = {
             'mes': self.mes, 'ano': self.ano,
-            'receita_id': self.receita.pk, 'action': 'editar',
-            'status': 'recebido',
+            'receita_id': self.receita.pk, 'action': 'registrar_recebimento',
+        }
+        dados.update(campos)
+        return self.client.post(reverse('baixa_receitas_mes'), dados)
+
+    def _post_encargos(self, **campos):
+        dados = {
+            'mes': self.mes, 'ano': self.ano,
+            'receita_id': self.receita.pk, 'action': 'editar_encargos',
         }
         dados.update(campos)
         return self.client.post(reverse('baixa_receitas_mes'), dados)
 
     def test_valor_invalido_nao_altera_receita(self):
-        response = self._post_editar(valor_recebido='abc')
+        response = self._post_recebimento(valor='abc', data_recebimento=date.today().isoformat())
         self.assertEqual(response.status_code, 302)
         self.receita.refresh_from_db()
         self.assertEqual(self.receita.status, 'previsto')
         self.assertIsNone(self.receita.valor_recebido)
+        self.assertEqual(self.receita.recebimentos.count(), 0)
 
     def test_data_invalida_nao_altera_receita(self):
-        response = self._post_editar(valor_recebido='2000.00', data_recebimento='31/31/2024')
+        response = self._post_recebimento(valor='2000.00', data_recebimento='31/31/2024')
         self.assertEqual(response.status_code, 302)
         self.receita.refresh_from_db()
         self.assertIsNone(self.receita.data_recebimento)
+        self.assertEqual(self.receita.recebimentos.count(), 0)
 
-    def test_status_invalido_rejeitado(self):
-        self._post_editar(status='status_inexistente')
+    def test_valor_zero_rejeitado(self):
+        self._post_recebimento(valor='0', data_recebimento=date.today().isoformat())
         self.receita.refresh_from_db()
-        self.assertEqual(self.receita.status, 'previsto')
+        self.assertEqual(self.receita.recebimentos.count(), 0)
 
-    def test_edicao_valida_atualiza(self):
-        hoje = date.today()
-        self._post_editar(
-            valor_recebido='1980.50', data_recebimento=hoje.isoformat(),
-            multa='10.00', juros='5.25', observacoes='pago com desconto',
-        )
+    def test_valor_acima_do_saldo_rejeitado(self):
+        self._post_recebimento(valor='2000.01', data_recebimento=date.today().isoformat())
         self.receita.refresh_from_db()
-        self.assertEqual(self.receita.valor_recebido, Decimal('1980.50'))
-        self.assertEqual(self.receita.data_recebimento, hoje)
+        self.assertEqual(self.receita.recebimentos.count(), 0)
+        self.assertIsNone(self.receita.valor_recebido)
+
+    def test_edicao_de_encargos_atualiza_e_reconsolida(self):
+        # vencimento futuro para o status reconsolidado ser determinístico
+        self.receita.data_vencimento = date.today() + timedelta(days=5)
+        self.receita.save(update_fields=['data_vencimento'])
+        self._post_encargos(multa='10.00', juros='5.25', desconto='2.00', observacoes='ajuste')
+        self.receita.refresh_from_db()
         self.assertEqual(self.receita.multa, Decimal('10.00'))
         self.assertEqual(self.receita.juros, Decimal('5.25'))
+        self.assertEqual(self.receita.desconto, Decimal('2.00'))
+        self.assertEqual(self.receita.observacoes, 'ajuste')
+        # consolidado permanece derivado dos recebimentos (nenhum registrado)
+        self.assertIsNone(self.receita.valor_recebido)
+        self.assertEqual(self.receita.status, 'previsto')
+
+    def test_desconto_maior_que_devido_rejeitado(self):
+        self._post_encargos(desconto='2500.00')
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.desconto, Decimal('0.00'))
+
+    def test_multa_apos_pagamento_parcial_recalcula_status(self):
+        # paga integralmente (2000) → recebido
+        self._post_recebimento(valor='2000.00', data_recebimento=date.today().isoformat())
+        self.receita.refresh_from_db()
         self.assertEqual(self.receita.status, 'recebido')
-        self.assertEqual(self.receita.observacoes, 'pago com desconto')
+        # multa de 100 reabre saldo de 100 → volta a parcial
+        self._post_encargos(multa='100.00')
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.status, 'parcial')
+        self.assertEqual(self.receita.saldo_em_aberto, Decimal('100.00'))
+
+    def test_cancelar_e_reabrir_receita(self):
+        self._post_recebimento(valor='500.00', data_recebimento=date.today().isoformat())
+        self.client.post(reverse('baixa_receitas_mes'), {
+            'mes': self.mes, 'ano': self.ano,
+            'receita_id': self.receita.pk, 'action': 'cancelar',
+        })
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.status, 'cancelado')
+        # cancelamento encerra a cobrança sem apagar recebimentos
+        self.assertEqual(self.receita.saldo_em_aberto, Decimal('0.00'))
+        self.assertTrue(self.receita.esta_quitada)
+        self.assertEqual(self.receita.recebimentos.count(), 1)
+        # reabrir recalcula pelo saldo/recebimentos → parcial
+        self.client.post(reverse('baixa_receitas_mes'), {
+            'mes': self.mes, 'ano': self.ano,
+            'receita_id': self.receita.pk, 'action': 'reabrir',
+        })
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.status, 'parcial')
+        self.assertEqual(self.receita.valor_recebido, Decimal('500.00'))
 
     def test_marcar_recebida_quita_o_saldo_integral(self):
         """marcar_recebida registra o recebimento do saldo em aberto integral."""

@@ -84,19 +84,25 @@ def imovel_detail(request, pk):
     )
     unidades = imovel.unidades.all()
 
+    # Valores financeiros calculados SOMENTE para as áreas que o usuário pode
+    # ver: sem permissão de despesas não há consulta a despesas nem resultado
+    # líquido/yield líquido; sem permissão de receitas não há indicadores.
     if ve_receitas:
         total_recebido = ReceitaAluguel.objects.filter(
             imovel=imovel, status__in=('recebido', 'parcial')
         ).aggregate(total=Sum('valor_recebido'))['total'] or 0
-        indicadores = indicadores_do_imovel(imovel)
+        indicadores = indicadores_do_imovel(imovel, incluir_despesas=ve_despesas)
     else:
-        total_recebido = 0
+        total_recebido = None
         indicadores = None
     total_despesas = (
         Despesa.objects.filter(imovel=imovel, status='paga').aggregate(total=Sum('valor'))['total'] or 0
-        if ve_despesas else 0
+        if ve_despesas else None
     )
-    resultado = total_recebido - total_despesas
+    resultado = (
+        total_recebido - total_despesas
+        if ve_receitas and ve_despesas else None
+    )
 
     context = {
         'indicadores': indicadores,
@@ -112,6 +118,11 @@ def imovel_detail(request, pk):
         'docs_obrigatorios': docs_obrigatorios,
         'unidades': unidades,
         've_obrigatorios': ve_obrigatorios,
+        've_receitas': ve_receitas,
+        've_despesas': ve_despesas,
+        've_manutencoes': ve_manutencoes,
+        've_documentos': ve_documentos,
+        've_contrato': ve_contrato,
     }
     return render(request, 'patrimonio/imovel_detail.html', context)
 

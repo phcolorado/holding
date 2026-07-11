@@ -31,7 +31,7 @@ Construído com Python + Django + Bootstrap 5 + SQLite.
 - **Documentos obrigatórios por imóvel**: controle de documentos esperados por imóvel com indicador de pendência
 - **Exportações** em CSV e XLSX (imóveis com tipo/uso, contratos com locatários/fiadores/imobiliária e filtro de status/imóvel/imobiliária, receitas, despesas, inadimplência, relatório mensal)
 - **Django Admin** completo com filtros, buscas, ordenação e inlines (partes do contrato, encargos, reajustes, documentos) para todos os modelos
-- **Perfis de acesso por área**: cada tela exige a permissão de leitura da sua área — grupos prontos para **sócio** (leitura geral), **advogado** (contratos, imóveis, pessoas e documentos) e **contador** (financeiro, conciliação, documentos e exportações); o menu lateral e o dashboard se adaptam ao perfil
+- **Perfis de acesso por área**: cada tela exige a permissão de leitura da sua área — grupos prontos para **sócio** (leitura geral), **advogado** (contratos, imóveis, pessoas e documentos) e **contador** (financeiro, conciliação, documentos e exportações); o menu lateral e o dashboard se adaptam ao perfil. No detalhe do imóvel, os cards financeiros também se ajustam à combinação de permissões: só receitas mostra total recebido (sem despesas, sem yield líquido); só despesas mostra só o total pago; as duas juntas mostram resultado líquido completo; sem nenhuma, nenhum card financeiro aparece — e nada é consultado a mais do que o exibido
 - **Proteção de login** (django-axes): 5 tentativas falhas de senha bloqueiam o usuário/IP por 1 hora
 - **Pronto para publicar**: whitenoise + gunicorn + Dockerfile/Procfile, HTTPS/HSTS automáticos com `DJANGO_DEBUG=0` — ver seção "Publicando na internet"
 
@@ -284,11 +284,15 @@ Diferença entre as duas operações:
 
 Na tela de baixa é possível:
 - **Marcar como recebida** (botão verde ✓): registra um recebimento do **saldo em aberto** (valor previsto + multa + juros − desconto − já recebido) com data de hoje.
-- **Editar**: abre modal para alterar valor recebido, data, status e observações.
+- **Registrar recebimento** (botão de dinheiro): abre modal para lançar um recebimento **manual** de qualquer valor até o saldo em aberto, com data e observações — cria um `RecebimentoReceita`.
+- **Editar** (lápis): altera **multa, juros, desconto e observações** — nunca o valor recebido/data/status diretamente, que são sempre derivados dos recebimentos. Alterar multa/juros/desconto reconsolida o status automaticamente (o saldo total pode ter mudado).
+- **Cancelar/Reabrir**: cancela a cobrança (saldo passa a zero, `esta_quitada=True`) **sem apagar** os recebimentos já registrados; reabrir recalcula o status a partir do saldo e dos recebimentos existentes.
 
-### Pagamentos parciais (múltiplos recebimentos)
+### Pagamentos parciais (múltiplos recebimentos) — fonte única de verdade
 
-Cada receita pode ter **vários recebimentos** (model `RecebimentoReceita` — manual, por conciliação bancária ou migrado dos dados antigos). Os campos `valor_recebido`, `data_recebimento` e `status` da receita são **consolidados automaticamente** a partir dos recebimentos: soma dos valores, data do último e status `recebido` (saldo zerado), `parcial` (pago em parte) ou `previsto`/`atrasado`. Receita **parcial não é considerada quitada** — o saldo em aberto aparece na inadimplência quando vencido. Os recebimentos individuais podem ser vistos/editados no Admin, dentro da receita.
+Cada receita pode ter **vários recebimentos** (model `RecebimentoReceita` — manual, por conciliação bancária ou migrado dos dados antigos). **`RecebimentoReceita` é a fonte oficial dos pagamentos**: os campos `valor_recebido`, `data_recebimento` e `status` da receita são **sempre consolidados automaticamente** a partir dele (soma dos valores, data do último, e status `recebido`/`parcial`/`atrasado`/`previsto` conforme o saldo e o vencimento). No Django Admin, esses três campos são **somente leitura** — o cadastro de pagamentos é feito exclusivamente pelo inline "Recebimentos da Receita"; para cancelar/reabrir, use as actions **"Cancelar receitas selecionadas"** / **"Reabrir receitas canceladas"**.
+
+Receita **parcial não é considerada quitada** — o saldo em aberto aparece na inadimplência quando vencido. Consultas de "em aberto"/"inadimplentes"/"quitadas" usam um **QuerySet centralizado** (`ReceitaAluguel.objects.em_aberto()`, `.inadimplentes()`, `.quitadas()`) calculado pelo **saldo no banco** — o campo `status` é mantido para exibição/compatibilidade, mas nunca é a única fonte da regra financeira.
 
 ---
 
@@ -297,6 +301,8 @@ Cada receita pode ter **vários recebimentos** (model `RecebimentoReceita` — m
 O campo `tipo` de `Pessoa` é apenas uma **categoria preferencial** usada para busca e organização — ele não restringe o uso da pessoa em contratos. A mesma pessoa pode ser locatária em um contrato e fiadora (ou representante, cônjuge, imobiliária) em outro.
 
 Os papéis efetivos de cada pessoa em cada contrato são registrados em **Partes do Contrato** (model `ContratoParte`), com `papel` e `principal`. Os campos `locatario`, `fiador` e `imobiliaria` em `Contrato` são mantidos como **campos legados** por compatibilidade; quando não há partes cadastradas, o sistema usa automaticamente esses campos legados.
+
+**CPF/CNPJ único:** o campo `cpf_cnpj` aceita qualquer formatação (com ou sem pontuação) — internamente é normalizado (`cpf_cnpj_normalizado`, só dígitos) e uma **constraint no banco** impede duas pessoas com o mesmo documento (campo vazio pode repetir livremente; o `clean()` do formulário também avisa antes de tentar salvar). Se o banco já tinha duplicidades antes desta constraint, a migration correspondente **interrompe** com a lista de IDs/nomes em conflito — nada é apagado ou mesclado automaticamente; corrija manualmente no Admin e rode `migrate` de novo.
 
 ## Contratos com Múltiplos Locatários e Fiadores
 
@@ -346,6 +352,8 @@ Ao salvar um reajuste novo marcado como aplicado, o sistema automaticamente:
 - Atualiza `Contrato.valor_aluguel` e o encargo de aluguel ativo para o valor novo.
 - Avança `data_proximo_reajuste` em 12 meses (exceto para índice "Fixo").
 - **Nunca** altera receitas já geradas — apenas receitas futuras (ainda não geradas) usarão o novo valor.
+
+**Reajuste aplicado é imutável:** depois de aplicado (`aplicado_em` preenchido), o reajuste não pode voltar a "não aplicado" nem ter os campos financeiros (contrato, data, índice, percentual, valores, período do índice) alterados — só as observações continuam editáveis. A pendência oficial é `aplicado_em IS NULL` (não o flag `aplicado`, que pode ter sido marcado manualmente sem passar por `aplicar()`). Para corrigir um reajuste já aplicado, registre um novo reajuste.
 
 O Dashboard e o Checklist Mensal alertam quando há contratos ativos com `data_proximo_reajuste` vencida.
 
@@ -443,9 +451,13 @@ Acesse `/financeiro/conciliacao/` (menu lateral: "Conciliação Bancária").
 
 **Conciliação por saldo:** a soma comparada com o crédito é sempre a dos **saldos em aberto** das receitas (não o valor previsto cheio), então receitas parcialmente pagas conciliam pelo que falta. Toda a validação é refeita no servidor dentro de uma transação com lock — a soma exibida na tela é apenas informativa.
 
-**Desfazer conciliação:** créditos conciliados têm o botão **"Desfazer"**, que remove os recebimentos criados, reconsolida as receitas e reabre as comissões que haviam sido marcadas como pagas. Débitos lançados como despesa devem ser corrigidos excluindo a despesa no Admin.
+**Repasse líquido rigoroso:** ao marcar comissões, o sistema exige que **todas** as receitas selecionadas pertençam à **mesma imobiliária** (mesmo que a soma matemática coincidisse com outra combinação de receitas de imobiliárias diferentes — rejeitado), que cada receita tenha imobiliária vinculada, que as comissões sejam automáticas e estejam em aberto, e que nenhuma comissão seja maior ou igual ao saldo da própria receita. `ConciliacaoReceita.valor_atribuido` guarda a parcela do **crédito bancário** (líquida de comissão no repasse líquido); o `RecebimentoReceita` correspondente registra sempre o **bruto** (o inquilino pagou o aluguel integral).
 
-**Garantias de idempotência:** o mesmo arquivo não pode ser importado duas vezes (hash), e transações repetidas em extratos de períodos sobrepostos são ignoradas pelo `FITID` do OFX (FITID vazio ganha um identificador determinístico). O arquivo precisa conter **uma única conta**, e o número da conta/banco é conferido com o cadastro da Conta Bancária. O Dashboard e o Checklist Mensal alertam quando há transações pendentes de conciliação.
+**Vínculo explícito de comissões:** cada comissão marcada como paga por um repasse líquido gera um registro `ConciliacaoComissao` (transação ↔ despesa). Ao desfazer, **somente** essas despesas são reabertas — uma comissão paga manualmente na mesma data nunca é afetada. Conciliações antigas (anteriores a este vínculo) que marcaram comissões exigem **revisão manual** antes de poderem ser desfeitas (reabra a despesa no Admin primeiro).
+
+**Desfazer conciliação:** créditos conciliados têm o botão **"Desfazer"**, que remove os recebimentos criados, reconsolida as receitas e reabre as comissões vinculadas. Débitos lançados como despesa devem ser corrigidos excluindo a despesa no Admin.
+
+**Garantias de idempotência:** o mesmo arquivo não pode ser importado duas vezes (hash), e transações repetidas em extratos de períodos sobrepostos são ignoradas pelo `FITID` do OFX. Um FITID ausente/vazio (`None`, `''`, `'None'`, `'null'`) ganha um identificador **determinístico por assinatura** (conta + data + valor + descrição + memo + tipo, mais um contador de ocorrência para transações idênticas no mesmo arquivo) — a mesma transação gera o mesmo id mesmo em posições diferentes de extratos sobrepostos. O arquivo precisa conter **uma única conta**; se a Conta Bancária tem número/código do banco cadastrado, o OFX **precisa** informar o campo correspondente (ausência ou divergência é rejeitada) — a comparação é sempre por dígitos como texto, nunca convertendo para inteiro (zeros à esquerda importam). O Dashboard e o Checklist Mensal alertam quando há transações pendentes de conciliação.
 
 > PDF de extrato não é suportado nesta fase — o OFX é estruturado e confiável; exporte-o no internet banking (opção "OFX", "Money" ou "Open Financial Exchange").
 

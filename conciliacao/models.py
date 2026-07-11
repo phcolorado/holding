@@ -134,14 +134,28 @@ class TransacaoExtrato(models.Model):
 
 
 class ConciliacaoReceita(models.Model):
-    """Liga uma transação do extrato às receitas que ela quitou (repasse consolidado = várias)."""
+    """
+    Liga uma transação do extrato às receitas que ela quitou (repasse
+    consolidado = várias).
+
+    Semântica de valor_atribuido: é a parcela do CRÉDITO BANCÁRIO (o dinheiro
+    que efetivamente entrou na conta) atribuída a esta receita. No repasse
+    líquido de imobiliária, portanto, é o valor LÍQUIDO (saldo bruto da
+    receita − comissão retida); o RecebimentoReceita correspondente registra
+    o BRUTO, porque o inquilino pagou o aluguel integral — a diferença é a
+    despesa de comissão, vinculada via ConciliacaoComissao.
+    Invariante: soma dos valor_atribuido de uma transação == valor do crédito.
+    """
     transacao = models.ForeignKey(
         TransacaoExtrato, on_delete=models.CASCADE, related_name='itens_receita', verbose_name='Transação'
     )
     receita = models.ForeignKey(
         ReceitaAluguel, on_delete=models.PROTECT, related_name='conciliacoes', verbose_name='Receita'
     )
-    valor_atribuido = models.DecimalField('Valor Atribuído (R$)', max_digits=12, decimal_places=2)
+    valor_atribuido = models.DecimalField(
+        'Valor Atribuído do Crédito (R$)', max_digits=12, decimal_places=2,
+        help_text='Parcela do crédito bancário atribuída a esta receita (líquida de comissão no repasse líquido).',
+    )
     criado_em = models.DateTimeField('Criado em', auto_now_add=True)
 
     class Meta:
@@ -151,6 +165,36 @@ class ConciliacaoReceita(models.Model):
 
     def __str__(self):
         return f'{self.receita} ← R$ {self.valor_atribuido}'
+
+
+class ConciliacaoComissao(models.Model):
+    """
+    Vínculo explícito entre uma conciliação de repasse líquido e as despesas
+    de comissão que ELA marcou como pagas. Ao desfazer a conciliação, apenas
+    estas despesas são reabertas — comissões pagas manualmente (ou por outra
+    transação) na mesma data nunca são afetadas.
+    """
+    transacao = models.ForeignKey(
+        TransacaoExtrato, on_delete=models.CASCADE, related_name='itens_comissao', verbose_name='Transação'
+    )
+    despesa = models.ForeignKey(
+        Despesa, on_delete=models.CASCADE, related_name='conciliacoes_comissao', verbose_name='Despesa de Comissão'
+    )
+    valor = models.DecimalField('Valor da Comissão (R$)', max_digits=12, decimal_places=2)
+    criado_em = models.DateTimeField('Criado em', auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Comissão Conciliada'
+        verbose_name_plural = 'Comissões Conciliadas'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['transacao', 'despesa'],
+                name='conciliacaocomissao_transacao_despesa_unica',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.despesa} ← transação {self.transacao_id} (R$ {self.valor})'
 
 
 class RegraClassificacao(models.Model):

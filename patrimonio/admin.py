@@ -95,7 +95,11 @@ class EncargoContratoInline(admin.TabularInline):
 class ReajusteContratoInline(admin.TabularInline):
     model = ReajusteContrato
     extra = 0
-    fields = ('data_reajuste', 'indice', 'percentual_aplicado', 'valor_anterior', 'valor_novo', 'aplicado', 'observacoes')
+    fields = (
+        'data_reajuste', 'indice', 'percentual_aplicado', 'valor_anterior',
+        'valor_novo', 'periodo_indice', 'aplicado', 'aplicado_em', 'observacoes',
+    )
+    readonly_fields = ('aplicado_em',)
 
 
 class DocumentoContratoInline(admin.TabularInline):
@@ -162,7 +166,8 @@ class ContratoAdmin(SimpleHistoryAdmin):
             if contrato.indice_reajuste not in SERIES_SGS:
                 sem_indice += 1
                 continue
-            if contrato.reajustes.filter(aplicado=False).exists():
+            # Pendência oficial: aplicado_em IS NULL (não o flag aplicado)
+            if contrato.reajustes.filter(aplicado_em__isnull=True).exists():
                 ja_pendentes += 1
                 continue
 
@@ -324,10 +329,14 @@ class ContratoAdmin(SimpleHistoryAdmin):
         if formset.model is ReajusteContrato:
             instances = formset.save(commit=False)
             for obj in instances:
+                if obj.aplicado_em is not None:
+                    # Já aplicado: o model força aplicado=True e clean() bloqueia
+                    # alteração dos campos financeiros; nunca reaplicamos.
+                    obj.save()
+                    continue
                 marcado_para_aplicar = obj.aplicado
-                if obj.pk is None or obj.aplicado_em is None:
-                    # aplicado só é efetivado por aplicar() — evita marcar sem aplicar
-                    obj.aplicado = False
+                # aplicado só é efetivado por aplicar() — evita marcar sem aplicar
+                obj.aplicado = False
                 obj.save()
                 if marcado_para_aplicar:
                     # aplicar() é idempotente (guard por aplicado_em) e atômico

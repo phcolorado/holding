@@ -1,4 +1,4 @@
-from django.contrib import admin
+from django.contrib import admin, messages
 from simple_history.admin import SimpleHistoryAdmin
 from .models import ReceitaAluguel, ReceitaAluguelItem, RecebimentoReceita, Despesa, FechamentoMensal
 
@@ -12,8 +12,8 @@ class ReceitaAluguelItemInline(admin.TabularInline):
 class RecebimentoReceitaInline(admin.TabularInline):
     model = RecebimentoReceita
     extra = 0
-    fields = ('data_recebimento', 'valor', 'origem', 'transacao_extrato', 'observacoes')
-    readonly_fields = ('origem', 'transacao_extrato')
+    fields = ('data_recebimento', 'valor', 'origem', 'transacao_extrato', 'criado_por', 'observacoes')
+    readonly_fields = ('origem', 'transacao_extrato', 'criado_por')
 
 
 @admin.register(ReceitaAluguel)
@@ -25,10 +25,14 @@ class ReceitaAluguelAdmin(SimpleHistoryAdmin):
     list_filter = ('status', 'competencia_ano', 'competencia_mes', 'imovel')
     search_fields = ('imovel__nome', 'contrato__locatario__nome', 'contrato__partes__pessoa__nome')
     date_hierarchy = 'data_vencimento'
-    readonly_fields = ('criado_em', 'atualizado_em')
+    # valor_recebido/data_recebimento/status são CONSOLIDADOS derivados dos
+    # recebimentos (inline abaixo) — nunca editados diretamente. Cancelamento
+    # e reabertura passam pelas actions dedicadas.
+    readonly_fields = ('valor_recebido', 'data_recebimento', 'status', 'criado_em', 'atualizado_em')
     ordering = ('-competencia_ano', '-competencia_mes')
     raw_id_fields = ('contrato',)
     inlines = [ReceitaAluguelItemInline, RecebimentoReceitaInline]
+    actions = ['cancelar_receitas', 'reabrir_receitas']
 
     def get_readonly_fields(self, request, obj=None):
         return self.readonly_fields + ('imovel',)
@@ -41,7 +45,13 @@ class ReceitaAluguelAdmin(SimpleHistoryAdmin):
         ('Vencimento e Valores', {
             'fields': ('data_vencimento', 'valor_previsto', 'multa', 'juros', 'desconto')
         }),
-        ('Recebimento', {
+        ('Recebimento (consolidado — derivado dos recebimentos abaixo)', {
+            'description': (
+                'Estes campos são calculados automaticamente a partir dos '
+                '"Recebimentos da Receita". Para registrar um pagamento, adicione '
+                'um recebimento no inline; para cancelar/reabrir a receita, use as '
+                'ações da listagem.'
+            ),
             'fields': ('valor_recebido', 'data_recebimento', 'status')
         }),
         ('Observações', {
@@ -52,6 +62,50 @@ class ReceitaAluguelAdmin(SimpleHistoryAdmin):
             'classes': ('collapse',),
         }),
     )
+
+    @admin.action(description='Cancelar receitas selecionadas')
+    def cancelar_receitas(self, request, queryset):
+        total = sum(1 for r in queryset if r.cancelar())
+        if total:
+            self.message_user(
+                request,
+                f'{total} receita(s) cancelada(s) — recebimentos registrados foram preservados.',
+                messages.SUCCESS,
+            )
+        else:
+            self.message_user(request, 'Nenhuma receita precisou ser cancelada.', messages.WARNING)
+
+    @admin.action(description='Reabrir receitas canceladas')
+    def reabrir_receitas(self, request, queryset):
+        total = sum(1 for r in queryset if r.reabrir())
+        if total:
+            self.message_user(
+                request,
+                f'{total} receita(s) reaberta(s) — status recalculado pelo saldo, vencimento e recebimentos.',
+                messages.SUCCESS,
+            )
+        else:
+            self.message_user(request, 'Nenhuma receita selecionada estava cancelada.', messages.WARNING)
+
+    def save_formset(self, request, form, formset, change):
+        if formset.model is RecebimentoReceita:
+            instances = formset.save(commit=False)
+            for obj in instances:
+                if obj.pk is None and obj.criado_por_id is None:
+                    obj.criado_por = request.user
+                obj.save()  # dispara garantir_recebimento_legado + recálculo
+            for obj in formset.deleted_objects:
+                obj.delete()  # delete() individual também reconsolida
+            formset.save_m2m()
+        else:
+            formset.save()
+
+    def save_related(self, request, form, formsets, change):
+        super().save_related(request, form, formsets, change)
+        # Depois de salvar/alterar/excluir inlines (e possíveis mudanças em
+        # multa/juros/desconto no form principal), reconsolida a receita.
+        form.instance.refresh_from_db()
+        form.instance.recalcular_recebimentos()
 
 
 @admin.register(Despesa)

@@ -36,11 +36,8 @@ def dashboard(request):
     receitas_recebidas = receitas_mes.filter(
         status__in=('recebido', 'parcial')
     ).aggregate(total=Sum('valor_recebido'))['total'] or 0
-    receitas_atrasadas = receitas_mes.filter(
-        data_vencimento__lt=hoje
-    ).exclude(
-        status__in=ReceitaAluguel.STATUS_QUITADOS
-    ).count()
+    # Regra centralizada: vencidas com saldo em aberto (independe do status)
+    receitas_atrasadas = receitas_mes.inadimplentes().count()
 
     despesas_abertas = Despesa.objects.filter(status__in=('prevista', 'atrasada')).count()
 

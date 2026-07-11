@@ -1,7 +1,10 @@
 from django.contrib import admin
 from simple_history.admin import SimpleHistoryAdmin
 
-from .models import ContaBancaria, ExtratoImportado, TransacaoExtrato, RegraClassificacao
+from .models import (
+    ContaBancaria, ExtratoImportado, TransacaoExtrato, RegraClassificacao,
+    ConciliacaoComissao,
+)
 
 
 @admin.register(ContaBancaria)
@@ -29,6 +32,27 @@ class TransacaoExtratoInline(admin.TabularInline):
     readonly_fields = fields
 
     def has_add_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(ConciliacaoComissao)
+class ConciliacaoComissaoAdmin(admin.ModelAdmin):
+    """
+    Somente leitura — vínculo criado exclusivamente pelo repasse líquido
+    (conciliar_com_receitas) e removido pelo desfazer_conciliacao.
+    """
+    list_display = ('transacao', 'despesa', 'valor', 'criado_em')
+    list_filter = ('transacao__conta',)
+    search_fields = ('despesa__descricao',)
+    raw_id_fields = ('transacao', 'despesa')
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
         return False
 
 
