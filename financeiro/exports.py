@@ -294,8 +294,11 @@ def _resumo_por_imovel(receitas, despesas):
     for r in receitas:
         item = dados[r.imovel.nome]
         item['rec_prev'] += r.valor_previsto
-        if r.status != 'cancelado':
-            item['rec_rec'] += r.valor_recebido or Decimal('0.00')
+        # Sempre soma valor_recebido, mesmo cancelada: recalcular_recebimentos
+        # reconsolida esse campo a partir dos RecebimentoReceita reais
+        # independentemente do status — dinheiro recebido não desaparece com
+        # o cancelamento (item 4).
+        item['rec_rec'] += r.valor_recebido or Decimal('0.00')
         # Em aberto pelo SALDO real (cancelada tem saldo 0) — não pelo status
         if r.saldo_em_aberto > 0:
             item['em_aberto'] += 1
@@ -392,7 +395,9 @@ def exportar_relatorio_contabilidade_xlsx(request, mes, ano):
     ws_res.append(['Campo', 'Valor'])
     _estilizar_cabecalho(ws_res, 2)
     total_prev = sum(r.valor_previsto for r in receitas)
-    total_rec = sum(r.valor_recebido or 0 for r in receitas if r.status != 'cancelado')
+    # Soma valor_recebido de TODAS as receitas, mesmo canceladas — dinheiro
+    # recebido antes do cancelamento continua no caixa (item 4).
+    total_rec = sum(r.valor_recebido or 0 for r in receitas)
     total_desp = sum(d.valor for d in despesas if d.status == 'paga')
     # Identificação pelo SALDO real (regra centralizada), não pelo status:
     # cancelada tem saldo 0; parcial/'recebido' com saldo > 0 conta como aberta.

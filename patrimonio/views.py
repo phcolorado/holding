@@ -6,7 +6,7 @@ from django.utils import timezone
 from .models import Imovel, Pessoa, Contrato, Manutencao, imobiliarias_queryset
 from .indicadores import indicadores_do_imovel
 from core.utils import pk_param
-from financeiro.models import ReceitaAluguel, Despesa
+from financeiro.models import ReceitaAluguel, RecebimentoReceita, Despesa
 from documentos.models import Documento, DocumentoObrigatorio
 
 
@@ -84,13 +84,35 @@ def imovel_detail(request, pk):
     )
     unidades = imovel.unidades.all()
 
+    # Aba inicial: primeira que o usuário pode efetivamente ver, na ordem de
+    # prioridade definida — evita cair em uma aba sem nenhum "active"/"show
+    # active" (todas escondidas) quando o usuário só tem permissão para uma
+    # área que não seja receitas. "Unidades" nunca é escondida, por isso é
+    # sempre um fallback válido no fim da lista.
+    if ve_receitas:
+        aba_inicial = 'receitas'
+    elif ve_despesas:
+        aba_inicial = 'despesas'
+    elif ve_documentos:
+        aba_inicial = 'documentos'
+    elif ve_manutencoes:
+        aba_inicial = 'manutencoes'
+    elif ve_obrigatorios:
+        aba_inicial = 'obrigatorios'
+    else:
+        aba_inicial = 'unidades'
+
     # Valores financeiros calculados SOMENTE para as áreas que o usuário pode
     # ver: sem permissão de despesas não há consulta a despesas nem resultado
     # líquido/yield líquido; sem permissão de receitas não há indicadores.
+    #
+    # total_recebido soma RecebimentoReceita diretamente (não valor_recebido
+    # filtrado por status) — dinheiro que efetivamente entrou continua no
+    # caixa mesmo quando a receita foi cancelada depois de receber algo.
     if ve_receitas:
-        total_recebido = ReceitaAluguel.objects.filter(
-            imovel=imovel, status__in=('recebido', 'parcial')
-        ).aggregate(total=Sum('valor_recebido'))['total'] or 0
+        total_recebido = RecebimentoReceita.objects.filter(
+            receita__imovel=imovel
+        ).aggregate(total=Sum('valor'))['total'] or 0
         indicadores = indicadores_do_imovel(imovel, incluir_despesas=ve_despesas)
     else:
         total_recebido = None
@@ -123,6 +145,7 @@ def imovel_detail(request, pk):
         've_manutencoes': ve_manutencoes,
         've_documentos': ve_documentos,
         've_contrato': ve_contrato,
+        'aba_inicial': aba_inicial,
     }
     return render(request, 'patrimonio/imovel_detail.html', context)
 

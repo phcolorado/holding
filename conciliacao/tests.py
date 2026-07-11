@@ -624,6 +624,82 @@ class ConciliacaoSaldoTest(TestCase):
 
 
 @override_settings(MEDIA_ROOT=MEDIA_TEMP)
+class ConciliacaoExataDeCentavosTest(TestCase):
+    """
+    Item 8: a conciliação exige igualdade EXATA entre a soma atribuída e o
+    crédito — nenhuma tolerância de centavos é aceita no commit (a
+    tolerância de R$0,05 continua existindo só na SUGESTÃO, não na gravação).
+    """
+
+    def setUp(self):
+        from .services import ConciliacaoInvalidaError
+        self.ConciliacaoInvalidaError = ConciliacaoInvalidaError
+        self.conta = ContaBancaria.objects.create(nome='Conta Centavos')
+        self.extrato = ExtratoImportado.objects.create(conta=self.conta, hash_arquivo='hcentavos')
+        self.imovel, self.locatario = _base()
+        self.contrato = _contrato(self.imovel, self.locatario)
+        self.receita = _receita(self.contrato, date(2026, 3, 10), Decimal('1000.00'))
+
+    def _tx(self, valor, fitid):
+        return TransacaoExtrato.objects.create(
+            extrato=self.extrato, conta=self.conta, fitid=fitid,
+            data=date(2026, 3, 12), valor=Decimal(valor), tipo='credito', descricao='PIX',
+        )
+
+    # Nos 4 testes abaixo o crédito é MAIOR que o saldo da receita (único
+    # jeito de sobrar dinheiro sem destino) — a diferença é o excedente que
+    # antes ficava silenciosamente "perdido" (tolerado até R$0,05).
+
+    def test_diferenca_de_1_centavo_rejeitada(self):
+        tx = self._tx('1000.01', 'c1')
+        with self.assertRaises(self.ConciliacaoInvalidaError):
+            conciliar_com_receitas(tx, [self.receita])
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'pendente')
+
+    def test_diferenca_de_4_centavos_rejeitada(self):
+        tx = self._tx('1000.04', 'c4')
+        with self.assertRaises(self.ConciliacaoInvalidaError):
+            conciliar_com_receitas(tx, [self.receita])
+
+    def test_diferenca_de_5_centavos_rejeitada(self):
+        """Antes da correção, R$0,05 era exatamente o limite tolerado — agora é rejeitado."""
+        tx = self._tx('1000.05', 'c5')
+        with self.assertRaises(self.ConciliacaoInvalidaError):
+            conciliar_com_receitas(tx, [self.receita])
+
+    def test_diferenca_de_6_centavos_rejeitada(self):
+        tx = self._tx('1000.06', 'c6')
+        with self.assertRaises(self.ConciliacaoInvalidaError):
+            conciliar_com_receitas(tx, [self.receita])
+
+    def test_igualdade_exata_aceita(self):
+        tx = self._tx('1000.00', 'c0')
+        conciliar_com_receitas(tx, [self.receita])
+        tx.refresh_from_db()
+        self.receita.refresh_from_db()
+        self.assertEqual(tx.status, 'conciliada')
+        self.assertEqual(self.receita.status, 'recebido')
+        self.assertEqual(self.receita.saldo_em_aberto, Decimal('0.00'))
+
+    def test_repasse_liquido_com_diferenca_de_1_centavo_rejeitado(self):
+        from financeiro.services import gerar_receitas_para_contrato
+        imob = Pessoa.objects.create(nome='Imob Centavo', tipo='imobiliaria')
+        c = _contrato(
+            Imovel.objects.create(nome='Sala Centavo', endereco='X', cidade='BH', estado='MG'),
+            self.locatario, valor_aluguel=Decimal('2000.00'), imobiliaria=imob,
+            comissao_imobiliaria_percentual=Decimal('10.00'),
+            data_inicio=date(2026, 1, 1), data_fim=date(2026, 12, 31),
+        )
+        gerar_receitas_para_contrato(c, data_inicio=date(2026, 3, 1), data_fim=date(2026, 3, 31))
+        receita = ReceitaAluguel.objects.get(contrato=c)
+        # líquido correto seria 1800.00; 1799.99 (1 centavo a menos) deve ser rejeitado
+        tx = self._tx('1799.99', 'rl1')
+        with self.assertRaises(self.ConciliacaoInvalidaError):
+            conciliar_com_receitas(tx, [receita], marcar_comissoes=True)
+
+
+@override_settings(MEDIA_ROOT=MEDIA_TEMP)
 class ImportarOFXContasTest(TestCase):
     """Validações de conta e FITID na importação (item 14)."""
 
@@ -795,6 +871,42 @@ class RepasseLiquidoRigorosoTest(TestCase):
         self.assertEqual(tx.itens_comissao.count(), 0)
         self.assertEqual(tx.status, 'pendente')
 
+    def test_comissao_fornecedor_diferente_da_imobiliaria_rejeitada(self):
+        """
+        Item 9: contrato cuja imobiliária foi trocada DEPOIS da despesa de
+        comissão ter sido gerada — a comissão automática guardou o fornecedor
+        antigo, que já não corresponde à imobiliária atual do contrato.
+        """
+        from .services import ConciliacaoInvalidaError
+        imob_antiga = Pessoa.objects.create(nome='Imob Antiga', tipo='imobiliaria')
+        imob_nova = Pessoa.objects.create(nome='Imob Nova', tipo='imobiliaria')
+        contrato, receita, comissao = self._contrato_com_imob('Sala Troca', imob_antiga)
+        self.assertEqual(comissao.fornecedor_id, imob_antiga.pk)
+
+        # Imobiliária do contrato é trocada depois — a despesa já gerada
+        # mantém o fornecedor antigo (não há backfill retroativo automático).
+        contrato.imobiliaria = imob_nova
+        contrato.save()
+        receita.refresh_from_db()
+
+        tx = self._tx('1800.00', 'rl-troca')
+        with self.assertRaises(ConciliacaoInvalidaError) as ctx:
+            conciliar_com_receitas(tx, [receita], marcar_comissoes=True)
+        self.assertIn('fornecedor diferente', str(ctx.exception))
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'pendente')
+
+    def test_comissao_sem_fornecedor_legado_aceita_compativel(self):
+        """Comissão antiga (dado legado) sem fornecedor preenchido é aceita por compatibilidade."""
+        imob = Pessoa.objects.create(nome='Imob Legado F', tipo='imobiliaria')
+        _, receita, comissao = self._contrato_com_imob('Sala LegF', imob)
+        Despesa.objects.filter(pk=comissao.pk).update(fornecedor=None)
+
+        tx = self._tx('1800.00', 'rl-legf')
+        conciliar_com_receitas(tx, [receita], marcar_comissoes=True)
+        receita.refresh_from_db()
+        self.assertEqual(receita.status, 'recebido')
+
     def test_desfazer_conciliacao_antiga_sem_vinculo_exige_revisao_manual(self):
         from .models import ConciliacaoReceita
         from .services import ConciliacaoInvalidaError, desfazer_conciliacao
@@ -823,6 +935,62 @@ class RepasseLiquidoRigorosoTest(TestCase):
         tx.refresh_from_db(); receita.refresh_from_db()
         self.assertEqual(tx.status, 'pendente')
         self.assertEqual(receita.recebimentos.count(), 0)
+
+
+class ConciliacaoComissaoProtectTest(TestCase):
+    """Item 14: despesa vinculada por ConciliacaoComissao não pode ser apagada em CASCADE."""
+
+    def setUp(self):
+        self.conta = ContaBancaria.objects.create(nome='Conta CCP')
+        self.extrato = ExtratoImportado.objects.create(conta=self.conta, hash_arquivo='hccp')
+        _, self.locatario = _base()
+
+    def _tx(self, valor, fitid):
+        return TransacaoExtrato.objects.create(
+            extrato=self.extrato, conta=self.conta, fitid=fitid,
+            data=date(2026, 3, 12), valor=Decimal(valor), tipo='credito', descricao='REPASSE',
+        )
+
+    def _receita_com_comissao(self, imob):
+        from financeiro.services import gerar_receitas_para_contrato
+        c = _contrato(
+            Imovel.objects.create(nome='Sala CCP', endereco='X', cidade='BH', estado='MG'),
+            self.locatario, valor_aluguel=Decimal('2000.00'), imobiliaria=imob,
+            comissao_imobiliaria_percentual=Decimal('10.00'),
+            data_inicio=date(2026, 1, 1), data_fim=date(2026, 12, 31),
+        )
+        gerar_receitas_para_contrato(c, data_inicio=date(2026, 3, 1), data_fim=date(2026, 3, 31))
+        receita = ReceitaAluguel.objects.get(contrato=c)
+        comissao = Despesa.objects.filter(contrato=c, origem_automatica=True).first()
+        return receita, comissao
+
+    def test_despesa_vinculada_nao_pode_ser_apagada(self):
+        from django.db.models import ProtectedError
+        from .models import ConciliacaoComissao
+        imob = Pessoa.objects.create(nome='Imob CCP', tipo='imobiliaria')
+        receita, comissao = self._receita_com_comissao(imob)
+        tx = self._tx('1800.00', 'ccp-1')
+        conciliar_com_receitas(tx, [receita], marcar_comissoes=True)
+
+        self.assertTrue(ConciliacaoComissao.objects.filter(despesa=comissao).exists())
+        with self.assertRaises(ProtectedError):
+            comissao.delete()
+        # a despesa e o vínculo continuam intactos
+        self.assertTrue(Despesa.objects.filter(pk=comissao.pk).exists())
+        self.assertTrue(ConciliacaoComissao.objects.filter(despesa=comissao).exists())
+
+    def test_apos_desfazer_conciliacao_despesa_pode_ser_apagada_normalmente(self):
+        from .models import ConciliacaoComissao
+        from .services import desfazer_conciliacao
+        imob = Pessoa.objects.create(nome='Imob CCP2', tipo='imobiliaria')
+        receita, comissao = self._receita_com_comissao(imob)
+        tx = self._tx('1800.00', 'ccp-2')
+        conciliar_com_receitas(tx, [receita], marcar_comissoes=True)
+
+        desfazer_conciliacao(tx)
+        self.assertFalse(ConciliacaoComissao.objects.filter(despesa=comissao).exists())
+        comissao.delete()  # não deve levantar — vínculo já removido pelo desfazer
+        self.assertFalse(Despesa.objects.filter(pk=comissao.pk).exists())
 
 
 # ─── FITID por assinatura + conferência rigorosa da conta (rodada 2) ──────────
@@ -965,3 +1133,38 @@ class ContaOFXRigorosaTest(TestCase):
             _ofx_conta([('t1', '20260310', '100.00', 'PIX')], acctid='', nome='livre.ofx'), conta
         )
         self.assertEqual(extrato.transacoes_novas, 1)
+
+
+# ─── Rodada 3 (item 7): proteção de arquivos privados (extrato OFX) ───────────
+
+@override_settings(MEDIA_ROOT=MEDIA_TEMP)
+class ExtratoDownloadProtegidoTest(TestCase):
+    def setUp(self):
+        self.conta = ContaBancaria.objects.create(nome='Conta Download')
+        self.extrato = importar_ofx(
+            _arquivo_ofx([('t1', '20260310', '100.00', 'PIX')], nome='download.ofx'), self.conta
+        )
+        self.client = Client()
+
+    def test_download_exige_login(self):
+        response = self.client.get(reverse('extrato_download', args=[self.extrato.pk]))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn('/login/', response['Location'])
+
+    def test_download_autenticado_sem_permissao_403(self):
+        User.objects.create_user('sem_perm_extrato', password='pass')
+        self.client.login(username='sem_perm_extrato', password='pass')
+        response = self.client.get(reverse('extrato_download', args=[self.extrato.pk]))
+        self.assertEqual(response.status_code, 403)
+
+    def test_download_com_permissao_serve_arquivo(self):
+        com_leitura(User.objects.create_user('com_perm_extrato', password='pass'))
+        self.client.login(username='com_perm_extrato', password='pass')
+        response = self.client.get(reverse('extrato_download', args=[self.extrato.pk]))
+        self.assertEqual(response.status_code, 200)
+        conteudo = b''.join(response.streaming_content)
+        self.assertIn(b'STMTTRN', conteudo)
+
+    def test_nao_existe_rota_publica_para_media(self):
+        response = self.client.get(f'/media/{self.extrato.arquivo.name}')
+        self.assertEqual(response.status_code, 404)

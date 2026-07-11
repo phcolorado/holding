@@ -293,36 +293,39 @@ def baixa_receitas_mes_view(request):
             receita = get_object_or_404(ReceitaAluguel, pk=receita_id)
 
             if action == 'marcar_recebida':
-                from .models import RecebimentoReceita
+                from django.core.exceptions import ValidationError
+                from .services import registrar_recebimento
                 saldo = receita.saldo_em_aberto
                 if saldo > 0:
                     # Registra o recebimento do saldo — soma-se aos anteriores
-                    # (parciais) e reconsolida valor_recebido/status.
-                    RecebimentoReceita.objects.create(
-                        receita=receita, data_recebimento=hoje, valor=saldo,
-                        origem='manual', criado_por=request.user,
-                    )
-                    messages.success(request, f'{receita.imovel.nome} marcado como recebido.')
+                    # (parciais) e reconsolida valor_recebido/status. Serviço
+                    # atômico: bloqueia a receita e reconfirma o saldo dentro
+                    # da transação antes de gravar.
+                    try:
+                        registrar_recebimento(
+                            receita.pk, saldo, hoje, usuario=request.user, origem='manual',
+                        )
+                        messages.success(request, f'{receita.imovel.nome} marcado como recebido.')
+                    except ValidationError as exc:
+                        erros = '; '.join(e for lista in exc.message_dict.values() for e in lista)
+                        messages.error(request, f'{receita.imovel.nome}: {erros}')
                 else:
                     messages.info(request, f'{receita.imovel.nome} já está sem saldo em aberto.')
 
             elif action == 'registrar_recebimento':
                 from django.core.exceptions import ValidationError
-                from .models import RecebimentoReceita
+                from .services import registrar_recebimento
                 form = RegistrarRecebimentoForm(request.POST)
                 if form.is_valid():
-                    recebimento = RecebimentoReceita(
-                        receita=receita,
-                        valor=form.cleaned_data['valor'],
-                        data_recebimento=form.cleaned_data['data_recebimento'],
-                        observacoes=form.cleaned_data['observacoes'],
-                        origem='manual',
-                        criado_por=request.user,
-                    )
                     try:
-                        # valida valor > 0 e valor <= saldo em aberto
-                        recebimento.full_clean()
-                        recebimento.save()
+                        recebimento = registrar_recebimento(
+                            receita.pk,
+                            form.cleaned_data['valor'],
+                            form.cleaned_data['data_recebimento'],
+                            usuario=request.user,
+                            origem='manual',
+                            observacoes=form.cleaned_data['observacoes'],
+                        )
                         messages.success(
                             request,
                             f'{receita.imovel.nome}: recebimento de R$ {recebimento.valor} registrado.'
@@ -437,6 +440,7 @@ def checklist_mensal_view(request):
     # como confirmado — permanece pendente até o saldo em aberto zerar.
     receitas_recebidas = receitas_mes.quitadas().exclude(status='cancelado').count()
     receitas_pendentes = receitas_mes.em_aberto().count()
+    receitas_canceladas = receitas_mes.filter(status='cancelado').count()
 
     despesas_mes = Despesa.objects.filter(competencia_mes=mes, competencia_ano=ano)
     total_despesas = despesas_mes.count()
@@ -480,7 +484,13 @@ def checklist_mensal_view(request):
         {
             'item': 'Recebimentos confirmados',
             'ok': total_receitas > 0 and receitas_pendentes == 0,
-            'detalhe': f'{receitas_recebidas}/{total_receitas} recebida(s)' if total_receitas else '—',
+            # Discrimina recebidas/canceladas/em aberto em vez de "0/1 recebida" —
+            # uma única receita CANCELADA sem pendência não deve soar como
+            # "0 de 1 recebidas" (não há nada pendente a receber dela).
+            'detalhe': (
+                f'{receitas_recebidas} recebida(s), {receitas_canceladas} cancelada(s), '
+                f'{receitas_pendentes} em aberto'
+            ) if total_receitas else '—',
             'link': reverse('baixa_receitas_mes') + f'?mes={mes}&ano={ano}',
         },
         {
@@ -568,6 +578,7 @@ def checklist_mensal_view(request):
         'total_receitas': total_receitas,
         'receitas_recebidas': receitas_recebidas,
         'receitas_pendentes': receitas_pendentes,
+        'receitas_canceladas': receitas_canceladas,
         'total_despesas': total_despesas,
         'despesas_pagas': despesas_pagas,
         'inadimplentes': inadimplentes,

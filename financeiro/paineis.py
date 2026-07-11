@@ -14,7 +14,7 @@ from django.db.models import Count, Sum
 
 from patrimonio.indicadores import competencias_ultimas, contrato_ocupa_mes, filtro_competencias
 from patrimonio.models import Contrato, Imovel
-from .models import ReceitaAluguel, Despesa, saldo_em_aberto_expr
+from .models import ReceitaAluguel, RecebimentoReceita, Despesa, saldo_em_aberto_expr
 
 
 def serie_ocupacao_mensal(n_meses=12, referencia=None):
@@ -55,18 +55,27 @@ def serie_ocupacao_mensal(n_meses=12, referencia=None):
 
 
 def serie_receita_despesa_por_imovel(n_meses=12, referencia=None):
-    """Receitas recebidas × despesas pagas por imóvel no período (ordenado por receita)."""
+    """
+    Receitas recebidas × despesas pagas por imóvel no período (ordenado por
+    receita). "Recebido" agrega RecebimentoReceita diretamente (não
+    valor_recebido filtrado por status) — inclui recebimentos de receitas
+    canceladas depois de terem recebido algo, cuja competência ainda cai no
+    período filtrado.
+    """
     competencias = competencias_ultimas(n_meses, referencia)
     filtro = filtro_competencias(competencias)
 
     dados = defaultdict(lambda: {'recebido': Decimal('0'), 'pago': Decimal('0')})
 
+    filtro_receb = filtro_competencias(
+        competencias, campo_ano='receita__competencia_ano', campo_mes='receita__competencia_mes'
+    )
     recebidos = (
-        ReceitaAluguel.objects.filter(filtro, status__in=('recebido', 'parcial'))
-        .values('imovel__nome').annotate(total=Sum('valor_recebido'))
+        RecebimentoReceita.objects.filter(filtro_receb)
+        .values('receita__imovel__nome').annotate(total=Sum('valor'))
     )
     for linha in recebidos:
-        dados[linha['imovel__nome']]['recebido'] = linha['total'] or Decimal('0')
+        dados[linha['receita__imovel__nome']]['recebido'] = linha['total'] or Decimal('0')
 
     pagos = (
         Despesa.objects.filter(filtro, status='paga', imovel__isnull=False)

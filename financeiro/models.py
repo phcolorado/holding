@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError
+from django.core.validators import MinValueValidator
 from django.db import models
 from django.db.models import DecimalField, ExpressionWrapper, F, Q, Value
 from django.db.models.functions import Coalesce
@@ -81,9 +82,18 @@ class ReceitaAluguel(models.Model):
     valor_recebido = models.DecimalField('Valor Recebido (R$)', max_digits=12, decimal_places=2, null=True, blank=True)
     data_recebimento = models.DateField('Data de Recebimento', null=True, blank=True)
     status = models.CharField('Status', max_length=15, choices=STATUS_CHOICES, default='previsto')
-    multa = models.DecimalField('Multa (R$)', max_digits=10, decimal_places=2, default=0)
-    juros = models.DecimalField('Juros (R$)', max_digits=10, decimal_places=2, default=0)
-    desconto = models.DecimalField('Desconto (R$)', max_digits=10, decimal_places=2, default=0)
+    multa = models.DecimalField(
+        'Multa (R$)', max_digits=10, decimal_places=2, default=0,
+        validators=[MinValueValidator(Decimal('0'))],
+    )
+    juros = models.DecimalField(
+        'Juros (R$)', max_digits=10, decimal_places=2, default=0,
+        validators=[MinValueValidator(Decimal('0'))],
+    )
+    desconto = models.DecimalField(
+        'Desconto (R$)', max_digits=10, decimal_places=2, default=0,
+        validators=[MinValueValidator(Decimal('0'))],
+    )
     observacoes = models.TextField('Observações', blank=True)
     criado_em = models.DateTimeField('Criado em', auto_now_add=True)
     atualizado_em = models.DateTimeField('Atualizado em', auto_now=True)
@@ -96,6 +106,17 @@ class ReceitaAluguel(models.Model):
         verbose_name_plural = 'Receitas de Aluguel'
         ordering = ['-competencia_ano', '-competencia_mes']
         unique_together = [['contrato', 'competencia_mes', 'competencia_ano']]
+        constraints = [
+            models.CheckConstraint(check=Q(multa__gte=0), name='receitaaluguel_multa_nao_negativa'),
+            models.CheckConstraint(check=Q(juros__gte=0), name='receitaaluguel_juros_nao_negativo'),
+            models.CheckConstraint(check=Q(desconto__gte=0), name='receitaaluguel_desconto_nao_negativo'),
+            models.CheckConstraint(
+                # desconto não pode tornar o total devido negativo — mesma
+                # regra já aplicada em clean(), reforçada no banco.
+                check=Q(desconto__lte=F('valor_previsto') + F('multa') + F('juros')),
+                name='receitaaluguel_desconto_nao_excede_total_devido',
+            ),
+        ]
 
     def __str__(self):
         return f'{self.imovel.nome} — {self.get_competencia_mes_display()}/{self.competencia_ano} ({self.get_status_display()})'
@@ -128,12 +149,15 @@ class ReceitaAluguel(models.Model):
     @property
     def esta_atrasada(self):
         """
-        Retorna True se a receita está vencida e não foi quitada/cancelada.
-        Receita parcial vencida continua atrasada (tem saldo em aberto).
+        Regra financeira oficial: vencida, com saldo em aberto (>0) e não
+        cancelada. NUNCA confia isoladamente no campo status — uma receita
+        com status='recebido' mas saldo residual (ex.: multa lançada depois
+        da baixa, sem reconsolidação) continua sendo tratada como atrasada;
+        só 'cancelado' encerra a dívida (saldo sempre 0 nesse caso).
         """
         return (
-            self.status not in self.STATUS_QUITADOS
-            and not self.esta_quitada
+            self.status != 'cancelado'
+            and self.saldo_em_aberto > 0
             and self.data_vencimento < timezone.localdate()
         )
 
@@ -182,21 +206,27 @@ class ReceitaAluguel(models.Model):
 
     def recalcular_recebimentos(self, preservar_legado=True):
         """
-        Reconsolida valor_recebido/data_recebimento/status a partir dos
-        RecebimentoReceita vinculados (fonte oficial dos pagamentos).
-        Chamada sempre que um recebimento é criado, alterado ou excluído,
-        e também quando multa/juros/desconto mudam (o saldo total muda).
-        Nunca mexe em receita cancelada.
+        Reconsolida valor_recebido/data_recebimento a partir dos
+        RecebimentoReceita vinculados (fonte oficial dos pagamentos) —
+        inclusive quando a receita está CANCELADA: o dinheiro que
+        efetivamente entrou continua contabilizado (valor_recebido reflete a
+        soma real dos recebimentos), mesmo com a cobrança encerrada. Chamada
+        sempre que um recebimento é criado, alterado ou excluído, e também
+        quando multa/juros/desconto mudam (o saldo total muda).
+
+        O STATUS nunca é rederivado enquanto a receita estiver cancelada —
+        só reabrir() pode tirá-la desse estado. Fora isso, o status é sempre
+        recalculado a partir do saldo real e do vencimento.
 
         Guarda de compatibilidade (preservar_legado=True): um valor_recebido
         legado que ainda não foi materializado como recebimento
-        (garantir_recebimento_legado) nunca é apagado — nesse caso só o status
-        é rederivado do saldo. A exclusão do ÚLTIMO recebimento passa
-        preservar_legado=False: ali a consolidação já era derivada dos
-        recebimentos e deve refletir a exclusão (zerar).
+        (garantir_recebimento_legado) nunca é apagado — nesse caso o valor
+        preservado é usado para rederivar o status (quando aplicável). A
+        exclusão do ÚLTIMO recebimento passa preservar_legado=False: ali a
+        consolidação já era derivada dos recebimentos e deve refletir a
+        exclusão (zerar) — mesmo que a receita esteja cancelada, para nunca
+        deixar um valor "fantasma" reaparecer ao reabrir.
         """
-        if self.status == 'cancelado':
-            return
         agregados = self.recebimentos.aggregate(
             total=models.Sum('valor'), ultima=models.Max('data_recebimento')
         )
@@ -206,22 +236,27 @@ class ReceitaAluguel(models.Model):
             and not possui_recebimentos
             and (self.valor_recebido or Decimal('0')) > 0
         ):
-            # Valor consolidado legado sem recebimentos: preserva valor/data e
-            # apenas rederiva o status a partir do saldo e do vencimento.
+            # Valor consolidado legado sem recebimentos: preserva valor/data.
             total = self.valor_recebido
-            campos = ['status']
+            campos = []
         else:
             total = agregados['total'] or Decimal('0.00')
             self.valor_recebido = total if total > 0 else None
             self.data_recebimento = agregados['ultima']
-            campos = ['valor_recebido', 'data_recebimento', 'status']
+            campos = ['valor_recebido', 'data_recebimento']
+
+        if self.status == 'cancelado':
+            if campos:
+                self.save(update_fields=campos)
+            return
+
         if total >= self.valor_total_devido and total > 0:
             self.status = 'recebido'
         elif total > 0:
             self.status = 'parcial'
         else:
             self.status = 'atrasado' if self.data_vencimento < timezone.localdate() else 'previsto'
-        self.save(update_fields=campos)
+        self.save(update_fields=campos + ['status'])
 
     def cancelar(self):
         """
@@ -273,6 +308,17 @@ class RecebimentoReceita(models.Model):
     receita (parciais, repasses em datas diferentes). Os campos consolidados
     de ReceitaAluguel (valor_recebido/data_recebimento/status) permanecem por
     compatibilidade e são recalculados a cada mudança aqui.
+
+    IMPORTANTE: operações de negócio (registrar um recebimento novo) devem
+    usar financeiro.services.registrar_recebimento() / registrar_recebimento_
+    bloqueada() — o service roda em transaction.atomic(), bloqueia a receita
+    com select_for_update(), confirma o saldo dentro da transação e rejeita
+    receita cancelada/valor inválido/valor acima do saldo de forma segura sob
+    concorrência. Instanciar e salvar este model diretamente (fora do
+    service, de uma migration ou do recálculo interno) contorna essas
+    garantias transacionais — o valor>0 continua protegido pela constraint
+    do banco, mas o limite do saldo depende de outros registros e não é
+    verificável só pela constraint.
     """
     ORIGEM_CHOICES = [
         ('manual', 'Manual'),
@@ -284,7 +330,10 @@ class RecebimentoReceita(models.Model):
         ReceitaAluguel, on_delete=models.CASCADE, related_name='recebimentos', verbose_name='Receita'
     )
     data_recebimento = models.DateField('Data do Recebimento')
-    valor = models.DecimalField('Valor (R$)', max_digits=12, decimal_places=2)
+    valor = models.DecimalField(
+        'Valor (R$)', max_digits=12, decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))],
+    )
     transacao_extrato = models.ForeignKey(
         'conciliacao.TransacaoExtrato', on_delete=models.SET_NULL, null=True, blank=True,
         related_name='recebimentos', verbose_name='Transação do Extrato',
@@ -301,6 +350,11 @@ class RecebimentoReceita(models.Model):
         verbose_name = 'Recebimento da Receita'
         verbose_name_plural = 'Recebimentos da Receita'
         ordering = ['data_recebimento', 'id']
+        constraints = [
+            # Nunca depender só de clean()/validators — o banco também barra
+            # valor <= 0, mesmo em criação direta via ORM sem full_clean().
+            models.CheckConstraint(check=Q(valor__gt=0), name='recebimentoreceita_valor_positivo'),
+        ]
 
     def __str__(self):
         return f'R$ {self.valor} em {self.data_recebimento:%d/%m/%Y} — {self.receita}'
@@ -324,15 +378,21 @@ class RecebimentoReceita(models.Model):
         if self._state.adding and self.receita_id and not getattr(self, '_eh_legado', False):
             self.receita.garantir_recebimento_legado()
         super().save(*args, **kwargs)
-        self.receita.recalcular_recebimentos()
+        # Recarrega a receita do banco em vez de reusar self.receita (que
+        # pode ser uma instância em memória desatualizada — ex.: cancelada
+        # por outro objeto Python apontando para a mesma linha dentro da
+        # mesma requisição/transação) — o recálculo precisa sempre do status
+        # e dos valores REALMENTE persistidos.
+        ReceitaAluguel.objects.get(pk=self.receita_id).recalcular_recebimentos()
 
     def delete(self, *args, **kwargs):
-        receita = self.receita
+        receita_id = self.receita_id
         super().delete(*args, **kwargs)
         # preservar_legado=False: se este era o último recebimento, o
         # consolidado deve zerar (a exclusão é uma decisão explícita), e não
-        # ser confundido com um valor legado não materializado.
-        receita.recalcular_recebimentos(preservar_legado=False)
+        # ser confundido com um valor legado não materializado. Recarrega a
+        # receita do banco pelo mesmo motivo do save() acima.
+        ReceitaAluguel.objects.get(pk=receita_id).recalcular_recebimentos(preservar_legado=False)
 
 
 class ReceitaAluguelItem(models.Model):

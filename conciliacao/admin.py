@@ -1,4 +1,6 @@
 from django.contrib import admin
+from django.urls import reverse
+from django.utils.html import format_html
 from simple_history.admin import SimpleHistoryAdmin
 
 from .models import (
@@ -64,7 +66,11 @@ class ExtratoImportadoAdmin(SimpleHistoryAdmin):
     )
     list_filter = ('conta',)
     readonly_fields = (
-        'conta', 'arquivo', 'hash_arquivo', 'periodo_inicio', 'periodo_fim',
+        'arquivo_link', 'conta', 'hash_arquivo', 'periodo_inicio', 'periodo_fim',
+        'transacoes_novas', 'transacoes_duplicadas', 'importado_em', 'importado_por',
+    )
+    fields = (
+        'arquivo_link', 'conta', 'hash_arquivo', 'periodo_inicio', 'periodo_fim',
         'transacoes_novas', 'transacoes_duplicadas', 'importado_em', 'importado_por',
     )
     inlines = [TransacaoExtratoInline]
@@ -72,3 +78,14 @@ class ExtratoImportadoAdmin(SimpleHistoryAdmin):
     def has_add_permission(self, request):
         # Importação só pela tela de conciliação, que valida e parseia o OFX.
         return False
+
+    @admin.display(description='Arquivo')
+    def arquivo_link(self, obj):
+        # Não existe rota pública para /media/ — o link passa pela view
+        # autenticada e permissionada extrato_download (mesmo arquivo lido
+        # direto do storage, não da URL de mídia).
+        if not obj.pk or not obj.arquivo:
+            return '—'
+        url = reverse('extrato_download', args=[obj.pk])
+        nome = obj.arquivo.name.rsplit('/', 1)[-1]
+        return format_html('<a href="{}">{}</a>', url, nome)

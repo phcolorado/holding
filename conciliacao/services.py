@@ -16,12 +16,18 @@ from decimal import Decimal
 from django.db import transaction
 
 from financeiro.models import ReceitaAluguel, RecebimentoReceita, Despesa
+from financeiro.services import registrar_recebimento_bloqueada
 from .models import (
     ExtratoImportado, TransacaoExtrato, ConciliacaoReceita, ConciliacaoComissao,
     RegraClassificacao,
 )
 
 JANELA_DIAS = 15
+# Usada SOMENTE para sugerir/pré-selecionar candidatas em sugerir_receitas()
+# (heurística de matching, ajuda o usuário a escolher). O COMMIT em
+# conciliar_com_receitas() nunca usa tolerância — exige igualdade exata entre
+# a soma atribuída e o crédito, já que valores monetários (Decimal, 2 casas)
+# não têm imprecisão de ponto flutuante que justifique folga (item 8).
 TOLERANCIA = Decimal('0.05')
 
 
@@ -400,6 +406,7 @@ def conciliar_com_receitas(transacao, receitas, marcar_comissoes=False, usuario=
                 'Repasse líquido indisponível: as receitas selecionadas pertencem a '
                 'imobiliárias diferentes — um repasse é sempre de uma única imobiliária.'
             )
+        imobiliaria_pk = next(iter(imobiliarias))
 
         comissoes = list(_comissoes_em_aberto(receitas).select_for_update())
         if not comissoes:
@@ -407,6 +414,16 @@ def conciliar_com_receitas(transacao, receitas, marcar_comissoes=False, usuario=
                 'Repasse líquido indisponível: não há despesas de comissão em aberto '
                 'vinculadas às receitas selecionadas.'
             )
+        # Comissões antigas podem não ter fornecedor preenchido (dado legado) —
+        # aceitas por compatibilidade. Quando o fornecedor ESTÁ preenchido, ele
+        # precisa ser exatamente a imobiliária do contrato: uma comissão de
+        # outra imobiliária nunca pode compor este repasse.
+        for c in comissoes:
+            if c.fornecedor_id is not None and c.fornecedor_id != imobiliaria_pk:
+                raise ConciliacaoInvalidaError(
+                    f'A comissão "{c.descricao}" tem fornecedor diferente da imobiliária '
+                    'do repasse — verifique se ela pertence a este conjunto de receitas.'
+                )
 
         comissao_por_receita_chk = {}
         for c in comissoes:
@@ -425,11 +442,15 @@ def conciliar_com_receitas(transacao, receitas, marcar_comissoes=False, usuario=
         total_bruto = sum((r.saldo_em_aberto for r in receitas), Decimal('0.00'))
         total_comissoes = sum((c.valor for c in comissoes), Decimal('0.00'))
         esperado = total_bruto - total_comissoes
-        if abs(esperado - credito) > TOLERANCIA:
+        # Igualdade EXATA — valores monetários já têm 2 casas decimais e Decimal
+        # é exato, então não há razão legítima para tolerância aqui: aceitar
+        # diferença silenciosamente deixaria centavos do crédito sem destino
+        # (item 8). Se a imobiliária arredondou diferente, ajuste manualmente.
+        if esperado != credito:
             raise ConciliacaoInvalidaError(
                 f'Repasse líquido não confere: saldo bruto R$ {total_bruto} − comissões '
                 f'R$ {total_comissoes} = R$ {esperado}, mas o crédito é R$ {credito}. '
-                'Ajuste a seleção ou trate manualmente.'
+                'A conciliação exige igualdade exata — ajuste a seleção ou trate manualmente.'
             )
         alocacoes = [(r, r.saldo_em_aberto) for r in receitas]
     else:
@@ -444,11 +465,14 @@ def conciliar_com_receitas(transacao, receitas, marcar_comissoes=False, usuario=
                 )
             alocacoes.append((r, aloc))
             restante -= aloc
-        if restante > TOLERANCIA:
+        # Igualdade EXATA (item 8): nenhum centavo do crédito pode ficar sem
+        # destino — a soma dos saldos selecionados deve fechar exatamente com
+        # o crédito, não apenas "próximo o bastante".
+        if restante != Decimal('0.00'):
             raise ConciliacaoInvalidaError(
                 f'O crédito (R$ {credito}) é maior que o saldo total selecionado '
                 f'(R$ {credito - restante}). Sobrariam R$ {restante} sem destino — '
-                'inclua mais receitas ou trate manualmente.'
+                'a conciliação exige igualdade exata: inclua mais receitas ou trate manualmente.'
             )
         comissoes = []
 
@@ -462,13 +486,15 @@ def conciliar_com_receitas(transacao, receitas, marcar_comissoes=False, usuario=
             transacao=transacao, receita=receita,
             valor_atribuido=liquido if marcar_comissoes else valor_bruto,
         )
-        RecebimentoReceita.objects.create(
-            receita=receita,
-            data_recebimento=transacao.data,
-            valor=valor_bruto,
-            transacao_extrato=transacao,
+        # `receita` já está bloqueada por select_for_update() acima — reusa o
+        # lock existente em vez de um segundo SELECT ... FOR UPDATE redundante.
+        registrar_recebimento_bloqueada(
+            receita,
+            valor_bruto,
+            transacao.data,
+            usuario=usuario,
             origem='conciliacao',
-            criado_por=usuario,
+            transacao_extrato=transacao,
         )
 
     if marcar_comissoes:

@@ -77,9 +77,13 @@
                     </td>
                     <td class="small">{{ e.importado_em|date:"d/m/Y H:i" }}</td>
                     <td class="small text-muted">{{ e.importado_por|default:"—" }}</td>
-                    <td class="text-end">
+                    <td class="text-end text-nowrap">
                         <a href="{% url 'conciliar_extrato' e.pk %}" class="btn btn-sm btn-outline-primary">
                             <i class="bi bi-check2-square me-1"></i>Conciliar
+                        </a>
+                        <a href="{% url 'extrato_download' e.pk %}" class="btn btn-sm btn-outline-secondary"
+                           title="Baixar arquivo OFX original">
+                            <i class="bi bi-download"></i>
                         </a>
                     </td>
                 </tr>

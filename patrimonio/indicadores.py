@@ -68,7 +68,9 @@ def receita_locaticia(receitas):
     encargos (IPTU, condomínio etc.). Usa os itens tipo 'aluguel' da receita;
     receitas antigas sem itens usam valor_previsto como fallback (antes dos
     encargos, o previsto era só o aluguel). Considera que o aluguel é quitado
-    primeiro em pagamentos parciais.
+    primeiro em pagamentos parciais. valor_recebido aqui já reflete o
+    dinheiro real recebido mesmo em receitas canceladas (recalcular_recebi
+    mentos reconsolida esse campo independentemente do status).
     """
     total = Decimal('0.00')
     for r in receitas:
@@ -91,6 +93,10 @@ def indicadores_do_imovel(imovel, referencia=None, incluir_despesas=True):
     Com incluir_despesas=False (usuário sem permissão de despesas), os valores
     que dependem de despesas (despesa_12m, resultado_12m, yield_liquido) nem
     são consultados — retornam None.
+
+    Inclui receitas CANCELADAS que tiveram algum recebimento: o dinheiro que
+    entrou continua no caixa mesmo com a cobrança encerrada depois — só
+    exclui receitas sem nenhum valor_recebido (nada entrou).
     """
     from financeiro.models import ReceitaAluguel, Despesa
 
@@ -98,7 +104,7 @@ def indicadores_do_imovel(imovel, referencia=None, incluir_despesas=True):
     filtro = filtro_competencias(competencias)
 
     receitas_recebidas = list(
-        ReceitaAluguel.objects.filter(filtro, imovel=imovel, status__in=('recebido', 'parcial'))
+        ReceitaAluguel.objects.filter(filtro, imovel=imovel, valor_recebido__isnull=False)
         .prefetch_related('itens')
     )
     receita_12m = sum((r.valor_recebido or Decimal('0.00') for r in receitas_recebidas), Decimal('0.00'))

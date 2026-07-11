@@ -178,7 +178,11 @@ class ConciliacaoComissao(models.Model):
         TransacaoExtrato, on_delete=models.CASCADE, related_name='itens_comissao', verbose_name='Transação'
     )
     despesa = models.ForeignKey(
-        Despesa, on_delete=models.CASCADE, related_name='conciliacoes_comissao', verbose_name='Despesa de Comissão'
+        # PROTECT (não CASCADE): apagar a despesa não pode levar junto o
+        # vínculo de auditoria em silêncio — para editar/excluir uma despesa
+        # de comissão reconciliada, desfaça a conciliação primeiro (isso
+        # remove o vínculo pelo fluxo normal, não por efeito colateral do FK).
+        Despesa, on_delete=models.PROTECT, related_name='conciliacoes_comissao', verbose_name='Despesa de Comissão'
     )
     valor = models.DecimalField('Valor da Comissão (R$)', max_digits=12, decimal_places=2)
     criado_em = models.DateTimeField('Criado em', auto_now_add=True)

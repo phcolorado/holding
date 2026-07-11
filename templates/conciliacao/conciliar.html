@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% load humanize %}
+{% load humanize l10n %}
 
 {% block title %}Conciliar Extrato — Gestão Patrimonial{% endblock %}
 
@@ -99,7 +99,7 @@
                             <td>
                                 <input class="form-check-input receita-check" type="checkbox"
                                        name="receita_ids" value="{{ c.receita.pk }}"
-                                       data-valor="{{ c.receita.saldo_em_aberto }}"
+                                       data-valor="{{ c.receita.saldo_em_aberto|unlocalize }}"
                                        {% if c.sugerida %}checked{% endif %}>
                             </td>
                             <td class="fw-semibold">{{ c.receita.imovel.nome }}</td>

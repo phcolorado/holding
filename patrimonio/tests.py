@@ -838,6 +838,34 @@ class ReajusteAdminTransicaoTest(TestCase):
         self.contrato.refresh_from_db()
         self.assertEqual(self.contrato.valor_aluguel, Decimal('2000.00'))
 
+    def test_tentativa_de_exclusao_via_inline_e_bloqueada_e_avisada(self):
+        """Item 10: exclusão de reajuste aplicado pelo inline não derruba a página, apenas avisa."""
+        from django.contrib import admin as django_admin
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+        from patrimonio.admin import ContratoAdmin
+
+        reajuste = ReajusteContrato.objects.create(
+            contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'), aplicado=True,
+        )
+        reajuste.aplicar()
+
+        admin_instance = ContratoAdmin(Contrato, django_admin.site)
+        formset = _FakeReajusteFormSet([])
+        formset.deleted_objects = [reajuste]
+        form = DocumentoContratoInlineTest._FakeForm(self.contrato)
+
+        request = RequestFactory().get('/')
+        request.session = {}
+        request._messages = FallbackStorage(request)
+
+        admin_instance.save_formset(request=request, form=form, formset=formset, change=True)
+
+        self.assertTrue(ReajusteContrato.objects.filter(pk=reajuste.pk).exists())
+        mensagens = [str(m) for m in request._messages]
+        self.assertTrue(any('já foi aplicado' in m for m in mensagens))
+
 
 # ─── Dashboard: contratos vencendo respeita prazo indeterminado ───────────────
 
@@ -1447,6 +1475,50 @@ class ReajusteProtegidoTest(TestCase):
             ReajusteContrato.objects.get(pk=self.reajuste.pk).aplicado_em, primeiro_aplicado_em
         )
 
+    def test_alteracao_direta_de_valor_novo_via_save_e_bloqueada(self):
+        """Item 10: save() direto (sem passar por full_clean()) também protege."""
+        self.reajuste.aplicar()
+        aplicado = ReajusteContrato.objects.get(pk=self.reajuste.pk)
+        aplicado.valor_novo = Decimal('9999.00')
+        with self.assertRaises(ValidationError):
+            aplicado.save()
+        self.assertEqual(
+            ReajusteContrato.objects.get(pk=self.reajuste.pk).valor_novo, Decimal('2150.00')
+        )
+
+    def test_alteracao_de_contrato_via_save_e_bloqueada(self):
+        self.reajuste.aplicar()
+        outro_contrato = _criar_contrato(
+            self.imovel, self.locatario, date(2024, 1, 1), date(2026, 12, 31),
+            valor_aluguel=Decimal('1000.00'),
+        )
+        aplicado = ReajusteContrato.objects.get(pk=self.reajuste.pk)
+        aplicado.contrato = outro_contrato
+        with self.assertRaises(ValidationError):
+            aplicado.save()
+
+    def test_alteracao_de_data_via_save_e_bloqueada(self):
+        self.reajuste.aplicar()
+        aplicado = ReajusteContrato.objects.get(pk=self.reajuste.pk)
+        aplicado.data_reajuste = date(2025, 6, 1)
+        with self.assertRaises(ValidationError):
+            aplicado.save()
+
+    def test_delete_de_reajuste_aplicado_e_bloqueado(self):
+        self.reajuste.aplicar()
+        aplicado = ReajusteContrato.objects.get(pk=self.reajuste.pk)
+        with self.assertRaises(ValidationError):
+            aplicado.delete()
+        self.assertTrue(ReajusteContrato.objects.filter(pk=self.reajuste.pk).exists())
+
+    def test_delete_de_reajuste_pendente_funciona_normalmente(self):
+        pendente = ReajusteContrato.objects.create(
+            contrato=self.contrato, data_reajuste=date(2025, 6, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2100.00'), aplicado=False,
+        )
+        pendente.delete()  # não deve levantar
+        self.assertFalse(ReajusteContrato.objects.filter(pk=pendente.pk).exists())
+
     def test_pendencia_e_definida_por_aplicado_em(self):
         # flag aplicado=True marcada manualmente sem aplicar (dado antigo):
         # continua PENDENTE pela regra oficial (aplicado_em IS NULL)
@@ -1595,9 +1667,174 @@ class ImovelDetailPermCombinacoesTest(TestCase):
         self.assertIn('Resultado Financeiro', conteudo)
         self.assertIn('Yield líquido', conteudo)
 
+    # ─── Item 13: aba inicial do detalhe (primeira que o usuário pode ver) ────
+
+    def test_aba_inicial_e_receitas_quando_permitido(self):
+        self._usuario('aba_receitas', 'view_receitaaluguel', 'view_despesa')
+        resposta = self._get()
+        self.assertEqual(resposta.context['aba_inicial'], 'receitas')
+        conteudo = resposta.content.decode()
+        # a aba de receitas contém "show active"; despesas não
+        self.assertIn('tab-pane fade show active" id="receitas-tab"', conteudo)
+        self.assertNotIn('tab-pane fade show active" id="despesas-tab"', conteudo)
+
+    def test_aba_inicial_e_despesas_quando_sem_receitas(self):
+        self._usuario('aba_despesas', 'view_despesa')
+        resposta = self._get()
+        self.assertEqual(resposta.context['aba_inicial'], 'despesas')
+        conteudo = resposta.content.decode()
+        self.assertIn('tab-pane fade show active" id="despesas-tab"', conteudo)
+
+    def test_aba_inicial_e_documentos_quando_sem_receitas_e_despesas(self):
+        self._usuario('aba_docs', 'view_documento')
+        resposta = self._get()
+        self.assertEqual(resposta.context['aba_inicial'], 'documentos')
+        conteudo = resposta.content.decode()
+        self.assertIn('tab-pane fade show active" id="documentos-tab"', conteudo)
+
+    def test_aba_inicial_e_unidades_quando_sem_nenhuma_area(self):
+        self._usuario('aba_unidades')
+        resposta = self._get()
+        self.assertEqual(resposta.context['aba_inicial'], 'unidades')
+        conteudo = resposta.content.decode()
+        self.assertIn('tab-pane fade show active" id="unidades-tab"', conteudo)
+
+    # ─── Item 13: botão "Doc. Obrigatório" respeita a permissão certa ─────────
+
+    def test_botao_doc_obrigatorio_oculto_sem_permissao_especifica(self):
+        user = self._usuario('sem_perm_obrig', 'add_documento')
+        user.is_staff = True
+        user.save()
+        conteudo = self._get().content.decode()
+        self.assertNotIn('Doc. Obrigatório', conteudo)
+
+    def test_botao_doc_obrigatorio_oculto_sem_is_staff(self):
+        user = self._usuario('sem_staff_obrig', 'add_documentoobrigatorio')
+        user.is_staff = False
+        user.save()
+        conteudo = self._get().content.decode()
+        self.assertNotIn('Doc. Obrigatório', conteudo)
+
+    def test_botao_doc_obrigatorio_visivel_com_permissao_e_staff(self):
+        user = self._usuario('com_perm_obrig', 'add_documentoobrigatorio')
+        user.is_staff = True
+        user.save()
+        conteudo = self._get().content.decode()
+        self.assertIn('Doc. Obrigatório', conteudo)
+
     def test_com_permissao_de_manutencao_aba_aparece(self):
         self._usuario('perm_manut', 'view_manutencao')
         resposta = self._get()
         conteudo = resposta.content.decode()
         self.assertIn('manutencoes-tab', conteudo)
         self.assertIn('Troca de telhado', conteudo)
+
+
+# ─── Rodada 3 (item 6): permissões defensivas no dashboard ────────────────────
+
+class DashboardPermissoesTest(TestCase):
+    def setUp(self):
+        from django.contrib.auth.models import Permission
+        self.Permission = Permission
+        self.client = Client()
+        self.imovel = _criar_imovel('Imóvel Dash Perm')
+        self.locatario = _criar_pessoa('Locatário Dash')
+        hoje = timezone.localdate()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, hoje - timedelta(days=10), hoje + timedelta(days=30),
+        )
+        Manutencao.objects.create(
+            imovel=self.imovel, descricao='Vazamento', data_solicitacao=hoje,
+            status='solicitada',
+        )
+
+    def _usuario(self, nome, *perms):
+        user = User.objects.create_user(nome, password='pass')
+        if perms:
+            user.user_permissions.add(*self.Permission.objects.filter(codename__in=perms))
+        self.client.login(username=nome, password='pass')
+        return user
+
+    def _get(self):
+        return self.client.get(reverse('dashboard'))
+
+    def test_sem_permissoes_nenhum_dado_e_consultado(self):
+        self._usuario('dash_sem_perm')
+        resposta = self._get()
+        self.assertEqual(resposta.status_code, 200)
+        conteudo = resposta.content.decode()
+        self.assertNotIn('Total de Imóveis', conteudo)
+        self.assertNotIn('Receita Prevista', conteudo)
+        self.assertNotIn('Despesas em Aberto', conteudo)
+        self.assertNotIn('Contratos vencendo', conteudo)
+        self.assertNotIn('Manutenções em aberto', conteudo)
+        self.assertEqual(resposta.context['imoveis_total'], 0)
+        self.assertEqual(resposta.context['receitas_previstas'], 0)
+        self.assertEqual(list(resposta.context['contratos_vencendo']), [])
+        self.assertEqual(list(resposta.context['manutencoes_abertas']), [])
+
+    def test_apenas_view_imovel_mostra_so_o_card_de_imoveis(self):
+        self._usuario('dash_so_imovel', 'view_imovel')
+        resposta = self._get()
+        conteudo = resposta.content.decode()
+        self.assertIn('Total de Imóveis', conteudo)
+        self.assertNotIn('Receita Prevista', conteudo)
+        self.assertNotIn('Contratos vencendo', conteudo)
+        self.assertEqual(resposta.context['imoveis_total'], 1)
+
+    def test_apenas_receitas_mostra_financeiro_de_receitas(self):
+        self._usuario('dash_so_receitas', 'view_receitaaluguel')
+        resposta = self._get()
+        conteudo = resposta.content.decode()
+        self.assertIn('Receita Prevista', conteudo)
+        self.assertNotIn('Despesas em Aberto', conteudo)
+        self.assertNotIn('Total de Imóveis', conteudo)
+        self.assertEqual(resposta.context['despesas_abertas'], 0)
+
+    def test_apenas_despesas_mostra_card_de_despesas(self):
+        from financeiro.models import Despesa
+        Despesa.objects.create(
+            imovel=self.imovel, descricao='Água', data_vencimento=timezone.localdate(),
+            valor=Decimal('80.00'), status='prevista',
+        )
+        self._usuario('dash_so_despesas', 'view_despesa')
+        resposta = self._get()
+        conteudo = resposta.content.decode()
+        self.assertIn('Despesas em Aberto', conteudo)
+        self.assertNotIn('Receita Prevista', conteudo)
+        self.assertEqual(resposta.context['despesas_abertas'], 1)
+        self.assertEqual(resposta.context['receitas_previstas'], 0)
+
+    def test_apenas_contratos_mostra_contratos_vencendo(self):
+        self._usuario('dash_so_contratos', 'view_contrato')
+        resposta = self._get()
+        conteudo = resposta.content.decode()
+        self.assertIn('Contratos vencendo', conteudo)
+        self.assertIn(self.contrato, list(resposta.context['contratos_vencendo']))
+
+    def test_apenas_documentos_mostra_bloco_de_documentos(self):
+        from documentos.models import Documento
+        Documento.objects.create(
+            titulo='Contrato assinado', tipo='contrato_aluguel', imovel=self.imovel,
+            arquivo=SimpleUploadedFile('c.pdf', b'x', content_type='application/pdf'),
+            data_validade=timezone.localdate() - timedelta(days=1),
+        )
+        self._usuario('dash_so_docs', 'view_documento')
+        resposta = self._get()
+        conteudo = resposta.content.decode()
+        self.assertIn('Documentos vencidos', conteudo)
+        self.assertEqual(resposta.context['docs_vencendo_cnt'], 1)
+
+    def test_acesso_financeiro_completo_mostra_receitas_e_despesas(self):
+        self._usuario('dash_financeiro', 'view_receitaaluguel', 'view_despesa')
+        resposta = self._get()
+        conteudo = resposta.content.decode()
+        self.assertIn('Receita Prevista', conteudo)
+        self.assertIn('Despesas em Aberto', conteudo)
+
+    def test_apenas_manutencao_mostra_bloco_de_manutencoes(self):
+        self._usuario('dash_so_manut', 'view_manutencao')
+        resposta = self._get()
+        conteudo = resposta.content.decode()
+        self.assertIn('Manutenções em aberto', conteudo)
+        self.assertIn('Vazamento', conteudo)

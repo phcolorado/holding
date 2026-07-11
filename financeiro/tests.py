@@ -4,7 +4,8 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError
-from django.test import TestCase, Client
+from django.db import models
+from django.test import TestCase, TransactionTestCase, Client, skipUnlessDBFeature
 from django.contrib.auth.models import User
 from core.test_utils import com_leitura
 from django.urls import reverse
@@ -325,7 +326,20 @@ class EstaAtrasadaTest(TestCase):
 
     def test_receita_recebida_nao_esta_atrasada(self):
         r = self._receita(self.ontem, 'recebido')
+        r.valor_recebido = Decimal('1000.00')  # quitada de fato — saldo zero
         self.assertFalse(r.esta_atrasada)
+
+    def test_receita_status_recebido_mas_com_saldo_residual_esta_atrasada(self):
+        """
+        Regra financeira oficial (item 12): não confia isoladamente no
+        status. Um status='recebido' sem o valor_recebido correspondente
+        (ex.: inconsistência, ou multa lançada depois da baixa sem
+        reconsolidação) continua sendo tratado como atrasado, pois há saldo
+        em aberto vencido de verdade.
+        """
+        r = self._receita(self.ontem, 'recebido')  # valor_recebido nunca setado (None)
+        self.assertTrue(r.esta_atrasada)
+        self.assertEqual(r.saldo_em_aberto, Decimal('1000.00'))
 
     def test_receita_parcial_vencida_esta_atrasada(self):
         """Parcial NÃO é quitada: vencida com saldo em aberto continua atrasada."""
@@ -342,6 +356,18 @@ class EstaAtrasadaTest(TestCase):
 
     def test_receita_cancelada_nao_esta_atrasada(self):
         r = self._receita(self.ontem, 'cancelado')
+        self.assertFalse(r.esta_atrasada)
+
+    def test_receita_cancelada_com_valor_residual_nos_campos_nao_esta_atrasada(self):
+        """Cancelada sempre tem saldo_em_aberto=0, mesmo com valor_recebido parcial nos campos."""
+        r = self._receita(self.ontem, 'cancelado')
+        r.valor_recebido = Decimal('400.00')
+        self.assertEqual(r.saldo_em_aberto, Decimal('0.00'))
+        self.assertFalse(r.esta_atrasada)
+
+    def test_receita_futura_com_saldo_nao_esta_atrasada(self):
+        r = self._receita(self.amanha, 'previsto')
+        self.assertEqual(r.saldo_em_aberto, Decimal('1000.00'))
         self.assertFalse(r.esta_atrasada)
 
     def test_despesa_prevista_vencida_esta_atrasada(self):
@@ -900,6 +926,52 @@ class BaixaReceitasFormTest(TestCase):
         self.assertIn('gerar_receitas', content)
         self.assertIn('Gerar Receitas Esperadas', content)
 
+    def test_atributos_decimais_nao_localizados_em_pt_br(self):
+        """
+        Item 11: com LANGUAGE_CODE='pt-br' (vírgula decimal na exibição), os
+        atributos data-* usados pelo JS (parseFloat/valor de <input>) devem
+        continuar com ponto — só o texto para o usuário usa vírgula.
+        """
+        imovel, locatario = _criar_base()
+        contrato = _criar_contrato(
+            imovel, locatario, date(2024, 1, 1), date(2024, 12, 31),
+            valor_aluguel=Decimal('1234.56'),
+        )
+        receita = ReceitaAluguel.objects.create(
+            contrato=contrato, imovel=imovel, competencia_mes=3, competencia_ano=2024,
+            data_vencimento=date(2024, 3, 10), valor_previsto=Decimal('1234.56'),
+            multa=Decimal('12.34'), juros=Decimal('5.67'), status='previsto',
+        )
+        response = self.client.get(reverse('baixa_receitas_mes'), {'mes': 3, 'ano': 2024})
+        content = response.content.decode()
+        # saldo_em_aberto = previsto + multa + juros - desconto = 1234.56 + 12.34 + 5.67
+        self.assertIn('data-saldo="1252.57"', content)
+        self.assertIn('data-multa="12.34"', content)
+        self.assertIn('data-juros="5.67"', content)
+        # nunca com vírgula nesses atributos (isso quebraria o JS)
+        self.assertNotIn('data-saldo="1252,57"', content)
+        self.assertNotIn('data-multa="12,34"', content)
+        self.assertNotIn('data-juros="5,67"', content)
+
+    def test_contadores_distinguem_quitadas_parciais_canceladas(self):
+        """Item 13: o contador da tela de baixa não deve lumpar 'parcial' em 'Recebidas'."""
+        imovel, locatario = _criar_base()
+        contrato = _criar_contrato(imovel, locatario, date(2024, 1, 1), date(2024, 12, 31))
+        ReceitaAluguel.objects.create(
+            contrato=contrato, imovel=imovel, competencia_mes=3, competencia_ano=2024,
+            data_vencimento=date(2024, 3, 10), valor_previsto=Decimal('1000.00'), status='previsto',
+        )
+        response = self.client.get(reverse('baixa_receitas_mes'), {'mes': 3, 'ano': 2024})
+        content = response.content.decode()
+        self.assertIn('id="cnt-quitadas"', content)
+        self.assertIn('id="cnt-parciais"', content)
+        self.assertIn('id="cnt-canceladas"', content)
+        self.assertIn('Quitadas', content)
+        self.assertIn('Parciais', content)
+        self.assertIn('Canceladas', content)
+        # JS não deve mais contar 'parcial' como recebida
+        self.assertNotIn("s === 'recebido' || s === 'parcial'", content)
+
     def test_post_gerar_receitas_a_partir_de_baixa(self):
         """POST action=gerar_receitas na tela de baixa gera receitas corretamente."""
         imovel, locatario = _criar_base()
@@ -1150,6 +1222,34 @@ class ChecklistMensalViewTest(TestCase):
         checklist = response.context['checklist']
         etapa_receitas = next(e for e in checklist if e['item'] == 'Receitas geradas')
         self.assertFalse(etapa_receitas['ok'])
+
+    def test_checklist_receita_cancelada_sem_pendencia_nao_mostra_0_de_1(self):
+        """
+        Item 13: uma única receita CANCELADA sem saldo em aberto não deve
+        gerar a mensagem confusa "0/1 recebida(s)" (soa como pendência que
+        não existe) — o detalhe discrimina recebidas/canceladas/em aberto.
+        """
+        contrato = _criar_contrato(
+            self.imovel, self.locatario, date(2020, 1, 1), date(2030, 12, 31),
+        )
+        receita = ReceitaAluguel.objects.create(
+            contrato=contrato, imovel=self.imovel,
+            competencia_mes=self.mes, competencia_ano=self.ano,
+            data_vencimento=date(self.ano, self.mes, 10), valor_previsto=Decimal('1000.00'),
+            status='previsto',
+        )
+        receita.cancelar()
+
+        self.client.login(username='chk_user', password='pass')
+        response = self.client.get(reverse('checklist_mensal'), {'mes': self.mes, 'ano': self.ano})
+        checklist = response.context['checklist']
+        etapa = next(e for e in checklist if e['item'] == 'Recebimentos confirmados')
+        self.assertTrue(etapa['ok'])
+        self.assertNotIn('0/1', etapa['detalhe'])
+        self.assertIn('1 cancelada(s)', etapa['detalhe'])
+        self.assertIn('0 em aberto', etapa['detalhe'])
+        self.assertEqual(response.context['receitas_canceladas'], 1)
+        self.assertEqual(response.context['receitas_pendentes'], 0)
 
     def test_checklist_contem_etapa_docs_obrigatorios(self):
         """Checklist deve incluir etapa de documentos obrigatórios."""
@@ -1501,6 +1601,35 @@ class TaxaAdministracaoDespesaTest(TestCase):
         self.assertEqual(
             Despesa.objects.filter(contrato=contrato, origem_automatica=True).count(), 1
         )
+
+    def test_despesa_automatica_tem_fornecedor_igual_a_imobiliaria_do_contrato(self):
+        imobiliaria = Pessoa.objects.create(nome='Imob Padrão', tipo='imobiliaria')
+        contrato = _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(2024, 1, 1), data_fim=date(2024, 12, 31),
+            valor_aluguel=Decimal('2000.00'), imobiliaria=imobiliaria,
+        )
+        contrato.comissao_imobiliaria_percentual = Decimal('10.00')
+        contrato.save()
+
+        gerar_receitas_para_contrato(contrato, data_inicio=date(2024, 3, 1), data_fim=date(2024, 3, 31))
+
+        despesa = Despesa.objects.get(contrato=contrato, origem_automatica=True, categoria='comissao_imobiliaria')
+        self.assertEqual(despesa.fornecedor_id, imobiliaria.pk)
+
+    def test_despesa_automatica_sem_imobiliaria_no_contrato_fica_sem_fornecedor(self):
+        contrato = _criar_contrato(
+            self.imovel, self.locatario,
+            data_inicio=date(2024, 1, 1), data_fim=date(2024, 12, 31),
+            valor_aluguel=Decimal('2000.00'),
+        )
+        contrato.comissao_imobiliaria_percentual = Decimal('10.00')
+        contrato.save()
+
+        gerar_receitas_para_contrato(contrato, data_inicio=date(2024, 3, 1), data_fim=date(2024, 3, 31))
+
+        despesa = Despesa.objects.get(contrato=contrato, origem_automatica=True, categoria='comissao_imobiliaria')
+        self.assertIsNone(despesa.fornecedor_id)
 
     def test_taxa_calculada_sobre_encargo_aluguel_nao_sobre_total(self):
         contrato = _criar_contrato(
@@ -1884,24 +2013,24 @@ class MarcarAtrasadosCommandTest(TestCase):
 # ─── Série de fluxo de caixa de 12 meses ──────────────────────────────────────
 
 class FluxoCaixa12mTest(TestCase):
-    def test_serie_cobre_12_meses_e_soma_valores(self):
-        from financeiro.services import serie_fluxo_caixa_12m
+    def test_serie_cobre_12_meses_e_soma_por_data_de_pagamento(self):
+        from financeiro.services import serie_fluxo_caixa_12m, registrar_recebimento
 
         imovel, locatario = _criar_base()
         contrato = _criar_contrato(
             imovel, locatario, data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31)
         )
         hoje = timezone.localdate()
-        ReceitaAluguel.objects.create(
+        receita = ReceitaAluguel.objects.create(
             contrato=contrato, imovel=imovel,
             competencia_mes=hoje.month, competencia_ano=hoje.year,
-            data_vencimento=hoje, valor_previsto=Decimal('2000.00'),
-            valor_recebido=Decimal('2000.00'), status='recebido',
+            data_vencimento=hoje, valor_previsto=Decimal('2000.00'), status='previsto',
         )
+        registrar_recebimento(receita.pk, Decimal('2000.00'), hoje)
         Despesa.objects.create(
             imovel=imovel, descricao='Condomínio',
             competencia_mes=hoje.month, competencia_ano=hoje.year,
-            data_vencimento=hoje, valor=Decimal('300.00'), status='paga',
+            data_vencimento=hoje, data_pagamento=hoje, valor=Decimal('300.00'), status='paga',
         )
 
         serie = serie_fluxo_caixa_12m(hoje)
@@ -1913,6 +2042,63 @@ class FluxoCaixa12mTest(TestCase):
         self.assertEqual(atual['saldo'], 1700.0)
         # Receita prevista (não recebida) não entra na série
         self.assertEqual(sum(p['recebido'] for p in serie), 2000.0)
+
+    def test_aluguel_de_janeiro_pago_em_marco_aparece_em_marco(self):
+        """Item 5: fluxo de caixa usa a data real do pagamento, não a competência."""
+        from financeiro.services import serie_fluxo_caixa_12m, registrar_recebimento
+
+        imovel, locatario = _criar_base()
+        contrato = _criar_contrato(
+            imovel, locatario, data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31)
+        )
+        receita = ReceitaAluguel.objects.create(
+            contrato=contrato, imovel=imovel,
+            competencia_mes=1, competencia_ano=2030,
+            data_vencimento=date(2030, 1, 10), valor_previsto=Decimal('1500.00'), status='previsto',
+        )
+        # Pago em março, não em janeiro
+        registrar_recebimento(receita.pk, Decimal('1500.00'), date(2030, 3, 5))
+
+        serie = serie_fluxo_caixa_12m(date(2030, 3, 1))
+        por_label = {p['label']: p for p in serie}
+        self.assertEqual(por_label['03/2030']['recebido'], 1500.0)
+        self.assertEqual(por_label['01/2030']['recebido'], 0.0)
+
+    def test_receita_cancelada_com_pagamento_continua_no_fluxo_de_caixa(self):
+        """Item 4: dinheiro recebido continua no caixa mesmo após cancelamento."""
+        from financeiro.services import serie_fluxo_caixa_12m, registrar_recebimento
+
+        imovel, locatario = _criar_base()
+        contrato = _criar_contrato(
+            imovel, locatario, data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31)
+        )
+        hoje = timezone.localdate()
+        receita = ReceitaAluguel.objects.create(
+            contrato=contrato, imovel=imovel,
+            competencia_mes=hoje.month, competencia_ano=hoje.year,
+            data_vencimento=hoje, valor_previsto=Decimal('2000.00'), status='previsto',
+        )
+        registrar_recebimento(receita.pk, Decimal('500.00'), hoje)
+        receita.cancelar()
+
+        serie = serie_fluxo_caixa_12m(hoje)
+        self.assertEqual(sum(p['recebido'] for p in serie), 500.0)
+
+    def test_incluir_despesas_false_omite_despesas_pagas(self):
+        from financeiro.services import serie_fluxo_caixa_12m
+
+        imovel, locatario = _criar_base()
+        contrato = _criar_contrato(
+            imovel, locatario, data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31)
+        )
+        hoje = timezone.localdate()
+        Despesa.objects.create(
+            imovel=imovel, descricao='Condomínio',
+            competencia_mes=hoje.month, competencia_ano=hoje.year,
+            data_vencimento=hoje, data_pagamento=hoje, valor=Decimal('300.00'), status='paga',
+        )
+        serie = serie_fluxo_caixa_12m(hoje, incluir_despesas=False)
+        self.assertEqual(sum(p['pago'] for p in serie), 0.0)
 
 
 # ─── Painéis gráficos ─────────────────────────────────────────────────────────
@@ -1959,17 +2145,18 @@ class PaineisSeriesTest(TestCase):
 
     def test_serie_receita_despesa_por_imovel(self):
         from financeiro.paineis import serie_receita_despesa_por_imovel
+        from financeiro.services import registrar_recebimento
 
         contrato = _criar_contrato(
             self.imovel, self.locatario,
             data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
         )
-        ReceitaAluguel.objects.create(
+        receita = ReceitaAluguel.objects.create(
             contrato=contrato, imovel=self.imovel,
             competencia_mes=self.hoje.month, competencia_ano=self.hoje.year,
-            data_vencimento=self.hoje, valor_previsto=Decimal('2000.00'),
-            valor_recebido=Decimal('2000.00'), status='recebido',
+            data_vencimento=self.hoje, valor_previsto=Decimal('2000.00'), status='previsto',
         )
+        registrar_recebimento(receita.pk, Decimal('2000.00'), self.hoje)
         Despesa.objects.create(
             imovel=self.imovel, descricao='Condomínio',
             competencia_mes=self.hoje.month, competencia_ano=self.hoje.year,
@@ -2276,3 +2463,279 @@ class BackupConsistenteTest(TestCase):
             call_command('backup_local', destino=pasta, stdout=out, stderr=err)
         self.assertIn('pg_dump', err.getvalue())
         self.assertIn('NÃO fez backup do banco', err.getvalue())
+
+
+# ─── Rodada 3: reconsolidação de receitas canceladas (item 1) ─────────────────
+
+class ReconsolidacaoCanceladaTest(TestCase):
+    def setUp(self):
+        self.imovel, self.locatario = _criar_base()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
+        )
+        self.receita = ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=1, competencia_ano=2030,
+            data_vencimento=date(2030, 1, 10), valor_previsto=Decimal('2000.00'), status='previsto',
+        )
+
+    def test_excluir_unico_recebimento_enquanto_cancelada_zera_consolidado(self):
+        from financeiro.services import registrar_recebimento
+        recebimento = registrar_recebimento(self.receita.pk, Decimal('500.00'), date(2030, 1, 15))
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.valor_recebido, Decimal('500.00'))
+
+        self.receita.cancelar()
+        recebimento.delete()
+
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.status, 'cancelado')
+        self.assertIsNone(self.receita.valor_recebido)
+        self.assertIsNone(self.receita.data_recebimento)
+        self.assertEqual(self.receita.recebimentos.count(), 0)
+
+    def test_editar_valor_de_recebimento_enquanto_cancelada_reconsolida(self):
+        from financeiro.services import registrar_recebimento
+        recebimento = registrar_recebimento(self.receita.pk, Decimal('500.00'), date(2030, 1, 15))
+        self.receita.cancelar()
+
+        recebimento.valor = Decimal('450.00')
+        recebimento.save()
+
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.status, 'cancelado')
+        self.assertEqual(self.receita.valor_recebido, Decimal('450.00'))
+
+    def test_cancelar_excluir_recebimento_e_reabrir_nao_reaparece_fantasma(self):
+        from financeiro.services import registrar_recebimento
+        recebimento = registrar_recebimento(self.receita.pk, Decimal('500.00'), date(2030, 1, 15))
+        self.receita.cancelar()
+        recebimento.delete()
+
+        self.receita.refresh_from_db()
+        self.receita.reabrir()
+
+        self.receita.refresh_from_db()
+        self.assertIsNone(self.receita.valor_recebido)
+        self.assertIn(self.receita.status, ('previsto', 'atrasado'))
+        self.assertEqual(self.receita.saldo_em_aberto, Decimal('2000.00'))
+
+    def test_cancelar_com_varios_recebimentos_excluir_um_e_reabrir(self):
+        from financeiro.services import registrar_recebimento
+        r1 = registrar_recebimento(self.receita.pk, Decimal('300.00'), date(2030, 1, 12))
+        r2 = registrar_recebimento(self.receita.pk, Decimal('200.00'), date(2030, 1, 15))
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.valor_recebido, Decimal('500.00'))
+
+        self.receita.cancelar()
+        r2.delete()
+
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.status, 'cancelado')
+        self.assertEqual(self.receita.valor_recebido, Decimal('300.00'))
+        self.assertEqual(self.receita.saldo_em_aberto, Decimal('0.00'))
+
+        self.receita.reabrir()
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.status, 'parcial')
+        self.assertEqual(self.receita.valor_recebido, Decimal('300.00'))
+        self.assertEqual(self.receita.recebimentos.count(), 1)
+        self.assertEqual(self.receita.recebimentos.get().pk, r1.pk)
+
+    def test_nenhum_pagamento_legado_fantasma_apos_ciclo_cancelar_excluir_reabrir(self):
+        """Garante que o valor consolidado nunca fica 'preso' após exclusão enquanto cancelada."""
+        from financeiro.services import registrar_recebimento
+        recebimento = registrar_recebimento(self.receita.pk, Decimal('2000.00'), date(2030, 1, 10))
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.status, 'recebido')
+
+        self.receita.cancelar()
+        recebimento.delete()
+        self.receita.refresh_from_db()
+        # a receita cancelada com o recebimento excluído não deve "lembrar" dos 2000
+        self.assertIsNone(self.receita.valor_recebido)
+
+        self.receita.reabrir()
+        self.receita.refresh_from_db()
+        self.assertNotEqual(self.receita.status, 'recebido')
+        self.assertIsNone(self.receita.valor_recebido)
+        self.assertEqual(self.receita.saldo_em_aberto, Decimal('2000.00'))
+
+
+# ─── Rodada 3: service registrar_recebimento (item 2) ──────────────────────────
+
+class RegistrarRecebimentoServiceTest(TestCase):
+    def setUp(self):
+        self.imovel, self.locatario = _criar_base()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
+        )
+        self.receita = ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=2, competencia_ano=2030,
+            data_vencimento=date(2030, 2, 10), valor_previsto=Decimal('1000.00'), status='previsto',
+        )
+
+    def test_receita_cancelada_rejeitada(self):
+        from financeiro.services import registrar_recebimento
+        self.receita.cancelar()
+        with self.assertRaises(ValidationError):
+            registrar_recebimento(self.receita.pk, Decimal('100.00'), date(2030, 2, 15))
+
+    def test_valor_acima_do_saldo_rejeitado(self):
+        from financeiro.services import registrar_recebimento
+        with self.assertRaises(ValidationError):
+            registrar_recebimento(self.receita.pk, Decimal('1000.01'), date(2030, 2, 15))
+        self.receita.refresh_from_db()
+        self.assertIsNone(self.receita.valor_recebido)
+
+    def test_valor_zero_ou_negativo_rejeitado(self):
+        from financeiro.services import registrar_recebimento
+        with self.assertRaises(ValidationError):
+            registrar_recebimento(self.receita.pk, Decimal('0'), date(2030, 2, 15))
+        with self.assertRaises(ValidationError):
+            registrar_recebimento(self.receita.pk, Decimal('-10.00'), date(2030, 2, 15))
+
+    def test_dois_pagamentos_parciais_validos_e_quitacao_do_restante(self):
+        from financeiro.services import registrar_recebimento
+        registrar_recebimento(self.receita.pk, Decimal('400.00'), date(2030, 2, 12))
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.status, 'parcial')
+        self.assertEqual(self.receita.saldo_em_aberto, Decimal('600.00'))
+
+        registrar_recebimento(self.receita.pk, Decimal('600.00'), date(2030, 2, 15))
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.status, 'recebido')
+        self.assertEqual(self.receita.saldo_em_aberto, Decimal('0.00'))
+        self.assertEqual(self.receita.recebimentos.count(), 2)
+
+    def test_rollback_integral_em_caso_de_erro(self):
+        """Se o full_clean() rejeita, nenhum RecebimentoReceita é criado."""
+        from financeiro.services import registrar_recebimento
+        with self.assertRaises(ValidationError):
+            registrar_recebimento(self.receita.pk, Decimal('99999.00'), date(2030, 2, 15))
+        self.assertEqual(self.receita.recebimentos.count(), 0)
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.status, 'previsto')
+
+    def test_retorna_o_recebimento_criado(self):
+        from financeiro.services import registrar_recebimento
+        recebimento = registrar_recebimento(
+            self.receita.pk, Decimal('250.00'), date(2030, 2, 12),
+            observacoes='teste', origem='manual',
+        )
+        self.assertEqual(recebimento.pk, self.receita.recebimentos.get().pk)
+        self.assertEqual(recebimento.valor, Decimal('250.00'))
+        self.assertEqual(recebimento.observacoes, 'teste')
+
+
+class RegistrarRecebimentoConcorrenciaTest(TransactionTestCase):
+    """
+    Concorrência real (select_for_update bloqueando de fato) só é garantida
+    pelo backend no PostgreSQL — o SQLite não suporta locking de linha
+    (connection.features.has_select_for_update é False) e apenas ignora a
+    cláusula, então o teste é pulado nesse backend (skipUnlessDBFeature é o
+    padrão do próprio Django para este cenário). Roda de verdade no job
+    Postgres do CI.
+    """
+
+    def setUp(self):
+        self.imovel, self.locatario = _criar_base()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
+        )
+        self.receita = ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=3, competencia_ano=2030,
+            data_vencimento=date(2030, 3, 10), valor_previsto=Decimal('1000.00'), status='previsto',
+        )
+
+    @skipUnlessDBFeature('has_select_for_update')
+    def test_duas_tentativas_simultaneas_nao_estouram_o_saldo(self):
+        import threading
+        from django.db import connections
+        from financeiro.services import registrar_recebimento
+
+        resultados = []
+        barreira = threading.Barrier(2)
+
+        def tentar():
+            barreira.wait()
+            try:
+                registrar_recebimento(self.receita.pk, Decimal('700.00'), date(2030, 3, 15))
+                resultados.append('ok')
+            except ValidationError:
+                resultados.append('rejeitado')
+            finally:
+                connections.close_all()
+
+        t1 = threading.Thread(target=tentar)
+        t2 = threading.Thread(target=tentar)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        self.assertEqual(sorted(resultados), ['ok', 'rejeitado'])
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.valor_recebido, Decimal('700.00'))
+        self.assertEqual(self.receita.recebimentos.count(), 1)
+        total = self.receita.recebimentos.aggregate(models.Sum('valor'))['valor__sum']
+        self.assertLessEqual(total, Decimal('1000.00'))
+
+
+# ─── Rodada 3 (item 4): caixa de receita cancelada continua contando ───────────
+
+class CaixaReceitaCanceladaTest(TestCase):
+    """
+    Cenário do item 4: receita de R$ 2.000, recebimento de R$ 500,
+    cancelamento do saldo restante — caixa e relatórios devem continuar
+    mostrando R$ 500; saldo em aberto deve ser zero; receita não deve
+    aparecer como inadimplente.
+    """
+
+    def setUp(self):
+        self.imovel, self.locatario = _criar_base()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
+        )
+        self.hoje = timezone.localdate()
+        self.receita = ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=self.hoje.month, competencia_ano=self.hoje.year,
+            data_vencimento=self.hoje - timedelta(days=5), valor_previsto=Decimal('2000.00'), status='previsto',
+        )
+        from financeiro.services import registrar_recebimento
+        registrar_recebimento(self.receita.pk, Decimal('500.00'), self.hoje)
+        self.receita.cancelar()
+        self.receita.refresh_from_db()
+
+    def test_saldo_zero_e_nao_e_inadimplente(self):
+        self.assertEqual(self.receita.saldo_em_aberto, Decimal('0.00'))
+        self.assertNotIn(self.receita, receitas_inadimplentes_qs())
+        self.assertFalse(self.receita.esta_atrasada)
+
+    def test_indicadores_do_imovel_mostram_o_recebido(self):
+        from patrimonio.indicadores import indicadores_do_imovel
+        indicadores = indicadores_do_imovel(self.imovel, referencia=self.hoje)
+        self.assertEqual(indicadores['receita_12m'], Decimal('500.00'))
+
+    def test_imovel_detail_total_recebido_mostra_500(self):
+        user = com_leitura(User.objects.create_user('caixa_cancel_user', password='pass'))
+        client = Client()
+        client.login(username='caixa_cancel_user', password='pass')
+        resposta = client.get(reverse('imovel_detail', args=[self.imovel.pk]))
+        self.assertEqual(resposta.context['total_recebido'], Decimal('500.00'))
+
+    def test_dashboard_receitas_recebidas_mostra_500(self):
+        user = com_leitura(User.objects.create_user('caixa_cancel_dash', password='pass'))
+        client = Client()
+        client.login(username='caixa_cancel_dash', password='pass')
+        resposta = client.get(reverse('dashboard'))
+        self.assertEqual(resposta.context['receitas_recebidas'], Decimal('500.00'))
+
+    def test_resumo_por_imovel_dos_exports_mostra_500(self):
+        from financeiro.exports import _resumo_por_imovel
+        resumo = dict(_resumo_por_imovel([self.receita], []))
+        self.assertEqual(resumo[self.imovel.nome]['rec_rec'], Decimal('500.00'))
+        self.assertEqual(resumo[self.imovel.nome]['em_aberto'], 0)

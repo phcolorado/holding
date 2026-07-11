@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% load humanize %}
+{% load humanize l10n %}
 
 {% block title %}Baixa de Aluguéis — Gestão Patrimonial{% endblock %}
 
@@ -67,36 +67,44 @@
 
 <!-- Totais -->
 {% if receitas %}
-{% with total_prev=0 total_rec=0 %}
 <div class="row g-2 mb-3">
-    <div class="col-sm-3">
+    <div class="col-6 col-md-2">
         <div class="card border-0 bg-light text-center py-2">
             <div class="small text-muted">Receitas</div>
-            <div class="fw-bold fs-5">{{ receitas|length }}</div>
+            <div class="fw-bold fs-5" id="cnt-total">{{ receitas|length }}</div>
         </div>
     </div>
-    <div class="col-sm-3">
+    <div class="col-6 col-md-2">
         <div class="card border-0 bg-success bg-opacity-10 text-center py-2">
-            <div class="small text-muted">Recebidas</div>
-            <div class="fw-bold fs-5 text-success">
-                <span id="cnt-recebidas">0</span>/<span id="cnt-total">{{ receitas|length }}</span>
-            </div>
+            <div class="small text-muted">Quitadas</div>
+            <div class="fw-bold fs-5 text-success" id="cnt-quitadas">—</div>
         </div>
     </div>
-    <div class="col-sm-3">
+    <div class="col-6 col-md-2">
+        <div class="card border-0 bg-info bg-opacity-10 text-center py-2">
+            <div class="small text-muted">Parciais</div>
+            <div class="fw-bold fs-5 text-info" id="cnt-parciais">—</div>
+        </div>
+    </div>
+    <div class="col-6 col-md-2">
         <div class="card border-0 bg-danger bg-opacity-10 text-center py-2">
             <div class="small text-muted">Atrasadas</div>
             <div class="fw-bold fs-5 text-danger" id="cnt-atrasadas">—</div>
         </div>
     </div>
-    <div class="col-sm-3">
+    <div class="col-6 col-md-2">
         <div class="card border-0 bg-primary bg-opacity-10 text-center py-2">
             <div class="small text-muted">Previstas</div>
             <div class="fw-bold fs-5 text-primary" id="cnt-previstas">—</div>
         </div>
     </div>
+    <div class="col-6 col-md-2">
+        <div class="card border-0 bg-secondary bg-opacity-10 text-center py-2">
+            <div class="small text-muted">Canceladas</div>
+            <div class="fw-bold fs-5 text-secondary" id="cnt-canceladas">—</div>
+        </div>
+    </div>
 </div>
-{% endwith %}
 {% endif %}
 
 <!-- Tabela -->
@@ -180,7 +188,7 @@
                                     data-bs-toggle="modal" data-bs-target="#recebimentoModal"
                                     data-id="{{ r.pk }}"
                                     data-imovel="{{ r.imovel.nome }}"
-                                    data-saldo="{{ r.saldo_em_aberto|floatformat:2 }}"
+                                    data-saldo="{{ r.saldo_em_aberto|floatformat:"2u" }}"
                                     title="Registrar recebimento parcial">
                                 <i class="bi bi-cash-coin"></i>
                             </button>
@@ -191,11 +199,11 @@
                                     data-id="{{ r.pk }}"
                                     data-imovel="{{ r.imovel.nome }}"
                                     data-obs="{{ r.observacoes }}"
-                                    data-multa="{{ r.multa|default:'0' }}"
-                                    data-juros="{{ r.juros|default:'0' }}"
-                                    data-desconto="{{ r.desconto|default:'0' }}"
-                                    data-sugestao-multa="{% if r.sugestao %}{{ r.sugestao.multa }}{% endif %}"
-                                    data-sugestao-juros="{% if r.sugestao %}{{ r.sugestao.juros }}{% endif %}"
+                                    data-multa="{{ r.multa|unlocalize }}"
+                                    data-juros="{{ r.juros|unlocalize }}"
+                                    data-desconto="{{ r.desconto|unlocalize }}"
+                                    data-sugestao-multa="{% if r.sugestao %}{{ r.sugestao.multa|unlocalize }}{% endif %}"
+                                    data-sugestao-juros="{% if r.sugestao %}{{ r.sugestao.juros|unlocalize }}{% endif %}"
                                     title="Editar multa/juros/desconto/observações">
                                 <i class="bi bi-pencil"></i>
                             </button>
@@ -396,21 +404,25 @@ if (encargosModal) {
     });
 }
 
-// Contar status na tabela
+// Contar status na tabela — parciais NUNCA contam como "Quitadas" (item 13):
+// uma receita parcial ainda tem saldo em aberto, então é tratada à parte.
 (function() {
     const rows = document.querySelectorAll('#tabela-baixa tbody tr[data-status]');
-    let rec = 0, atrasadas = 0, previstas = 0;
+    let quitadas = 0, parciais = 0, atrasadas = 0, previstas = 0, canceladas = 0;
     rows.forEach(r => {
         const s = r.dataset.status;
-        if (s === 'recebido' || s === 'parcial') rec++;
+        if (s === 'recebido') quitadas++;
+        if (s === 'parcial') parciais++;
+        if (s === 'cancelado') canceladas++;
         if (r.dataset.atrasada === '1') atrasadas++;
         if (s === 'previsto' && r.dataset.atrasada === '0') previstas++;
     });
     const el = (id) => document.getElementById(id);
-    if (el('cnt-recebidas')) el('cnt-recebidas').textContent = rec;
+    if (el('cnt-quitadas')) el('cnt-quitadas').textContent = quitadas;
+    if (el('cnt-parciais')) el('cnt-parciais').textContent = parciais;
     if (el('cnt-atrasadas')) el('cnt-atrasadas').textContent = atrasadas;
     if (el('cnt-previstas')) el('cnt-previstas').textContent = previstas;
-    if (el('cnt-total')) el('cnt-total').textContent = rows.length;
+    if (el('cnt-canceladas')) el('cnt-canceladas').textContent = canceladas;
 })();
 </script>
 {% endblock %}

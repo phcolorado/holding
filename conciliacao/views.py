@@ -1,7 +1,7 @@
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required, permission_required
 from django.core.exceptions import PermissionDenied
-from django.http import HttpResponseRedirect
+from django.http import FileResponse, Http404, HttpResponseRedirect
 from django.shortcuts import get_object_or_404, render
 from django.urls import reverse
 
@@ -56,6 +56,26 @@ def extrato_list(request):
         'total_pendentes': TransacaoExtrato.objects.filter(status='pendente').count(),
     }
     return render(request, 'conciliacao/extrato_list.html', context)
+
+
+@login_required
+@permission_required('conciliacao.view_extratoimportado', raise_exception=True)
+def extrato_download(request, pk):
+    """
+    Serve o arquivo OFX original exigindo login e permissão — mesma proteção
+    de documento_download. Extratos bancários são potencialmente sensíveis
+    (revelam movimentações financeiras completas da conta).
+    """
+    extrato = get_object_or_404(ExtratoImportado, pk=pk)
+    if not extrato.arquivo:
+        raise Http404('Extrato sem arquivo anexado.')
+    try:
+        return FileResponse(
+            extrato.arquivo.open('rb'), as_attachment=True,
+            filename=extrato.arquivo.name.rsplit('/', 1)[-1],
+        )
+    except FileNotFoundError:
+        raise Http404('Arquivo não encontrado no armazenamento.')
 
 
 def _contexto_transacao(transacao):

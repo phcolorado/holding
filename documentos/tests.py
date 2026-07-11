@@ -133,3 +133,19 @@ class DownloadProtegidoTest(TestCase):
         self.assertEqual(response.status_code, 200)
         conteudo = b''.join(response.streaming_content)
         self.assertIn(b'conteudo de teste', conteudo)
+
+    def test_download_autenticado_sem_permissao_403(self):
+        User.objects.create_user('sem_perm_doc', password='pass')  # sem nenhuma permissão
+        self.client.login(username='sem_perm_doc', password='pass')
+        response = self.client.get(reverse('documento_download', args=[self.doc.pk]))
+        self.assertEqual(response.status_code, 403)
+
+    def test_nao_existe_rota_publica_para_media(self):
+        """Item 7: /media/... não pode ser servido sem passar pela view autenticada."""
+        response = self.client.get(f'/media/{self.doc.arquivo.name}')
+        self.assertEqual(response.status_code, 404)
+
+        com_leitura(User.objects.create_user('media_publica_user', password='pass'))
+        self.client.login(username='media_publica_user', password='pass')
+        response = self.client.get(f'/media/{self.doc.arquivo.name}')
+        self.assertEqual(response.status_code, 404)

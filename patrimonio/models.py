@@ -606,6 +606,20 @@ class ReajusteContrato(models.Model):
             raise ValidationError(erros)
 
     def save(self, *args, **kwargs):
+        # Proteção em duas camadas: clean() cobre o fluxo de formulários/Admin
+        # (chamado por full_clean() na validação), mas um save() direto via
+        # ORM (script, shell, código) nunca passa por clean() — por isso a
+        # mesma checagem roda AQUI, incondicionalmente, antes de persistir.
+        if self.pk:
+            persistido = ReajusteContrato.objects.filter(pk=self.pk).first()
+            if persistido and persistido.aplicado_em is not None:
+                for campo in self.CAMPOS_PROTEGIDOS_APOS_APLICACAO:
+                    if getattr(self, campo) != getattr(persistido, campo):
+                        raise ValidationError(
+                            'Este reajuste já foi aplicado — os campos financeiros são '
+                            'imutáveis (mesmo por save() direto). Apenas as observações '
+                            'podem ser alteradas. Para corrigir, registre um novo reajuste.'
+                        )
         # Um reajuste com aplicado_em preenchido é, por definição, aplicado —
         # nunca pode voltar a aplicado=False (mesmo por saves diretos via ORM).
         if self.aplicado_em is not None and not self.aplicado:
@@ -614,6 +628,20 @@ class ReajusteContrato(models.Model):
             if update_fields is not None and 'aplicado' not in update_fields:
                 kwargs['update_fields'] = list(update_fields) + ['aplicado']
         super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        # ATENÇÃO (manutenção): esta proteção só vale para .delete()/.save() de
+        # INSTÂNCIA. QuerySet.delete() em massa e QuerySet.update() operam
+        # direto no banco e NÃO chamam este método nem clean() — nunca use
+        # essas formas sobre ReajusteContrato aplicado; se for estritamente
+        # necessário por manutenção excepcional, documente o motivo à parte.
+        if self.aplicado_em is not None:
+            raise ValidationError(
+                'Este reajuste já foi aplicado e não pode ser excluído — o histórico '
+                'financeiro do contrato depende dele. Para corrigir, registre um novo '
+                'reajuste compensatório.'
+            )
+        super().delete(*args, **kwargs)
 
     def aplicar(self):
         """

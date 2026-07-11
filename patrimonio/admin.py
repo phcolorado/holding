@@ -1,6 +1,8 @@
 from decimal import Decimal
 
 from django.contrib import admin, messages
+from django.core.exceptions import ValidationError
+from django.forms.models import BaseInlineFormSet
 from django.utils import timezone
 from simple_history.admin import SimpleHistoryAdmin
 
@@ -92,8 +94,31 @@ class EncargoContratoInline(admin.TabularInline):
     fields = ('tipo', 'descricao', 'valor', 'periodicidade', 'data_inicio_cobranca', 'data_fim_cobranca', 'ativo')
 
 
+class ReajusteContratoInlineFormSet(BaseInlineFormSet):
+    """
+    Desabilita, por linha, os campos financeiros e a exclusão de reajustes
+    já aplicados — disabled=True no form é reforço no SERVIDOR (dados
+    submetidos para um campo disabled são ignorados em favor do initial),
+    não apenas uma dica visual no navegador. Reajustes pendentes continuam
+    totalmente editáveis.
+    """
+    def add_fields(self, form, index):
+        super().add_fields(form, index)
+        instance = getattr(form, 'instance', None)
+        if instance and instance.pk and instance.aplicado_em is not None:
+            if 'DELETE' in form.fields:
+                form.fields['DELETE'].disabled = True
+            for campo in ReajusteContrato.CAMPOS_PROTEGIDOS_APOS_APLICACAO:
+                nome = campo[:-3] if campo.endswith('_id') else campo
+                if nome in form.fields:
+                    form.fields[nome].disabled = True
+            if 'aplicado' in form.fields:
+                form.fields['aplicado'].disabled = True
+
+
 class ReajusteContratoInline(admin.TabularInline):
     model = ReajusteContrato
+    formset = ReajusteContratoInlineFormSet
     extra = 0
     fields = (
         'data_reajuste', 'indice', 'percentual_aplicado', 'valor_anterior',
@@ -342,7 +367,13 @@ class ContratoAdmin(SimpleHistoryAdmin):
                     # aplicar() é idempotente (guard por aplicado_em) e atômico
                     obj.aplicar()
             for obj in formset.deleted_objects:
-                obj.delete()
+                try:
+                    obj.delete()
+                except ValidationError as exc:
+                    # Reajuste aplicado: o checkbox de exclusão já vem
+                    # desabilitado no formset, mas a proteção real é aqui —
+                    # avisa e preserva o registro em vez de quebrar a página.
+                    messages.error(request, '; '.join(exc.messages))
             formset.save_m2m()
         elif formset.model is Documento:
             instances = formset.save(commit=False)

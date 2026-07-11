@@ -93,9 +93,12 @@
 <div class="row g-3 mb-4">
     <div class="col-sm-6 col-lg-3">
         <div class="card border-0 bg-light text-center py-3">
-            <div class="small text-muted">Receitas</div>
-            <div class="fw-bold fs-5">{{ receitas_recebidas }}/{{ total_receitas }}</div>
-            <div class="small text-muted">recebidas</div>
+            <div class="small text-muted">Receitas ({{ total_receitas }})</div>
+            <div class="fw-bold fs-6">
+                <span class="text-success">{{ receitas_recebidas }} receb.</span> ·
+                <span class="text-secondary">{{ receitas_canceladas }} cancel.</span> ·
+                <span class="{% if receitas_pendentes > 0 %}text-danger{% endif %}">{{ receitas_pendentes }} aberto</span>
+            </div>
         </div>
     </div>
     <div class="col-sm-6 col-lg-3">
