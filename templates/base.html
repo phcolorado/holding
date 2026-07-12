@@ -116,7 +116,7 @@
                     </a>
                 </li>
                 {% endif %}
-                {% if perms.financeiro.view_receitaaluguel %}
+                {% if perms.financeiro.add_receitaaluguel %}
                 <li class="nav-item">
                     <a class="nav-link {% if 'gerar_receitas' in request.resolver_match.url_name %}active{% endif %}"
                        href="{% url 'gerar_receitas_mes' %}">
@@ -132,7 +132,7 @@
                     </a>
                 </li>
                 {% endif %}
-                {% if perms.financeiro.view_receitaaluguel %}
+                {% if perms.financeiro.view_receitaaluguel or perms.financeiro.view_despesa or perms.documentos.view_documento or perms.documentos.view_documentoobrigatorio or perms.patrimonio.view_contrato or perms.conciliacao.view_extratoimportado or perms.financeiro.view_fechamentomensal %}
                 <li class="nav-item">
                     <a class="nav-link {% if request.resolver_match.url_name == 'checklist_mensal' %}active{% endif %}"
                        href="{% url 'checklist_mensal' %}">
@@ -140,7 +140,7 @@
                     </a>
                 </li>
                 {% endif %}
-                {% if perms.financeiro.view_receitaaluguel %}
+                {% if perms.financeiro.view_receitaaluguel or perms.financeiro.view_despesa or perms.patrimonio.view_imovel %}
                 <li class="nav-item">
                     <a class="nav-link {% if request.resolver_match.url_name == 'paineis' %}active{% endif %}"
                        href="{% url 'paineis' %}">
@@ -148,7 +148,7 @@
                     </a>
                 </li>
                 {% endif %}
-                {% if perms.financeiro.view_receitaaluguel %}
+                {% if perms.financeiro.view_receitaaluguel or perms.financeiro.view_despesa or perms.patrimonio.view_imovel or perms.patrimonio.view_contrato %}
                 <li class="nav-item">
                     <a class="nav-link {% if 'relatorios' in request.resolver_match.url_name %}active{% endif %}"
                        href="{% url 'relatorios' %}">

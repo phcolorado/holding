@@ -1168,3 +1168,132 @@ class ExtratoDownloadProtegidoTest(TestCase):
     def test_nao_existe_rota_publica_para_media(self):
         response = self.client.get(f'/media/{self.extrato.arquivo.name}')
         self.assertEqual(response.status_code, 404)
+
+
+@override_settings(MEDIA_ROOT=MEDIA_TEMP)
+class ExclusaoDeExtratoTest(TestCase):
+    """Item 6 (rodada pós-revisão): proteção da trilha de auditoria de extratos."""
+
+    def setUp(self):
+        self.conta = ContaBancaria.objects.create(nome='Conta Exclusão')
+        self.client = Client()
+        self.imovel, self.locatario = _base()
+        self.contrato = _contrato(self.imovel, self.locatario)
+
+    def _importar(self, transacoes, nome='extrato.ofx'):
+        return importar_ofx(_arquivo_ofx(transacoes, nome=nome), self.conta)
+
+    def test_extrato_totalmente_pendente_pode_ser_excluido_pelo_fluxo_explicito(self):
+        from .services import excluir_extrato_sem_movimentacoes
+        extrato = self._importar([('e1', '20260310', '100.00', 'PIX')])
+        excluir_extrato_sem_movimentacoes(extrato.pk)
+        self.assertFalse(ExtratoImportado.objects.filter(pk=extrato.pk).exists())
+
+    def test_extrato_com_transacao_ignorada_nao_pode_ser_excluido(self):
+        from .services import excluir_extrato_sem_movimentacoes, ConciliacaoInvalidaError
+        extrato = self._importar([('e2', '20260310', '100.00', 'PIX')])
+        t = extrato.transacoes.get()
+        t.status = 'ignorada'
+        t.save(update_fields=['status'])
+        with self.assertRaises(ConciliacaoInvalidaError):
+            excluir_extrato_sem_movimentacoes(extrato.pk)
+        self.assertTrue(ExtratoImportado.objects.filter(pk=extrato.pk).exists())
+
+    def test_extrato_com_credito_conciliado_nao_pode_ser_excluido(self):
+        from .services import excluir_extrato_sem_movimentacoes, ConciliacaoInvalidaError
+        receita = _receita(self.contrato, date(2026, 3, 10), Decimal('100.00'))
+        extrato = self._importar([('e3', '20260310', '100.00', 'PIX')])
+        t = extrato.transacoes.get()
+        conciliar_com_receitas(t, [receita])
+        with self.assertRaises(ConciliacaoInvalidaError):
+            excluir_extrato_sem_movimentacoes(extrato.pk)
+        self.assertTrue(ExtratoImportado.objects.filter(pk=extrato.pk).exists())
+
+    def test_extrato_com_despesa_vinculada_nao_pode_ser_excluido(self):
+        from .services import excluir_extrato_sem_movimentacoes, ConciliacaoInvalidaError
+        extrato = self._importar([('e4', '20260310', '-100.00', 'CEMIG')])
+        t = extrato.transacoes.get()
+        lancar_despesa(t, categoria='outro', descricao='Energia', fornecedor=None, imovel=None)
+        with self.assertRaises(ConciliacaoInvalidaError):
+            excluir_extrato_sem_movimentacoes(extrato.pk)
+        self.assertTrue(ExtratoImportado.objects.filter(pk=extrato.pk).exists())
+
+    def test_extrato_com_conciliacao_comissao_nao_pode_ser_excluido(self):
+        from .services import excluir_extrato_sem_movimentacoes, ConciliacaoInvalidaError
+        imob = Pessoa.objects.create(nome='Imob Excl', tipo='imobiliaria')
+        contrato = _contrato(
+            self.imovel, self.locatario, imobiliaria=imob, comissao_imobiliaria_percentual=Decimal('10.00'),
+        )
+        from financeiro.services import gerar_receitas_para_contrato
+        gerar_receitas_para_contrato(contrato, data_inicio=date(2026, 3, 1), data_fim=date(2026, 3, 31))
+        receita = ReceitaAluguel.objects.get(contrato=contrato)
+        extrato = self._importar([('e5', '20260312', '1800.00', 'REPASSE')])
+        t = extrato.transacoes.get()
+        conciliar_com_receitas(t, [receita], marcar_comissoes=True)
+        with self.assertRaises(ConciliacaoInvalidaError):
+            excluir_extrato_sem_movimentacoes(extrato.pk)
+        self.assertTrue(ExtratoImportado.objects.filter(pk=extrato.pk).exists())
+
+    def test_tentativa_de_exclusao_nao_remove_recebimentos_nem_altera_comissoes(self):
+        from financeiro.models import RecebimentoReceita, Despesa
+        from .services import excluir_extrato_sem_movimentacoes, ConciliacaoInvalidaError
+        imob = Pessoa.objects.create(nome='Imob Excl 2', tipo='imobiliaria')
+        contrato = _contrato(
+            self.imovel, self.locatario, imobiliaria=imob, comissao_imobiliaria_percentual=Decimal('10.00'),
+        )
+        from financeiro.services import gerar_receitas_para_contrato
+        gerar_receitas_para_contrato(contrato, data_inicio=date(2026, 3, 1), data_fim=date(2026, 3, 31))
+        receita = ReceitaAluguel.objects.get(contrato=contrato)
+        comissao = Despesa.objects.get(contrato=contrato, origem_automatica=True)
+        extrato = self._importar([('e6', '20260312', '1800.00', 'REPASSE')])
+        t = extrato.transacoes.get()
+        conciliar_com_receitas(t, [receita], marcar_comissoes=True)
+
+        with self.assertRaises(ConciliacaoInvalidaError):
+            excluir_extrato_sem_movimentacoes(extrato.pk)
+
+        self.assertEqual(RecebimentoReceita.objects.filter(receita=receita).count(), 1)
+        comissao.refresh_from_db()
+        self.assertEqual(comissao.status, 'paga')
+
+    def test_admin_nao_oferece_exclusao_insegura(self):
+        from django.contrib import admin as django_admin
+        from .admin import ExtratoImportadoAdmin
+        admin_instance = ExtratoImportadoAdmin(ExtratoImportado, django_admin.site)
+        self.assertFalse(admin_instance.has_delete_permission(None))
+
+    def test_view_exclui_extrato_pendente_com_permissao(self):
+        extrato = self._importar([('e7', '20260310', '100.00', 'PIX')])
+        user = User.objects.create_user('excl_ok', password='pass')
+        user.user_permissions.add(*Permission.objects.filter(
+            codename__in=['view_extratoimportado', 'delete_extratoimportado']
+        ))
+        self.client.login(username='excl_ok', password='pass')
+        response = self.client.post(reverse('extrato_list'), {'action': 'excluir', 'extrato_id': extrato.pk})
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(ExtratoImportado.objects.filter(pk=extrato.pk).exists())
+
+    def test_view_exclusao_exige_permissao_especifica(self):
+        extrato = self._importar([('e8', '20260310', '100.00', 'PIX')])
+        com_leitura(User.objects.create_user('excl_sem_perm', password='pass'))  # só permissões de view
+        self.client.login(username='excl_sem_perm', password='pass')
+        response = self.client.post(reverse('extrato_list'), {'action': 'excluir', 'extrato_id': extrato.pk})
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(ExtratoImportado.objects.filter(pk=extrato.pk).exists())
+
+    def test_view_exclusao_de_extrato_tratado_falha_com_mensagem(self):
+        receita = _receita(self.contrato, date(2026, 3, 10), Decimal('100.00'))
+        extrato = self._importar([('e9', '20260310', '100.00', 'PIX')])
+        t = extrato.transacoes.get()
+        conciliar_com_receitas(t, [receita])
+        user = User.objects.create_user('excl_tratado', password='pass')
+        user.user_permissions.add(*Permission.objects.filter(
+            codename__in=['view_extratoimportado', 'delete_extratoimportado']
+        ))
+        self.client.login(username='excl_tratado', password='pass')
+        response = self.client.post(
+            reverse('extrato_list'), {'action': 'excluir', 'extrato_id': extrato.pk}, follow=True,
+        )
+        self.assertTrue(ExtratoImportado.objects.filter(pk=extrato.pk).exists())
+        mensagens = [str(m) for m in response.context['messages']]
+        self.assertTrue(any('não pode ser excluído' in m for m in mensagens) or any('tratada' in m for m in mensagens))

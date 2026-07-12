@@ -84,7 +84,10 @@
 {% if perms.financeiro.view_receitaaluguel %}
 <div class="card shadow-sm mb-4">
     <div class="card-header bg-white fw-semibold border-bottom d-flex justify-content-between align-items-center">
-        <span><i class="bi bi-bar-chart-line me-2 text-primary"></i>Fluxo de Caixa — últimos 12 meses</span>
+        <span><i class="bi bi-bar-chart-line me-2 text-primary"></i>
+            {% if fluxo_inclui_despesas %}Fluxo de Caixa — últimos 12 meses
+            {% else %}Entradas Recebidas — últimos 12 meses{% endif %}
+        </span>
         <button class="btn btn-sm btn-outline-secondary" type="button"
                 data-bs-toggle="collapse" data-bs-target="#tabela-fluxo" aria-expanded="false" aria-controls="tabela-fluxo">
             <i class="bi bi-table me-1"></i>Ver tabela
@@ -93,21 +96,28 @@
     <div class="card-body">
         <div style="height: 280px;">
             <canvas id="grafico-fluxo" role="img"
-                    aria-label="Gráfico de barras com receitas recebidas e despesas pagas por mês nos últimos 12 meses"></canvas>
+                    aria-label="Gráfico de barras com receitas recebidas{% if fluxo_inclui_despesas %} e despesas pagas{% endif %} por mês nos últimos 12 meses"></canvas>
         </div>
         <div class="collapse mt-3" id="tabela-fluxo">
             <div class="table-responsive">
                 <table class="table table-sm mb-0">
                     <thead class="table-light">
-                        <tr><th>Competência</th><th class="text-end">Recebido (R$)</th><th class="text-end">Pago (R$)</th><th class="text-end">Resultado (R$)</th></tr>
+                        <tr>
+                            <th>Competência</th><th class="text-end">Recebido (R$)</th>
+                            {% if fluxo_inclui_despesas %}
+                            <th class="text-end">Pago (R$)</th><th class="text-end">Resultado (R$)</th>
+                            {% endif %}
+                        </tr>
                     </thead>
                     <tbody>
                         {% for p in fluxo_caixa %}
                         <tr>
                             <td>{{ p.label }}</td>
                             <td class="text-end">{{ p.recebido|floatformat:2|intcomma }}</td>
+                            {% if fluxo_inclui_despesas %}
                             <td class="text-end">{{ p.pago|floatformat:2|intcomma }}</td>
                             <td class="text-end">{{ p.saldo|floatformat:2|intcomma }}</td>
+                            {% endif %}
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -117,6 +127,7 @@
     </div>
 </div>
 {{ fluxo_caixa|json_script:"fluxo-caixa-data" }}
+<script>window.FLUXO_INCLUI_DESPESAS = {{ fluxo_inclui_despesas|yesno:"true,false" }};</script>
 {% endif %}
 
 {% if perms.patrimonio.view_contrato %}
@@ -280,6 +291,8 @@
                     <a href="{% url 'baixa_receitas_mes' %}" class="btn btn-success">
                         <i class="bi bi-check2-circle me-2"></i>Conferir Recebimentos
                     </a>
+                    {% endif %}
+                    {% if perms.financeiro.add_receitaaluguel %}
                     <a href="{% url 'gerar_receitas_mes' %}" class="btn btn-outline-success">
                         <i class="bi bi-magic me-2"></i>Gerar Receitas do Mês Atual
                     </a>
@@ -306,10 +319,12 @@
                     </a>
                     {% endif %}
                     {% endif %}
-                    {% if perms.financeiro.view_receitaaluguel %}
+                    {% if perms.financeiro.view_receitaaluguel or perms.financeiro.view_despesa or perms.documentos.view_documento or perms.documentos.view_documentoobrigatorio or perms.patrimonio.view_contrato or perms.conciliacao.view_extratoimportado or perms.financeiro.view_fechamentomensal %}
                     <a href="{% url 'checklist_mensal' %}" class="btn btn-outline-info">
                         <i class="bi bi-clipboard2-check me-2"></i>Checklist Mensal
                     </a>
+                    {% endif %}
+                    {% if perms.financeiro.view_receitaaluguel or perms.financeiro.view_despesa or perms.patrimonio.view_imovel or perms.patrimonio.view_contrato %}
                     <a href="{% url 'relatorios' %}" class="btn btn-outline-dark">
                         <i class="bi bi-download me-2"></i>Exportar Relatórios
                     </a>
@@ -326,7 +341,9 @@
                 <div class="alert alert-danger mt-2 mb-0 py-2">
                     <i class="bi bi-file-earmark-x me-1"></i>
                     <strong>{{ docs_obrigatorios_pendentes }}</strong> documento(s) obrigatório(s) pendente(s).
+                    {% if user.is_staff and perms.documentos.view_documentoobrigatorio %}
                     <a href="{% url 'admin:documentos_documentoobrigatorio_changelist' %}" class="alert-link ms-1">Ver</a>
+                    {% endif %}
                 </div>
                 {% endif %}
                 {% if reajustes_pendentes > 0 and perms.patrimonio.view_contrato %}
@@ -366,29 +383,36 @@
 
     const serie = JSON.parse(dadosEl.textContent);
     const formatoBRL = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
+    const incluiDespesas = window.FLUXO_INCLUI_DESPESAS === true;
+
+    const datasetsFluxo = [
+        {
+            label: 'Recebido',
+            data: serie.map(p => p.recebido),
+            backgroundColor: '#2a78d6',
+            borderRadius: { topLeft: 4, topRight: 4 },
+            borderSkipped: 'bottom',
+            maxBarThickness: 22,
+        },
+    ];
+    // Sem permissão de despesas, 'pago' vem None na série — o dataset nem é
+    // criado (não existe barra "Pago" com valores 0 fictícios).
+    if (incluiDespesas) {
+        datasetsFluxo.push({
+            label: 'Pago',
+            data: serie.map(p => p.pago),
+            backgroundColor: '#e34948',
+            borderRadius: { topLeft: 4, topRight: 4 },
+            borderSkipped: 'bottom',
+            maxBarThickness: 22,
+        });
+    }
 
     new Chart(canvas, {
         type: 'bar',
         data: {
             labels: serie.map(p => p.label),
-            datasets: [
-                {
-                    label: 'Recebido',
-                    data: serie.map(p => p.recebido),
-                    backgroundColor: '#2a78d6',
-                    borderRadius: { topLeft: 4, topRight: 4 },
-                    borderSkipped: 'bottom',
-                    maxBarThickness: 22,
-                },
-                {
-                    label: 'Pago',
-                    data: serie.map(p => p.pago),
-                    backgroundColor: '#e34948',
-                    borderRadius: { topLeft: 4, topRight: 4 },
-                    borderSkipped: 'bottom',
-                    maxBarThickness: 22,
-                },
-            ],
+            datasets: datasetsFluxo,
         },
         options: {
             responsive: true,

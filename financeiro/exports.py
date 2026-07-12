@@ -281,19 +281,27 @@ def exportar_inadimplencia_xlsx(request, receitas_atrasadas):
 def _resumo_por_imovel(receitas, despesas):
     """
     Agrupa receitas/despesas por imóvel em uma única passada.
-    Retorna lista ordenada por nome: [(nome, {rec_prev, rec_rec, desp_pagas, em_aberto}), ...],
+    Retorna lista ordenada por nome: [(nome, {rec_prev, rec_rec, rec_cancel, desp_pagas, em_aberto}), ...],
     omitindo imóveis sem nenhum valor no período.
+
+    rec_prev (valor EXIGÍVEL — item 8): soma valor_previsto só das receitas
+    NÃO canceladas — a cobrança de uma cancelada foi encerrada, não é mais
+    algo a exigir. rec_cancel guarda separadamente o valor_previsto LANÇADO
+    das canceladas (histórico), para quem precisar do total original.
     """
     from collections import defaultdict
     from decimal import Decimal
 
     dados = defaultdict(lambda: {
         'rec_prev': Decimal('0.00'), 'rec_rec': Decimal('0.00'),
-        'desp_pagas': Decimal('0.00'), 'em_aberto': 0,
+        'rec_cancel': Decimal('0.00'), 'desp_pagas': Decimal('0.00'), 'em_aberto': 0,
     })
     for r in receitas:
         item = dados[r.imovel.nome]
-        item['rec_prev'] += r.valor_previsto
+        if r.status == 'cancelado':
+            item['rec_cancel'] += r.valor_previsto
+        else:
+            item['rec_prev'] += r.valor_previsto
         # Sempre soma valor_recebido, mesmo cancelada: recalcular_recebimentos
         # reconsolida esse campo a partir dos RecebimentoReceita reais
         # independentemente do status — dinheiro recebido não desaparece com
@@ -308,7 +316,7 @@ def _resumo_por_imovel(receitas, despesas):
 
     return sorted(
         (nome, item) for nome, item in dados.items()
-        if item['rec_prev'] or item['rec_rec'] or item['desp_pagas']
+        if item['rec_prev'] or item['rec_rec'] or item['rec_cancel'] or item['desp_pagas']
     )
 
 
@@ -343,12 +351,15 @@ def exportar_relatorio_mensal_xlsx(request, mes, ano):
 
     # Aba resumo por imóvel — agrupamento em uma passada só
     ws_res = wb.create_sheet('Resumo por Imóvel')
-    ws_res.append(['Imóvel', 'Receita Prevista', 'Receita Recebida', 'Despesas Pagas', 'Resultado'])
-    _estilizar_cabecalho(ws_res, 5)
+    ws_res.append([
+        'Imóvel', 'Receita Exigível', 'Receita Cancelada (Lançado)',
+        'Receita Recebida', 'Despesas Pagas', 'Resultado',
+    ])
+    _estilizar_cabecalho(ws_res, 6)
     resumo = _resumo_por_imovel(receitas, despesas)
     for nome, dados in resumo:
         ws_res.append([
-            nome, dados['rec_prev'], dados['rec_rec'], dados['desp_pagas'],
+            nome, dados['rec_prev'], dados['rec_cancel'], dados['rec_rec'], dados['desp_pagas'],
             dados['rec_rec'] - dados['desp_pagas'],
         ])
 
@@ -394,7 +405,11 @@ def exportar_relatorio_contabilidade_xlsx(request, mes, ano):
     ws_res.title = 'Resumo'
     ws_res.append(['Campo', 'Valor'])
     _estilizar_cabecalho(ws_res, 2)
-    total_prev = sum(r.valor_previsto for r in receitas)
+    # Valor EXIGÍVEL (item 8): exclui canceladas — a cobrança delas foi
+    # encerrada. O valor LANÇADO das canceladas (histórico original) é
+    # reportado à parte, nunca somado ao exigível.
+    total_prev = sum(r.valor_previsto for r in receitas if r.status != 'cancelado')
+    total_cancelado = sum(r.valor_previsto for r in receitas if r.status == 'cancelado')
     # Soma valor_recebido de TODAS as receitas, mesmo canceladas — dinheiro
     # recebido antes do cancelamento continua no caixa (item 4).
     total_rec = sum(r.valor_recebido or 0 for r in receitas)
@@ -411,7 +426,8 @@ def exportar_relatorio_contabilidade_xlsx(request, mes, ano):
     nome_mes = dict(ReceitaAluguel.MESES).get(mes, str(mes))
     for row in [
         ('Mês/Ano', f'{nome_mes}/{ano}'),
-        ('Total Receitas Previstas (R$)', float(total_prev)),
+        ('Total Receitas Exigíveis (R$)', float(total_prev)),
+        ('Total Receitas Canceladas — Lançado (R$)', float(total_cancelado)),
         ('Total Receitas Recebidas (R$)', float(total_rec)),
         ('Total Despesas Pagas (R$)', float(total_desp)),
         ('Resultado Líquido (R$)', float(total_rec - total_desp)),
@@ -504,12 +520,15 @@ def exportar_relatorio_contabilidade_xlsx(request, mes, ano):
 
     # ── Aba 6: Resultado por Imóvel ────────────────────────────────────────────
     ws_por_im = wb.create_sheet('Por Imóvel')
-    cab_im = ['Imóvel', 'Rec. Prevista', 'Rec. Recebida', 'Desp. Pagas', 'Resultado', 'Em Aberto']
+    cab_im = [
+        'Imóvel', 'Rec. Exigível', 'Rec. Cancelada (Lançado)', 'Rec. Recebida',
+        'Desp. Pagas', 'Resultado', 'Em Aberto',
+    ]
     ws_por_im.append(cab_im)
     _estilizar_cabecalho(ws_por_im, len(cab_im))
     for nome, dados in _resumo_por_imovel(receitas, despesas):
         ws_por_im.append([
-            nome, float(dados['rec_prev']), float(dados['rec_rec']),
+            nome, float(dados['rec_prev']), float(dados['rec_cancel']), float(dados['rec_rec']),
             float(dados['desp_pagas']), float(dados['rec_rec'] - dados['desp_pagas']),
             dados['em_aberto'],
         ])

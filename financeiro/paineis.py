@@ -54,46 +54,62 @@ def serie_ocupacao_mensal(n_meses=12, referencia=None):
     return serie
 
 
-def serie_receita_despesa_por_imovel(n_meses=12, referencia=None):
+def serie_receita_despesa_por_imovel(n_meses=12, referencia=None, incluir_receitas=True, incluir_despesas=True):
     """
     Receitas recebidas × despesas pagas por imóvel no período (ordenado por
-    receita). "Recebido" agrega RecebimentoReceita diretamente (não
-    valor_recebido filtrado por status) — inclui recebimentos de receitas
-    canceladas depois de terem recebido algo, cuja competência ainda cai no
-    período filtrado.
+    receita, ou por despesa quando receitas não são incluídas). "Recebido"
+    agrega RecebimentoReceita diretamente (não valor_recebido filtrado por
+    status) — inclui recebimentos de receitas canceladas depois de terem
+    recebido algo, cuja competência ainda cai no período filtrado.
+
+    incluir_receitas=False / incluir_despesas=False omitem a QUERY e o valor
+    correspondente da série (None, não 0) — usado quando o chamador não tem
+    permissão para ver aquela área; o template nunca deve exibir "0" como se
+    fosse um valor real de uma área sem permissão.
     """
     competencias = competencias_ultimas(n_meses, referencia)
     filtro = filtro_competencias(competencias)
 
     dados = defaultdict(lambda: {'recebido': Decimal('0'), 'pago': Decimal('0')})
+    imoveis_com_dado = set()
 
-    filtro_receb = filtro_competencias(
-        competencias, campo_ano='receita__competencia_ano', campo_mes='receita__competencia_mes'
-    )
-    recebidos = (
-        RecebimentoReceita.objects.filter(filtro_receb)
-        .values('receita__imovel__nome').annotate(total=Sum('valor'))
-    )
-    for linha in recebidos:
-        dados[linha['receita__imovel__nome']]['recebido'] = linha['total'] or Decimal('0')
+    if incluir_receitas:
+        filtro_receb = filtro_competencias(
+            competencias, campo_ano='receita__competencia_ano', campo_mes='receita__competencia_mes'
+        )
+        recebidos = (
+            RecebimentoReceita.objects.filter(filtro_receb)
+            .values('receita__imovel__nome').annotate(total=Sum('valor'))
+        )
+        for linha in recebidos:
+            nome = linha['receita__imovel__nome']
+            dados[nome]['recebido'] = linha['total'] or Decimal('0')
+            imoveis_com_dado.add(nome)
 
-    pagos = (
-        Despesa.objects.filter(filtro, status='paga', imovel__isnull=False)
-        .values('imovel__nome').annotate(total=Sum('valor'))
-    )
-    for linha in pagos:
-        dados[linha['imovel__nome']]['pago'] = linha['total'] or Decimal('0')
+    if incluir_despesas:
+        pagos = (
+            Despesa.objects.filter(filtro, status='paga', imovel__isnull=False)
+            .values('imovel__nome').annotate(total=Sum('valor'))
+        )
+        for linha in pagos:
+            nome = linha['imovel__nome']
+            dados[nome]['pago'] = linha['total'] or Decimal('0')
+            imoveis_com_dado.add(nome)
 
     serie = [
         {
             'imovel': nome,
-            'recebido': float(valores['recebido']),
-            'pago': float(valores['pago']),
-            'resultado': float(valores['recebido'] - valores['pago']),
+            'recebido': float(valores['recebido']) if incluir_receitas else None,
+            'pago': float(valores['pago']) if incluir_despesas else None,
+            'resultado': (
+                float(valores['recebido'] - valores['pago'])
+                if (incluir_receitas and incluir_despesas) else None
+            ),
         }
         for nome, valores in dados.items()
     ]
-    serie.sort(key=lambda item: item['recebido'], reverse=True)
+    chave_ordenacao = 'recebido' if incluir_receitas else 'pago'
+    serie.sort(key=lambda item: item[chave_ordenacao] or 0, reverse=True)
     return serie
 
 

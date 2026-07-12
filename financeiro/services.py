@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Model, Q
 
 from .models import ReceitaAluguel, ReceitaAluguelItem, RecebimentoReceita, Despesa
 
@@ -76,6 +76,124 @@ def registrar_recebimento_bloqueada(
     return _registrar_recebimento_core(
         receita, valor, data_recebimento, usuario, origem, transacao_extrato, observacoes
     )
+
+
+def _recebimento_e_protegido(rec):
+    """Recebimento originado de conciliação bancária — imutável fora do fluxo de desfazer."""
+    return rec.origem == 'conciliacao' or rec.transacao_extrato_id is not None
+
+
+@transaction.atomic
+def atualizar_recebimentos_da_receita(receita_id, novos=None, alterados=None, excluidos=None, usuario=None):
+    """
+    Aplica, como uma ÚNICA operação financeira atômica, inclusões, alterações
+    e exclusões de RecebimentoReceita de uma mesma receita — usada pelo
+    inline de "Recebimentos da Receita" no Admin de ReceitaAluguel.
+
+    Bloqueia a receita com select_for_update(), calcula o total FINAL de
+    todos os recebimentos considerando as três listas em CONJUNTO (não uma
+    validação por linha isolada, que poderia aprovar duas novas linhas que,
+    somadas, excedem o saldo mas cada uma isoladamente não excede) e só
+    persiste se esse total não ultrapassar valor_total_devido. Qualquer
+    rejeição levanta ValidationError e a transação inteira é revertida —
+    nenhuma das linhas é gravada parcialmente.
+
+    novos: lista de dicts {'data_recebimento', 'valor', 'observacoes'}.
+    alterados: lista de dicts {'pk', 'data_recebimento', 'valor', 'observacoes'}.
+    excluidos: lista de pks (int) de recebimentos a excluir.
+
+    Recebimentos originados de conciliação bancária (origem='conciliacao' ou
+    transacao_extrato preenchida) nunca podem ser alterados ou excluídos por
+    aqui — devem ser corrigidos desfazendo a conciliação correspondente.
+
+    A receita é reconsolidada (recalcular_recebimentos) UMA ÚNICA VEZ, ao
+    final — as gravações individuais usam Model.save()/Model.delete() direto
+    (contornando o save()/delete() de RecebimentoReceita, que reconsolidaria
+    a cada linha) para evitar reconsolidações redundantes.
+    """
+    novos = novos or []
+    alterados = alterados or []
+    excluidos = list(excluidos or [])
+
+    receita = ReceitaAluguel.objects.select_for_update().get(pk=receita_id)
+
+    if novos and receita.status == 'cancelado':
+        raise ValidationError(
+            'Não é possível registrar recebimento em uma receita cancelada — reabra a receita primeiro.'
+        )
+
+    if novos:
+        # Idempotente: só materializa se houver valor_recebido legado sem
+        # recebimentos — evita perder um consolidado preexistente ao somar
+        # o primeiro recebimento novo do lote.
+        receita.garantir_recebimento_legado()
+
+    existentes = {r.pk: r for r in receita.recebimentos.all()}
+
+    for pk in excluidos:
+        if pk not in existentes:
+            raise ValidationError(f'Recebimento {pk} não pertence a esta receita.')
+    alterados_por_pk = {}
+    for dados in alterados:
+        pk = dados['pk']
+        if pk not in existentes:
+            raise ValidationError(f'Recebimento {pk} não pertence a esta receita.')
+        alterados_por_pk[pk] = dados
+
+    protegidos = {pk for pk, rec in existentes.items() if _recebimento_e_protegido(rec)}
+    if (set(excluidos) | set(alterados_por_pk)) & protegidos:
+        raise ValidationError(
+            'Recebimentos originados de conciliação bancária não podem ser editados ou '
+            'excluídos por aqui — desfaça a conciliação correspondente para corrigi-los.'
+        )
+
+    excluidos_set = set(excluidos)
+    total_final = Decimal('0.00')
+    for pk, rec in existentes.items():
+        if pk in excluidos_set:
+            continue
+        valor = alterados_por_pk[pk]['valor'] if pk in alterados_por_pk else rec.valor
+        if valor is None or valor <= 0:
+            raise ValidationError('O valor de cada recebimento deve ser maior que zero.')
+        total_final += valor
+    for dados in novos:
+        valor = dados.get('valor')
+        if valor is None or valor <= 0:
+            raise ValidationError('O valor de cada recebimento deve ser maior que zero.')
+        total_final += valor
+
+    if total_final > receita.valor_total_devido:
+        raise ValidationError(
+            f'A soma dos recebimentos (R$ {total_final}) excederia o valor total devido '
+            f'da receita (R$ {receita.valor_total_devido}) — ajuste os valores antes de salvar.'
+        )
+
+    # Validado — persiste. Model.save()/Model.delete() chamam diretamente a
+    # implementação-base (contornando RecebimentoReceita.save()/delete(), que
+    # reconsolidaria a receita a cada linha); a reconsolidação acontece uma
+    # única vez, ao final.
+    for pk in excluidos_set:
+        Model.delete(existentes[pk])
+    for dados in alterados:
+        rec = existentes[dados['pk']]
+        rec.data_recebimento = dados['data_recebimento']
+        rec.valor = dados['valor']
+        rec.observacoes = dados.get('observacoes', '')
+        Model.save(rec, update_fields=['data_recebimento', 'valor', 'observacoes'])
+    if novos:
+        RecebimentoReceita.objects.bulk_create([
+            RecebimentoReceita(
+                receita=receita,
+                data_recebimento=dados['data_recebimento'],
+                valor=dados['valor'],
+                observacoes=dados.get('observacoes', ''),
+                origem='manual',
+                criado_por=usuario,
+            )
+            for dados in novos
+        ])
+
+    receita.recalcular_recebimentos()
 
 
 def _itens_para_competencia(contrato, ano, mes):
@@ -258,11 +376,15 @@ def serie_fluxo_caixa_12m(referencia=None, n_meses=12, incluir_despesas=True):
     movimento de caixa (ex.: aluguel de janeiro pago em março aparece em
     março, não em janeiro).
 
-    incluir_despesas=False omite a consulta e a série de despesas pagas
-    (usada quando o chamador não tem permissão para ver despesas).
+    incluir_despesas=False omite a consulta de despesas pagas E retorna
+    'pago'/'saldo' como None (não 0.0) — usado quando o chamador não tem
+    permissão para ver despesas. None sinaliza ao template que a informação
+    não deve ser exibida, nunca que despesas somaram zero: mostrar "0" ou
+    calcular saldo=recebido induziria o leitor a acreditar que não houve
+    gasto no mês, quando na verdade a área simplesmente não foi consultada.
 
     Retorna lista cronológica de dicts:
-    {'label': 'mm/aaaa', 'recebido': float, 'pago': float, 'saldo': float}.
+    {'label': 'mm/aaaa', 'recebido': float, 'pago': float|None, 'saldo': float|None}.
     """
     from django.db.models import Sum
     from patrimonio.indicadores import competencias_ultimas, filtro_competencias
@@ -294,14 +416,60 @@ def serie_fluxo_caixa_12m(referencia=None, n_meses=12, incluir_despesas=True):
     serie = []
     for ano, mes in competencias:
         recebido = float(recebidos.get((ano, mes)) or 0)
-        pago = float(pagos.get((ano, mes)) or 0)
+        pago = float(pagos.get((ano, mes)) or 0) if incluir_despesas else None
+        saldo = (recebido - pago) if incluir_despesas else None
         serie.append({
             'label': f'{mes:02d}/{ano}',
             'recebido': recebido,
             'pago': pago,
-            'saldo': recebido - pago,
+            'saldo': saldo,
         })
     return serie
+
+
+@transaction.atomic
+def marcar_despesa_como_paga(despesa_id, data_pagamento, usuario=None):
+    """
+    Marca uma despesa como paga, mantendo status e data_pagamento SEMPRE
+    sincronizados (item 10) — nunca defina um sem o outro diretamente.
+    """
+    despesa = Despesa.objects.select_for_update().get(pk=despesa_id)
+    if not data_pagamento:
+        raise ValidationError({'data_pagamento': 'Informe a data de pagamento.'})
+    despesa.status = 'paga'
+    despesa.data_pagamento = data_pagamento
+    despesa.full_clean()
+    despesa.save(update_fields=['status', 'data_pagamento'])
+    return despesa
+
+
+@transaction.atomic
+def reabrir_despesa(despesa_id):
+    """
+    Reabre uma despesa (paga ou cancelada) — limpa data_pagamento e
+    recalcula o status pela data de vencimento (prevista/atrasada), nunca
+    deixando um status não-pago com data de pagamento preenchida.
+    """
+    from django.utils import timezone
+
+    despesa = Despesa.objects.select_for_update().get(pk=despesa_id)
+    hoje = timezone.localdate()
+    despesa.data_pagamento = None
+    despesa.status = 'atrasada' if despesa.data_vencimento < hoje else 'prevista'
+    despesa.full_clean()
+    despesa.save(update_fields=['status', 'data_pagamento'])
+    return despesa
+
+
+@transaction.atomic
+def cancelar_despesa(despesa_id):
+    """Cancela uma despesa — limpa data_pagamento (cancelada nunca tem data)."""
+    despesa = Despesa.objects.select_for_update().get(pk=despesa_id)
+    despesa.status = 'cancelada'
+    despesa.data_pagamento = None
+    despesa.full_clean()
+    despesa.save(update_fields=['status', 'data_pagamento'])
+    return despesa
 
 
 def contratos_para_geracao_mes(mes, ano):

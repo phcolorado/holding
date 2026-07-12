@@ -540,7 +540,35 @@ class EncargoContrato(models.Model):
         return False
 
 
+class ReajusteContratoQuerySet(models.QuerySet):
+    """
+    QuerySet.update()/QuerySet.delete() operam direto no banco e NUNCA
+    chamam ReajusteContrato.save()/delete() nem clean() — por isso, sem esta
+    camada, um `ReajusteContrato.objects.filter(...).update(...)` ou
+    `.delete()` em massa contornaria completamente a imutabilidade dos
+    reajustes já aplicados. Bloqueia as duas operações quando o queryset
+    inclui QUALQUER reajuste aplicado (aplicado_em preenchido).
+    """
+    def update(self, **kwargs):
+        if self.filter(aplicado_em__isnull=False).exists():
+            raise ValidationError(
+                'Este conjunto inclui reajuste(s) já aplicado(s) — atualização em massa '
+                '(QuerySet.update()) não é permitida sobre reajustes aplicados.'
+            )
+        return super().update(**kwargs)
+
+    def delete(self):
+        if self.filter(aplicado_em__isnull=False).exists():
+            raise ValidationError(
+                'Este conjunto inclui reajuste(s) já aplicado(s) — exclusão em massa '
+                '(QuerySet.delete()) não é permitida sobre reajustes aplicados.'
+            )
+        return super().delete()
+
+
 class ReajusteContrato(models.Model):
+    objects = ReajusteContratoQuerySet.as_manager()
+
     contrato = models.ForeignKey(Contrato, on_delete=models.CASCADE, related_name='reajustes', verbose_name='Contrato')
     data_reajuste = models.DateField('Data do Reajuste')
     indice = models.CharField('Índice', max_length=10, choices=Contrato.INDICE_CHOICES)
@@ -610,11 +638,32 @@ class ReajusteContrato(models.Model):
         # (chamado por full_clean() na validação), mas um save() direto via
         # ORM (script, shell, código) nunca passa por clean() — por isso a
         # mesma checagem roda AQUI, incondicionalmente, antes de persistir.
+        # Usa .values() (não .first()) para reconsultar o banco em vez de
+        # confiar em self — um save() de uma instância Python desatualizada
+        # não pode contornar a proteção.
         if self.pk:
-            persistido = ReajusteContrato.objects.filter(pk=self.pk).first()
-            if persistido and persistido.aplicado_em is not None:
+            persistido = ReajusteContrato.objects.filter(pk=self.pk).values(
+                'aplicado_em', *self.CAMPOS_PROTEGIDOS_APOS_APLICACAO
+            ).first()
+            if persistido and persistido['aplicado_em'] is not None:
+                # aplicado_em em si é protegido explicitamente: nunca pode ser
+                # apagado (None) nem substituído por outra data/hora — sem
+                # isso, um save() direto poderia "desaplicar" o reajuste
+                # (aplicado_em=None) sem passar pela checagem de campos
+                # financeiros abaixo, já que aplicado_em não fazia parte de
+                # CAMPOS_PROTEGIDOS_APOS_APLICACAO.
+                if self.aplicado_em != persistido['aplicado_em']:
+                    raise ValidationError(
+                        'Este reajuste já foi aplicado — "aplicado em" não pode ser '
+                        'apagado nem alterado (mesmo por save() direto).'
+                    )
+                if not self.aplicado:
+                    raise ValidationError(
+                        'Este reajuste já foi aplicado — não é possível desmarcá-lo '
+                        '(mesmo por save() direto). Para corrigir, registre um novo reajuste.'
+                    )
                 for campo in self.CAMPOS_PROTEGIDOS_APOS_APLICACAO:
-                    if getattr(self, campo) != getattr(persistido, campo):
+                    if getattr(self, campo) != persistido[campo]:
                         raise ValidationError(
                             'Este reajuste já foi aplicado — os campos financeiros são '
                             'imutáveis (mesmo por save() direto). Apenas as observações '
@@ -622,6 +671,8 @@ class ReajusteContrato(models.Model):
                         )
         # Um reajuste com aplicado_em preenchido é, por definição, aplicado —
         # nunca pode voltar a aplicado=False (mesmo por saves diretos via ORM).
+        # Cobre também a PRIMEIRA aplicação (self.pk ainda sem persistido, ou
+        # aplicar() setando os dois campos juntos antes deste save()).
         if self.aplicado_em is not None and not self.aplicado:
             self.aplicado = True
             update_fields = kwargs.get('update_fields')
@@ -632,10 +683,18 @@ class ReajusteContrato(models.Model):
     def delete(self, *args, **kwargs):
         # ATENÇÃO (manutenção): esta proteção só vale para .delete()/.save() de
         # INSTÂNCIA. QuerySet.delete() em massa e QuerySet.update() operam
-        # direto no banco e NÃO chamam este método nem clean() — nunca use
-        # essas formas sobre ReajusteContrato aplicado; se for estritamente
-        # necessário por manutenção excepcional, documente o motivo à parte.
-        if self.aplicado_em is not None:
+        # direto no banco e NÃO chamam este método nem clean() — o manager
+        # customizado (ReajusteContratoQuerySet, usado por `objects`) bloqueia
+        # essas duas operações quando o conjunto inclui reajuste(s) aplicado(s);
+        # mesmo assim, um acesso direto ao SQL por um DBA não é impedido por
+        # nenhuma dessas camadas — fora do escopo desta proteção.
+        #
+        # NUNCA confia em self.aplicado_em: uma instância Python obtida ANTES
+        # de o reajuste ser aplicado por outro código/processo continuaria
+        # com aplicado_em=None em memória mesmo depois de aplicado no banco —
+        # reconsulta o estado REAL antes de excluir.
+        persistido = ReajusteContrato.objects.filter(pk=self.pk).values('aplicado_em').first()
+        if persistido and persistido['aplicado_em'] is not None:
             raise ValidationError(
                 'Este reajuste já foi aplicado e não pode ser excluído — o histórico '
                 'financeiro do contrato depende dele. Para corrigir, registre um novo '

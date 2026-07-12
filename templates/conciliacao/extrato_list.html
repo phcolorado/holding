@@ -15,8 +15,12 @@
 <div class="alert alert-warning">
     <i class="bi bi-exclamation-circle me-1"></i>
     Nenhuma conta bancária cadastrada.
+    {% if user.is_staff and perms.conciliacao.add_contabancaria %}
     <a href="{% url 'admin:conciliacao_contabancaria_add' %}" class="alert-link">Cadastre a conta</a>
     antes de importar o primeiro extrato.
+    {% else %}
+    Solicite a um administrador que cadastre a conta antes de importar o primeiro extrato.
+    {% endif %}
 </div>
 {% endif %}
 
@@ -85,6 +89,17 @@
                            title="Baixar arquivo OFX original">
                             <i class="bi bi-download"></i>
                         </a>
+                        {% if perms.conciliacao.delete_extratoimportado and e.pendentes == e.total_transacoes %}
+                        <form method="post" class="d-inline"
+                              onsubmit="return confirm('Excluir este extrato? Só é possível porque nenhuma transação foi tratada ainda. Esta ação não pode ser desfeita.');">
+                            {% csrf_token %}
+                            <input type="hidden" name="action" value="excluir">
+                            <input type="hidden" name="extrato_id" value="{{ e.pk }}">
+                            <button type="submit" class="btn btn-sm btn-outline-danger" title="Excluir extrato (só permitido sem nenhuma transação tratada)">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </form>
+                        {% endif %}
                     </td>
                 </tr>
                 {% empty %}

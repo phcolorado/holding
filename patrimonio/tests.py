@@ -1090,8 +1090,17 @@ class PerfisDeAcessoTest(TestCase):
 
         self.assertEqual(client.get(reverse('receitas_list')).status_code, 403)
         self.assertEqual(client.get(reverse('despesas_list')).status_code, 403)
-        self.assertEqual(client.get(reverse('paineis')).status_code, 403)
         self.assertEqual(client.get(reverse('extrato_list')).status_code, 403)
+        # Painéis: advogado TEM patrimonio.view_imovel, então acessa a tela
+        # (200) mas só vê o painel de ocupação — nenhum dado financeiro
+        # (item 3, rodada pós-revisão: painéis degradam por permissão em vez
+        # de negar a tela inteira quando há ao menos uma área permitida).
+        resposta = client.get(reverse('paineis'))
+        self.assertEqual(resposta.status_code, 200)
+        self.assertIsNotNone(resposta.context['ocupacao'])
+        self.assertIsNone(resposta.context['inadimplencia'])
+        self.assertIsNone(resposta.context['por_categoria'])
+        self.assertIsNone(resposta.context['por_imovel'])
 
     def test_contador_acessa_financeiro_e_exports(self):
         self._usuario_no_grupo('cont', 'contador')
@@ -1427,11 +1436,13 @@ class ReajusteProtegidoTest(TestCase):
         self.reajuste.aplicado = False
         with self.assertRaises(ValidationError):
             self.reajuste.full_clean()
-        # mesmo um save direto via ORM força aplicado=True
-        self.reajuste.aplicado = False
-        self.reajuste.save()
+        # mesmo um save() direto via ORM é REJEITADO (não mais silenciosamente
+        # corrigido de volta para aplicado=True) — rodada pós-revisão, item 2.
+        with self.assertRaises(ValidationError):
+            self.reajuste.save()
         self.reajuste.refresh_from_db()
         self.assertTrue(self.reajuste.aplicado)
+        self.assertIsNotNone(self.reajuste.aplicado_em)
 
     def test_campos_financeiros_imutaveis_apos_aplicacao(self):
         self.reajuste.aplicar()
@@ -1529,6 +1540,66 @@ class ReajusteProtegidoTest(TestCase):
         pendentes = self.contrato.reajustes.filter(aplicado_em__isnull=True)
         self.assertIn(avulso, pendentes)
         self.assertIn(self.reajuste, pendentes)
+
+    # ─── Rodada pós-revisão (item 2): robustez contra bypass de aplicado_em ──
+
+    def test_apagar_aplicado_em_via_save_e_rejeitado(self):
+        self.reajuste.aplicar()
+        aplicado = ReajusteContrato.objects.get(pk=self.reajuste.pk)
+        aplicado.aplicado_em = None
+        with self.assertRaises(ValidationError):
+            aplicado.save()
+        persistido = ReajusteContrato.objects.get(pk=self.reajuste.pk)
+        self.assertIsNotNone(persistido.aplicado_em)
+        self.assertTrue(persistido.aplicado)
+
+    def test_alterar_aplicado_em_para_outra_data_e_rejeitado(self):
+        self.reajuste.aplicar()
+        aplicado = ReajusteContrato.objects.get(pk=self.reajuste.pk)
+        original = aplicado.aplicado_em
+        aplicado.aplicado_em = original - timedelta(days=1)
+        with self.assertRaises(ValidationError):
+            aplicado.save()
+        persistido = ReajusteContrato.objects.get(pk=self.reajuste.pk)
+        self.assertEqual(persistido.aplicado_em, original)
+
+    def test_instancia_desatualizada_nao_consegue_excluir_registro_aplicado_por_outra(self):
+        """
+        Duas instâncias Python apontam para o MESMO reajuste, ainda pendente.
+        Uma delas (`aplicado_via_outra`) aplica o reajuste — a OUTRA
+        (`desatualizada`) continua com aplicado_em=None em memória, mas
+        delete() deve consultar o banco e recusar mesmo assim.
+        """
+        desatualizada = ReajusteContrato.objects.get(pk=self.reajuste.pk)
+        aplicado_via_outra = ReajusteContrato.objects.get(pk=self.reajuste.pk)
+        aplicado_via_outra.aplicar()
+
+        self.assertIsNone(desatualizada.aplicado_em)  # em memória, ainda "vazio"
+        with self.assertRaises(ValidationError):
+            desatualizada.delete()
+        self.assertTrue(ReajusteContrato.objects.filter(pk=self.reajuste.pk).exists())
+
+    def test_queryset_update_em_massa_e_bloqueado_quando_inclui_aplicado(self):
+        self.reajuste.aplicar()
+        with self.assertRaises(ValidationError):
+            ReajusteContrato.objects.filter(contrato=self.contrato).update(observacoes='alterado em massa')
+        self.reajuste.refresh_from_db()
+        self.assertNotEqual(self.reajuste.observacoes, 'alterado em massa')
+
+    def test_queryset_delete_em_massa_e_bloqueado_quando_inclui_aplicado(self):
+        self.reajuste.aplicar()
+        with self.assertRaises(ValidationError):
+            ReajusteContrato.objects.filter(contrato=self.contrato).delete()
+        self.assertTrue(ReajusteContrato.objects.filter(pk=self.reajuste.pk).exists())
+
+    def test_queryset_update_em_massa_funciona_normalmente_para_pendentes(self):
+        pendente = ReajusteContrato.objects.create(
+            contrato=self.contrato, data_reajuste=date(2025, 6, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2100.00'), aplicado=False,
+        )
+        ReajusteContrato.objects.filter(pk=pendente.pk).update(observacoes='nota em lote')
+        pendente.refresh_from_db()
+        self.assertEqual(pendente.observacoes, 'nota em lote')
 
 
 # ─── Rodada 2: unicidade de CPF/CNPJ no banco ─────────────────────────────────
@@ -1791,6 +1862,34 @@ class DashboardPermissoesTest(TestCase):
         self.assertNotIn('Total de Imóveis', conteudo)
         self.assertEqual(resposta.context['despesas_abertas'], 0)
 
+    def test_apenas_receitas_fluxo_de_caixa_esconde_pago_e_resultado(self):
+        """Item 9: sem view_despesa, o fluxo de caixa não mostra 'Pago'/'Resultado' como zero."""
+        self._usuario('dash_fluxo_so_rec', 'view_receitaaluguel')
+        resposta = self._get()
+        self.assertFalse(resposta.context['fluxo_inclui_despesas'])
+        for ponto in resposta.context['fluxo_caixa']:
+            self.assertIsNone(ponto['pago'])
+            self.assertIsNone(ponto['saldo'])
+        conteudo = resposta.content.decode()
+        self.assertIn('Entradas Recebidas', conteudo)
+        self.assertNotIn('Fluxo de Caixa — últimos 12 meses', conteudo)
+        self.assertNotIn('<th class="text-end">Pago (R$)</th>', conteudo)
+        self.assertNotIn('<th class="text-end">Resultado (R$)</th>', conteudo)
+        self.assertIn('FLUXO_INCLUI_DESPESAS = false', conteudo)
+
+    def test_receitas_e_despesas_fluxo_de_caixa_mostra_tudo(self):
+        self._usuario('dash_fluxo_completo', 'view_receitaaluguel', 'view_despesa')
+        resposta = self._get()
+        self.assertTrue(resposta.context['fluxo_inclui_despesas'])
+        for ponto in resposta.context['fluxo_caixa']:
+            self.assertIsNotNone(ponto['pago'])
+            self.assertIsNotNone(ponto['saldo'])
+        conteudo = resposta.content.decode()
+        self.assertIn('Fluxo de Caixa — últimos 12 meses', conteudo)
+        self.assertIn('<th class="text-end">Pago (R$)</th>', conteudo)
+        self.assertIn('<th class="text-end">Resultado (R$)</th>', conteudo)
+        self.assertIn('FLUXO_INCLUI_DESPESAS = true', conteudo)
+
     def test_apenas_despesas_mostra_card_de_despesas(self):
         from financeiro.models import Despesa
         Despesa.objects.create(
@@ -1838,3 +1937,132 @@ class DashboardPermissoesTest(TestCase):
         conteudo = resposta.content.decode()
         self.assertIn('Manutenções em aberto', conteudo)
         self.assertIn('Vazamento', conteudo)
+
+
+class AcoesRapidasPermissaoTest(TestCase):
+    """
+    Item 11 (rodada pós-revisão): botão de consulta -> view; criação -> add;
+    edição -> change; link para o Admin -> também exige user.is_staff. Cobre
+    o exemplo citado explicitamente ("Gerar Receitas do Mês Atual" não pode
+    depender só de view_receitaaluguel) e o mesmo padrão nas demais listagens
+    que expõem links diretos para o Django Admin.
+    """
+    def setUp(self):
+        from django.contrib.auth.models import Permission
+        self.Permission = Permission
+        self.client = Client()
+        self.imovel = _criar_imovel('Imóvel Ações Rápidas')
+
+    def _usuario(self, nome, *perms, is_staff=False):
+        user = User.objects.create_user(nome, password='pass', is_staff=is_staff)
+        if perms:
+            user.user_permissions.add(*self.Permission.objects.filter(codename__in=perms))
+        self.client.login(username=nome, password='pass')
+        return user
+
+    def test_dashboard_so_view_receitaaluguel_nao_mostra_gerar_receitas(self):
+        self._usuario('acoes_so_view_receita', 'view_receitaaluguel')
+        resposta = self.client.get(reverse('dashboard'))
+        conteudo = resposta.content.decode()
+        self.assertIn('Conferir Recebimentos', conteudo)
+        self.assertNotIn('Gerar Receitas do Mês Atual', conteudo)
+
+    def test_dashboard_com_add_receitaaluguel_mostra_gerar_receitas(self):
+        self._usuario('acoes_com_add_receita', 'view_receitaaluguel', 'add_receitaaluguel')
+        resposta = self.client.get(reverse('dashboard'))
+        conteudo = resposta.content.decode()
+        self.assertIn('Gerar Receitas do Mês Atual', conteudo)
+
+    def test_dashboard_links_de_admin_exigem_is_staff(self):
+        # add_imovel/add_receitaaluguel/add_despesa/add_documento sem is_staff:
+        # nenhum link para o Admin deve aparecer nas Ações Rápidas.
+        from django.contrib.auth.models import Permission
+        user = User.objects.create_user('acoes_sem_staff', password='pass', is_staff=False)
+        user.user_permissions.add(*Permission.objects.filter(
+            codename__in=('add_imovel', 'add_receitaaluguel', 'add_despesa', 'add_documento')
+        ))
+        self.client.login(username='acoes_sem_staff', password='pass')
+        resposta = self.client.get(reverse('dashboard'))
+        conteudo = resposta.content.decode()
+        self.assertNotIn('Cadastrar Imóvel', conteudo)
+        self.assertNotIn('Lançar Receita Manualmente', conteudo)
+        self.assertNotIn('Lançar Despesa', conteudo)
+        self.assertNotIn('Enviar Documento', conteudo)
+
+    def test_nav_gerar_receitas_exige_add_receitaaluguel(self):
+        self._usuario('nav_so_view_receita', 'view_receitaaluguel')
+        resposta = self.client.get(reverse('dashboard'))
+        conteudo = resposta.content.decode()
+        self.assertNotIn(reverse('gerar_receitas_mes'), conteudo)
+
+        self._usuario('nav_com_add_receita', 'view_receitaaluguel', 'add_receitaaluguel')
+        resposta = self.client.get(reverse('dashboard'))
+        conteudo = resposta.content.decode()
+        self.assertIn(reverse('gerar_receitas_mes'), conteudo)
+
+    def test_receitas_list_nova_receita_exige_staff_e_add(self):
+        user = self._usuario('rec_list_view_only', 'view_receitaaluguel')
+        resposta = self.client.get(reverse('receitas_list'))
+        conteudo = resposta.content.decode()
+        self.assertNotIn(reverse('admin:financeiro_receitaaluguel_add'), conteudo)
+
+        user.is_staff = True
+        user.save()
+        user.user_permissions.add(
+            self.Permission.objects.get(codename='add_receitaaluguel')
+        )
+        resposta = self.client.get(reverse('receitas_list'))
+        conteudo = resposta.content.decode()
+        self.assertIn(reverse('admin:financeiro_receitaaluguel_add'), conteudo)
+
+    def test_despesas_list_nova_despesa_exige_staff_e_add(self):
+        user = self._usuario('desp_list_view_only', 'view_despesa')
+        resposta = self.client.get(reverse('despesas_list'))
+        conteudo = resposta.content.decode()
+        self.assertNotIn(reverse('admin:financeiro_despesa_add'), conteudo)
+
+        user.is_staff = True
+        user.save()
+        user.user_permissions.add(self.Permission.objects.get(codename='add_despesa'))
+        resposta = self.client.get(reverse('despesas_list'))
+        conteudo = resposta.content.decode()
+        self.assertIn(reverse('admin:financeiro_despesa_add'), conteudo)
+
+    def test_imovel_list_novo_imovel_exige_staff_e_add(self):
+        user = self._usuario('imv_list_view_only', 'view_imovel')
+        resposta = self.client.get(reverse('imovel_list'))
+        conteudo = resposta.content.decode()
+        self.assertNotIn(reverse('admin:patrimonio_imovel_add'), conteudo)
+
+        user.is_staff = True
+        user.save()
+        user.user_permissions.add(self.Permission.objects.get(codename='add_imovel'))
+        resposta = self.client.get(reverse('imovel_list'))
+        conteudo = resposta.content.decode()
+        self.assertIn(reverse('admin:patrimonio_imovel_add'), conteudo)
+
+    def test_pessoa_list_nova_pessoa_exige_staff_e_add(self):
+        user = self._usuario('pes_list_view_only', 'view_pessoa')
+        resposta = self.client.get(reverse('pessoa_list'))
+        conteudo = resposta.content.decode()
+        self.assertNotIn(reverse('admin:patrimonio_pessoa_add'), conteudo)
+
+        user.is_staff = True
+        user.save()
+        user.user_permissions.add(self.Permission.objects.get(codename='add_pessoa'))
+        resposta = self.client.get(reverse('pessoa_list'))
+        conteudo = resposta.content.decode()
+        self.assertIn(reverse('admin:patrimonio_pessoa_add'), conteudo)
+
+    def test_contrato_list_novo_contrato_exige_staff_e_add(self):
+        user = self._usuario('ctr_list_view_only', 'view_contrato')
+        resposta = self.client.get(reverse('contrato_list'))
+        conteudo = resposta.content.decode()
+        self.assertNotIn(reverse('admin:patrimonio_contrato_add'), conteudo)
+
+        user.is_staff = True
+        user.save()
+        user.user_permissions.add(self.Permission.objects.get(codename='add_contrato'))
+        resposta = self.client.get(reverse('contrato_list'))
+        conteudo = resposta.content.decode()
+        self.assertIn(reverse('admin:patrimonio_contrato_add'), conteudo)

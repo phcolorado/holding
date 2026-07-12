@@ -131,10 +131,23 @@ class DocumentoContratoInline(admin.TabularInline):
     """Permite anexar documentos (contrato assinado, aditivos, vistoria) direto no cadastro do contrato."""
     model = Documento
     fk_name = 'contrato'
-    fields = ('titulo', 'tipo', 'arquivo', 'data_documento')
+    fields = ('titulo', 'tipo', 'arquivo_link', 'arquivo', 'data_documento')
+    readonly_fields = ('arquivo_link',)
     extra = 0
     verbose_name = 'Documento do Contrato'
     verbose_name_plural = 'Documentos do Contrato'
+
+    @admin.display(description='Arquivo atual')
+    def arquivo_link(self, obj):
+        from documentos.admin import _arquivo_link
+        return _arquivo_link(obj)
+
+    def formfield_for_dbfield(self, db_field, request, **kwargs):
+        formfield = super().formfield_for_dbfield(db_field, request, **kwargs)
+        if db_field.name == 'arquivo':
+            from documentos.admin import ArquivoSemLinkPublicoWidget
+            formfield.widget = ArquivoSemLinkPublicoWidget()
+        return formfield
 
 
 @admin.register(Contrato)

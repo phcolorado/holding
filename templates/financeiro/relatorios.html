@@ -8,6 +8,7 @@
 <div class="row g-4">
 
     <!-- Imóveis -->
+    {% if ve_imoveis %}
     <div class="col-md-6">
         <div class="card shadow-sm">
             <div class="card-header fw-semibold bg-white">
@@ -33,8 +34,10 @@
             </div>
         </div>
     </div>
+    {% endif %}
 
     <!-- Contratos -->
+    {% if ve_contratos %}
     <div class="col-md-6">
         <div class="card shadow-sm">
             <div class="card-header fw-semibold bg-white">
@@ -75,8 +78,10 @@
             </div>
         </div>
     </div>
+    {% endif %}
 
     <!-- Receitas por período -->
+    {% if ve_receitas %}
     <div class="col-md-6">
         <div class="card shadow-sm">
             <div class="card-header fw-semibold bg-white">
@@ -122,8 +127,10 @@
             </div>
         </div>
     </div>
+    {% endif %}
 
     <!-- Despesas por período -->
+    {% if ve_despesas %}
     <div class="col-md-6">
         <div class="card shadow-sm">
             <div class="card-header fw-semibold bg-white">
@@ -169,8 +176,10 @@
             </div>
         </div>
     </div>
+    {% endif %}
 
     <!-- Inadimplência -->
+    {% if ve_receitas %}
     <div class="col-md-6">
         <div class="card shadow-sm">
             <div class="card-header fw-semibold bg-white">
@@ -197,8 +206,10 @@
             </div>
         </div>
     </div>
+    {% endif %}
 
     <!-- Relatório mensal completo -->
+    {% if ve_receitas or ve_despesas %}
     <div class="col-md-6">
         <div class="card shadow-sm border-primary">
             <div class="card-header fw-semibold bg-primary text-white">
@@ -206,6 +217,7 @@
             </div>
             <div class="card-body">
                 <p class="text-muted small">Exporta receitas, despesas e resumo por imóvel em abas separadas.</p>
+                {% if ve_relatorio_mensal %}
                 <div class="row g-2 mb-3">
                     <div class="col-6">
                         <select id="rel-mes" class="form-select form-select-sm">
@@ -225,11 +237,18 @@
                 <button onclick="exportarMensal()" class="btn btn-primary btn-sm w-100">
                     <i class="bi bi-file-earmark-excel me-1"></i>Baixar Relatório Mensal
                 </button>
+                {% else %}
+                <div class="alert alert-secondary small mb-0">
+                    <i class="bi bi-lock me-1"></i>Este relatório exige acesso a receitas <strong>e</strong> despesas.
+                </div>
+                {% endif %}
             </div>
         </div>
     </div>
+    {% endif %}
 
     <!-- Relatório para contabilidade -->
+    {% if ve_relatorio_mensal or ve_documentos %}
     <div class="col-md-6">
         <div class="card shadow-sm border-success">
             <div class="card-header fw-semibold bg-success text-white">
@@ -237,6 +256,7 @@
             </div>
             <div class="card-body">
                 <p class="text-muted small">Resumo, receitas, despesas, inadimplência, documentos pendentes e resultado por imóvel.</p>
+                {% if ve_relatorio_contabil %}
                 <div class="row g-2 mb-3">
                     <div class="col-6">
                         <select id="cont-mes" class="form-select form-select-sm">
@@ -256,9 +276,15 @@
                 <button onclick="exportarContabilidade()" class="btn btn-success btn-sm w-100">
                     <i class="bi bi-file-earmark-excel me-1"></i>Baixar Relatório Contabilidade
                 </button>
+                {% else %}
+                <div class="alert alert-secondary small mb-0">
+                    <i class="bi bi-lock me-1"></i>Este relatório exige acesso a receitas, despesas <strong>e</strong> documentos.
+                </div>
+                {% endif %}
             </div>
         </div>
     </div>
+    {% endif %}
 
 </div>
 {% endblock %}

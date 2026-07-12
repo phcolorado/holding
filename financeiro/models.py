@@ -362,6 +362,17 @@ class RecebimentoReceita(models.Model):
     def clean(self):
         if self.valor is not None and self.valor <= 0:
             raise ValidationError({'valor': 'O valor do recebimento deve ser maior que zero.'})
+        if getattr(self, '_pular_validacao_saldo', False):
+            # Usado SOMENTE pelo formulário do inline do Admin (batch): o
+            # formset inteiro é validado/salvo como uma única operação
+            # financeira por financeiro.services.atualizar_recebimentos_da_
+            # receita(), que calcula o total FINAL de todas as inclusões/
+            # alterações/exclusões em CONJUNTO. Validar cada linha isolada
+            # aqui contra o saldo ATUAL (antes das outras mudanças do mesmo
+            # envio) rejeitaria ou aceitaria combinações incorretamente —
+            # ex.: duas edições simultâneas que se compensam, ou duas linhas
+            # novas que somadas excedem o saldo mas isoladamente não.
+            return
         if self.valor is not None and self.receita_id:
             saldo = self.receita.saldo_em_aberto
             if self.pk:
@@ -455,7 +466,10 @@ class Despesa(models.Model):
     competencia_mes = models.PositiveSmallIntegerField('Mês de Competência', choices=MESES, null=True, blank=True)
     competencia_ano = models.PositiveSmallIntegerField('Ano de Competência', null=True, blank=True)
     data_vencimento = models.DateField('Data de Vencimento')
-    valor = models.DecimalField('Valor (R$)', max_digits=12, decimal_places=2)
+    valor = models.DecimalField(
+        'Valor (R$)', max_digits=12, decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))],
+    )
     data_pagamento = models.DateField('Data de Pagamento', null=True, blank=True)
     status = models.CharField('Status', max_length=15, choices=STATUS_CHOICES, default='prevista')
     observacoes = models.TextField('Observações', blank=True)
@@ -467,10 +481,39 @@ class Despesa(models.Model):
         verbose_name = 'Despesa'
         verbose_name_plural = 'Despesas'
         ordering = ['-data_vencimento']
+        constraints = [
+            # Nunca depender só de clean()/validators — o banco também barra
+            # valor <= 0, mesmo em criação direta via ORM sem full_clean().
+            models.CheckConstraint(check=Q(valor__gt=0), name='despesa_valor_positivo'),
+            # Coerência status × data_pagamento: 'paga' sempre tem data; as
+            # demais ('prevista', 'atrasada', 'cancelada') nunca têm — usar
+            # os services marcar_despesa_como_paga()/reabrir_despesa()/
+            # cancelar_despesa() mantém os dois campos sincronizados.
+            models.CheckConstraint(
+                check=(
+                    Q(status='paga', data_pagamento__isnull=False)
+                    | (~Q(status='paga') & Q(data_pagamento__isnull=True))
+                ),
+                name='despesa_status_data_pagamento_coerentes',
+            ),
+        ]
 
     def __str__(self):
         imovel_str = self.imovel.nome if self.imovel else 'Geral'
         return f'{self.get_categoria_display()} — {imovel_str} — R$ {self.valor}'
+
+    def clean(self):
+        erros = {}
+        if self.status == 'paga' and not self.data_pagamento:
+            erros['data_pagamento'] = 'Despesa paga exige data de pagamento.'
+        if self.status != 'paga' and self.data_pagamento:
+            erros['data_pagamento'] = (
+                f'Despesa com status "{self.get_status_display()}" não pode ter data de '
+                'pagamento — reabra explicitamente (ela é limpa automaticamente) antes de '
+                'mudar o status, ou use o service correspondente.'
+            )
+        if erros:
+            raise ValidationError(erros)
 
     @property
     def esta_atrasada(self):

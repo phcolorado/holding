@@ -149,3 +149,85 @@ class DownloadProtegidoTest(TestCase):
         self.client.login(username='media_publica_user', password='pass')
         response = self.client.get(f'/media/{self.doc.arquivo.name}')
         self.assertEqual(response.status_code, 404)
+
+
+@override_settings(MEDIA_ROOT=MEDIA_TEMP)
+class DocumentoAdminLinkProtegidoTest(TestCase):
+    """Item 7 (rodada pós-revisão): Admin nunca expõe arquivo.url — só a rota autenticada."""
+
+    def setUp(self):
+        self.imovel = Imovel.objects.create(nome='Imóvel Admin Doc', endereco='Rua D', cidade='SP', estado='SP')
+        self.doc = Documento.objects.create(
+            titulo='Matrícula Admin', tipo='matricula', arquivo=_arquivo('matricula_admin.pdf'),
+            imovel=self.imovel,
+        )
+        self.client = Client()
+        self.staff = User.objects.create_superuser('doc_admin_staff', 'a@a.com', 'pass')
+        self.client.login(username='doc_admin_staff', password='pass')
+
+    def test_admin_change_form_nao_contem_media(self):
+        response = self.client.get(reverse('admin:documentos_documento_change', args=[self.doc.pk]))
+        self.assertEqual(response.status_code, 200)
+        conteudo = response.content.decode()
+        self.assertNotIn('/media/', conteudo)
+
+    def test_admin_change_form_link_aponta_para_documento_download(self):
+        response = self.client.get(reverse('admin:documentos_documento_change', args=[self.doc.pk]))
+        conteudo = response.content.decode()
+        self.assertIn(reverse('documento_download', args=[self.doc.pk]), conteudo)
+
+    def test_usuario_sem_permissao_de_documento_recebe_403_no_admin(self):
+        self.client.logout()
+        user = User.objects.create_user('doc_admin_sem_perm', password='pass')
+        user.is_staff = True
+        user.save()
+        self.client.login(username='doc_admin_sem_perm', password='pass')
+        response = self.client.get(reverse('admin:documentos_documento_change', args=[self.doc.pk]))
+        self.assertEqual(response.status_code, 403)
+
+    def test_substituicao_de_arquivo_continua_funcionando(self):
+        novo_arquivo = _arquivo('substituto.pdf')
+        response = self.client.post(
+            reverse('admin:documentos_documento_change', args=[self.doc.pk]),
+            data={
+                'titulo': self.doc.titulo, 'tipo': self.doc.tipo, 'arquivo': novo_arquivo,
+                'imovel': self.imovel.pk, 'observacoes': '', 'enviado_contabilidade': '',
+                '_continue': 'Save and continue editing',
+            },
+        )
+        self.doc.refresh_from_db()
+        self.assertIn('substituto', self.doc.arquivo.name)
+
+    def test_editar_outros_campos_nao_apaga_arquivo_acidentalmente(self):
+        nome_original = self.doc.arquivo.name
+        response = self.client.post(
+            reverse('admin:documentos_documento_change', args=[self.doc.pk]),
+            data={
+                'titulo': 'Título Alterado', 'tipo': self.doc.tipo,
+                'imovel': self.imovel.pk, 'observacoes': 'nota nova', 'enviado_contabilidade': '',
+                '_continue': 'Save and continue editing',
+            },
+        )
+        self.doc.refresh_from_db()
+        self.assertEqual(self.doc.titulo, 'Título Alterado')
+        self.assertEqual(self.doc.arquivo.name, nome_original)
+        self.assertTrue(self.doc.arquivo)
+
+    def test_inline_de_contrato_nao_gera_link_publico(self):
+        from datetime import date
+        from patrimonio.models import Pessoa, Contrato
+        locatario = Pessoa.objects.create(nome='Locatário Admin Doc', tipo='locatario')
+        contrato = Contrato.objects.create(
+            imovel=self.imovel, locatario=locatario,
+            data_inicio=date(2024, 1, 1), data_fim=date(2024, 12, 31),
+            dia_vencimento=10, valor_aluguel=1000,
+        )
+        doc = Documento.objects.create(
+            titulo='Contrato Assinado', tipo='contrato_aluguel', arquivo=_arquivo('contrato_assinado.pdf'),
+            imovel=self.imovel, contrato=contrato,
+        )
+        response = self.client.get(reverse('admin:patrimonio_contrato_change', args=[contrato.pk]))
+        self.assertEqual(response.status_code, 200)
+        conteudo = response.content.decode()
+        self.assertNotIn('/media/', conteudo)
+        self.assertIn(reverse('documento_download', args=[doc.pk]), conteudo)

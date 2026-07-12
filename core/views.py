@@ -51,7 +51,11 @@ def dashboard(request):
 
     if ve_receitas:
         receitas_mes = ReceitaAluguel.objects.filter(competencia_mes=mes_atual, competencia_ano=ano_atual)
-        receitas_previstas = receitas_mes.aggregate(total=Sum('valor_previsto'))['total'] or 0
+        # Valor EXIGÍVEL do mês (item 8): exclui canceladas — a cobrança
+        # delas foi encerrada, não é mais "receita prevista" a cobrar.
+        receitas_previstas = receitas_mes.exclude(status='cancelado').aggregate(
+            total=Sum('valor_previsto')
+        )['total'] or 0
         # Agrega RecebimentoReceita diretamente (não valor_recebido filtrado
         # por status) — dinheiro recebido continua contando mesmo que a
         # receita tenha sido cancelada depois de receber algo.
@@ -61,7 +65,10 @@ def dashboard(request):
         # Regra centralizada: vencidas com saldo em aberto (independe do status)
         receitas_atrasadas = receitas_mes.inadimplentes().count()
         # Fluxo de caixa mistura despesas pagas — só inclui essa série quando
-        # o usuário também pode ver despesas.
+        # o usuário também pode ver despesas (item 9: quando não inclui,
+        # 'pago'/'saldo' vêm None na série — o template esconde as colunas
+        # e o dataset correspondentes, nunca mostra "0" como se não houvesse
+        # despesa nenhuma no mês).
         fluxo_caixa = serie_fluxo_caixa_12m(hoje, incluir_despesas=ve_despesas)
     else:
         receitas_previstas = receitas_recebidas = 0
@@ -149,6 +156,7 @@ def dashboard(request):
         'docs_vencendo': docs_vencendo,
         'docs_vencendo_cnt': docs_vencendo_cnt,
         'fluxo_caixa': fluxo_caixa,
+        'fluxo_inclui_despesas': ve_despesas,
         'mes_atual': mes_atual,
         'ano_atual': ano_atual,
     }

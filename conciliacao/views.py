@@ -1,6 +1,7 @@
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required, permission_required
 from django.core.exceptions import PermissionDenied
+from django.db.models import Count
 from django.http import FileResponse, Http404, HttpResponseRedirect
 from django.shortcuts import get_object_or_404, render
 from django.urls import reverse
@@ -13,6 +14,7 @@ from .services import (
     ConciliacaoInvalidaError, ExtratoJaImportadoError, OFXInvalidoError,
     importar_ofx, receitas_candidatas, sugerir_receitas, sugerir_classificacao,
     conciliar_com_receitas, desfazer_conciliacao, lancar_despesa,
+    excluir_extrato_sem_movimentacoes,
 )
 
 
@@ -24,7 +26,28 @@ def _exigir_permissao(request, perm):
 @login_required
 @permission_required('conciliacao.view_extratoimportado', raise_exception=True)
 def extrato_list(request):
-    """GET: lista extratos importados. POST: importa um novo arquivo OFX."""
+    """
+    GET: lista extratos importados.
+    POST action=excluir: exclui um extrato TOTALMENTE pendente (nenhuma
+    transação tratada) — única forma de exclusão oferecida pelo sistema
+    (o Admin bloqueia a exclusão para preservar a trilha de auditoria).
+    POST (sem action): importa um novo arquivo OFX.
+    """
+    if request.method == 'POST' and request.POST.get('action') == 'excluir':
+        _exigir_permissao(request, 'conciliacao.delete_extratoimportado')
+        extrato_id = pk_param(request.POST.get('extrato_id'))
+        extrato = get_object_or_404(ExtratoImportado, pk=extrato_id) if extrato_id else None
+        if extrato is None:
+            messages.error(request, 'Extrato inválido.')
+        else:
+            try:
+                excluir_extrato_sem_movimentacoes(extrato.pk, usuario=request.user)
+            except ConciliacaoInvalidaError as exc:
+                messages.error(request, str(exc))
+            else:
+                messages.success(request, 'Extrato excluído.')
+        return HttpResponseRedirect(reverse('extrato_list'))
+
     if request.method == 'POST':
         _exigir_permissao(request, 'conciliacao.add_extratoimportado')
         form = UploadExtratoForm(request.POST, request.FILES)
@@ -48,7 +71,10 @@ def extrato_list(request):
                     messages.error(request, erro)
         return HttpResponseRedirect(reverse('extrato_list'))
 
-    extratos = ExtratoImportado.objects.select_related('conta', 'importado_por')
+    extratos = (
+        ExtratoImportado.objects.select_related('conta', 'importado_por')
+        .annotate(total_transacoes=Count('transacoes'))
+    )
     context = {
         'extratos': extratos,
         'form': UploadExtratoForm(),

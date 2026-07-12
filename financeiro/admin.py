@@ -1,6 +1,10 @@
+from django import forms
 from django.contrib import admin, messages
+from django.core.exceptions import ValidationError
+from django.forms.models import BaseInlineFormSet
 from simple_history.admin import SimpleHistoryAdmin
 from .models import ReceitaAluguel, ReceitaAluguelItem, RecebimentoReceita, Despesa, FechamentoMensal
+from .services import atualizar_recebimentos_da_receita
 
 
 class ReceitaAluguelItemInline(admin.TabularInline):
@@ -9,11 +13,62 @@ class ReceitaAluguelItemInline(admin.TabularInline):
     fields = ('tipo', 'descricao', 'valor')
 
 
+class RecebimentoReceitaInlineForm(forms.ModelForm):
+    """
+    Pula a checagem de saldo POR LINHA do model (RecebimentoReceita.clean())
+    — o inline salva o formset inteiro como uma única operação financeira via
+    atualizar_recebimentos_da_receita() (ReceitaAluguelAdmin.save_formset),
+    que calcula o total FINAL de todas as inclusões/alterações/exclusões em
+    CONJUNTO. Validar cada linha isolada aqui, contra o saldo ATUAL (antes
+    das outras mudanças do mesmo envio), rejeitaria ou aceitaria combinações
+    incorretamente. A validação valor>0 continua ativa (não é pulada).
+    """
+    class Meta:
+        model = RecebimentoReceita
+        fields = '__all__'
+
+    def _post_clean(self):
+        self.instance._pular_validacao_saldo = True
+        super()._post_clean()
+
+
+class RecebimentoReceitaInlineFormSet(BaseInlineFormSet):
+    """
+    Desabilita, por linha, a edição e exclusão de recebimentos originados de
+    conciliação bancária (origem='conciliacao' ou transacao_extrato
+    preenchida) — para corrigi-los, desfaça a conciliação correspondente na
+    tela de Conciliação Bancária. disabled=True é reforço de SERVIDOR (dado
+    submetido para um campo disabled é ignorado em favor do initial).
+    """
+    def add_fields(self, form, index):
+        super().add_fields(form, index)
+        instance = getattr(form, 'instance', None)
+        if instance and instance.pk and (
+            instance.origem == 'conciliacao' or instance.transacao_extrato_id
+        ):
+            if 'DELETE' in form.fields:
+                form.fields['DELETE'].disabled = True
+            for campo in ('data_recebimento', 'valor', 'observacoes'):
+                if campo in form.fields:
+                    form.fields[campo].disabled = True
+
+
 class RecebimentoReceitaInline(admin.TabularInline):
     model = RecebimentoReceita
+    form = RecebimentoReceitaInlineForm
+    formset = RecebimentoReceitaInlineFormSet
     extra = 0
-    fields = ('data_recebimento', 'valor', 'origem', 'transacao_extrato', 'criado_por', 'observacoes')
-    readonly_fields = ('origem', 'transacao_extrato', 'criado_por')
+    fields = (
+        'data_recebimento', 'valor', 'origem', 'transacao_extrato',
+        'criado_por', 'observacoes', 'nota_edicao',
+    )
+    readonly_fields = ('origem', 'transacao_extrato', 'criado_por', 'nota_edicao')
+
+    @admin.display(description='Nota')
+    def nota_edicao(self, obj):
+        if obj and obj.pk and (obj.origem == 'conciliacao' or obj.transacao_extrato_id):
+            return 'Origem: conciliação bancária — desfaça a conciliação correspondente para corrigir.'
+        return ''
 
 
 @admin.register(ReceitaAluguel)
@@ -89,13 +144,41 @@ class ReceitaAluguelAdmin(SimpleHistoryAdmin):
 
     def save_formset(self, request, form, formset, change):
         if formset.model is RecebimentoReceita:
-            instances = formset.save(commit=False)
-            for obj in instances:
-                if obj.pk is None and obj.criado_por_id is None:
-                    obj.criado_por = request.user
-                obj.save()  # dispara garantir_recebimento_legado + recálculo
-            for obj in formset.deleted_objects:
-                obj.delete()  # delete() individual também reconsolida
+            # formset.save(commit=False) NÃO persiste nada — apenas popula
+            # new_objects/changed_objects/deleted_objects (mesma técnica já
+            # usada para ReajusteContrato/Documento neste admin). O formset
+            # inteiro é então salvo como UMA ÚNICA operação financeira
+            # atômica por atualizar_recebimentos_da_receita(), que valida o
+            # total final de todas as linhas em conjunto — nunca uma
+            # transação independente por linha.
+            formset.save(commit=False)
+            novos = [
+                {
+                    'data_recebimento': obj.data_recebimento,
+                    'valor': obj.valor,
+                    'observacoes': obj.observacoes,
+                }
+                for obj in formset.new_objects
+            ]
+            alterados = [
+                {
+                    'pk': obj.pk,
+                    'data_recebimento': obj.data_recebimento,
+                    'valor': obj.valor,
+                    'observacoes': obj.observacoes,
+                }
+                for obj, _campos in formset.changed_objects
+            ]
+            excluidos = [obj.pk for obj in formset.deleted_objects]
+            if novos or alterados or excluidos:
+                try:
+                    atualizar_recebimentos_da_receita(
+                        form.instance.pk, novos=novos, alterados=alterados,
+                        excluidos=excluidos, usuario=request.user,
+                    )
+                except ValidationError as exc:
+                    mensagens = exc.messages if hasattr(exc, 'messages') else [str(exc)]
+                    messages.error(request, '; '.join(mensagens))
             formset.save_m2m()
         else:
             formset.save()
@@ -120,6 +203,32 @@ class DespesaAdmin(SimpleHistoryAdmin):
     readonly_fields = ('criado_em', 'atualizado_em', 'origem_automatica')
     ordering = ('-data_vencimento',)
     raw_id_fields = ('contrato', 'receita')
+    actions = ['reabrir_despesas_action', 'cancelar_despesas_action']
+
+    @admin.action(description='Reabrir despesas selecionadas (limpa data de pagamento)')
+    def reabrir_despesas_action(self, request, queryset):
+        from .services import reabrir_despesa
+        total = 0
+        for despesa in queryset.exclude(status__in=('prevista', 'atrasada')):
+            reabrir_despesa(despesa.pk)
+            total += 1
+        if total:
+            self.message_user(request, f'{total} despesa(s) reaberta(s).', messages.SUCCESS)
+        else:
+            self.message_user(request, 'Nenhuma despesa selecionada precisava ser reaberta.', messages.WARNING)
+
+    @admin.action(description='Cancelar despesas selecionadas')
+    def cancelar_despesas_action(self, request, queryset):
+        from .services import cancelar_despesa
+        total = 0
+        for despesa in queryset.exclude(status='cancelada'):
+            cancelar_despesa(despesa.pk)
+            total += 1
+        if total:
+            self.message_user(request, f'{total} despesa(s) cancelada(s).', messages.SUCCESS)
+        else:
+            self.message_user(request, 'Nenhuma despesa selecionada precisava ser cancelada.', messages.WARNING)
+
     fieldsets = (
         ('Identificação', {
             'fields': ('descricao', 'categoria', 'imovel', 'fornecedor')

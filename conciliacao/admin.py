@@ -79,6 +79,15 @@ class ExtratoImportadoAdmin(SimpleHistoryAdmin):
         # Importação só pela tela de conciliação, que valida e parseia o OFX.
         return False
 
+    def has_delete_permission(self, request, obj=None):
+        # Exclusão em CASCADE apagaria TransacaoExtrato/ConciliacaoReceita/
+        # ConciliacaoComissao mesmo de transações já tratadas, quebrando a
+        # trilha de auditoria (RecebimentoReceita ficaria órfão, comissões
+        # pagas ficariam sem jeito de desfazer). A única exclusão segura é
+        # via excluir_extrato_sem_movimentacoes() (tela de Conciliação
+        # Bancária), que só permite extratos totalmente pendentes.
+        return False
+
     @admin.display(description='Arquivo')
     def arquivo_link(self, obj):
         # Não existe rota pública para /media/ — o link passa pela view

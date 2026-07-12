@@ -1,8 +1,10 @@
+from decimal import Decimal
+
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required, permission_required
 from django.core.exceptions import PermissionDenied
 from django.core.paginator import Paginator
-from django.db.models import Q
+from django.db.models import Q, Sum
 from django.http import HttpResponseRedirect
 from django.shortcuts import get_object_or_404, render
 from django.urls import reverse
@@ -64,11 +66,19 @@ def receitas_list(request):
     if status:
         receitas = receitas.filter(status=status)
 
+    # Valor EXIGÍVEL do período filtrado (item 8): exclui canceladas — a
+    # cobrança delas foi encerrada, não representam mais previsão de receita.
+    # Soma sobre o queryset completo (antes da paginação), não só a página.
+    total_previsto = receitas.exclude(status='cancelado').aggregate(
+        total=Sum('valor_previsto')
+    )['total'] or Decimal('0.00')
+
     pagina = _paginar(request, receitas)
 
     context = {
         'receitas': pagina,
         'pagina': pagina,
+        'total_previsto': total_previsto,
         'query_string': _query_string_sem_page(request),
         'imoveis': Imovel.objects.all(),
         'mes_atual': mes,
@@ -118,14 +128,28 @@ def despesas_list(request):
 
 
 @login_required
-@permission_required('financeiro.view_receitaaluguel', raise_exception=True)
 def paineis(request):
-    """Painéis gráficos: ocupação, receitas × despesas, inadimplência e categorias."""
+    """
+    Painéis gráficos: ocupação, receitas × despesas, inadimplência e
+    categorias. Cada painel só é consultado e exibido se o usuário tiver a
+    permissão de leitura da área correspondente:
+    - ocupação: patrimonio.view_imovel;
+    - inadimplência e a parcela de RECEITAS do painel "por imóvel": financeiro.view_receitaaluguel;
+    - despesas por categoria e a parcela de DESPESAS do painel "por imóvel": financeiro.view_despesa.
+    Acessar a tela exige pelo menos uma dessas permissões; sem nenhuma, 403.
+    """
     from datetime import date as date_cls
     from .paineis import (
         serie_ocupacao_mensal, serie_receita_despesa_por_imovel,
         serie_inadimplencia_mensal, serie_despesas_por_categoria,
     )
+
+    pode = request.user.has_perm
+    ve_imoveis = pode('patrimonio.view_imovel')
+    ve_receitas = pode('financeiro.view_receitaaluguel')
+    ve_despesas = pode('financeiro.view_despesa')
+    if not (ve_imoveis or ve_receitas or ve_despesas):
+        raise PermissionDenied
 
     mes, ano = mes_ano_da_request(request)
     janela = int_param(request.GET.get('janela'), 12)
@@ -134,10 +158,17 @@ def paineis(request):
     referencia = date_cls(ano, mes, 1)
 
     context = {
-        'ocupacao': serie_ocupacao_mensal(janela, referencia),
-        'por_imovel': serie_receita_despesa_por_imovel(janela, referencia),
-        'inadimplencia': serie_inadimplencia_mensal(janela, referencia),
-        'por_categoria': serie_despesas_por_categoria(janela, referencia),
+        'ocupacao': serie_ocupacao_mensal(janela, referencia) if ve_imoveis else None,
+        'por_imovel': (
+            serie_receita_despesa_por_imovel(
+                janela, referencia, incluir_receitas=ve_receitas, incluir_despesas=ve_despesas,
+            ) if (ve_receitas or ve_despesas) else None
+        ),
+        'inadimplencia': serie_inadimplencia_mensal(janela, referencia) if ve_receitas else None,
+        'por_categoria': serie_despesas_por_categoria(janela, referencia) if ve_despesas else None,
+        've_imoveis': ve_imoveis,
+        've_receitas': ve_receitas,
+        've_despesas': ve_despesas,
         'mes_atual': mes,
         'ano_atual': ano,
         'janela_atual': janela,
@@ -149,13 +180,37 @@ def paineis(request):
 
 
 @login_required
-@permission_required('financeiro.view_receitaaluguel', raise_exception=True)
 def relatorios(request):
+    """
+    Tela de relatórios/exportações: cada card só é exibido — e seus filtros
+    (imóveis/imobiliárias/categorias) só são consultados — quando o usuário
+    tem a permissão da área correspondente. O relatório mensal completo
+    exige receitas+despesas; o contábil completo exige também documentos
+    (mesmas permissões cobradas pelas views de exportação abaixo).
+    """
     hoje = timezone.localdate()
+    pode = request.user.has_perm
+    ve_imoveis = pode('patrimonio.view_imovel')
+    ve_contratos = pode('patrimonio.view_contrato')
+    ve_receitas = pode('financeiro.view_receitaaluguel')
+    ve_despesas = pode('financeiro.view_despesa')
+    ve_documentos = pode('documentos.view_documento')
+
+    if not any([ve_imoveis, ve_contratos, ve_receitas, ve_despesas]):
+        raise PermissionDenied
+
+    precisa_filtro_imovel = ve_contratos or ve_receitas or ve_despesas
 
     context = {
-        'imoveis': Imovel.objects.all(),
-        'imobiliarias': imobiliarias_queryset(),
+        'imoveis': Imovel.objects.all() if precisa_filtro_imovel else Imovel.objects.none(),
+        'imobiliarias': imobiliarias_queryset() if ve_contratos else imobiliarias_queryset().none(),
+        've_imoveis': ve_imoveis,
+        've_contratos': ve_contratos,
+        've_receitas': ve_receitas,
+        've_despesas': ve_despesas,
+        've_documentos': ve_documentos,
+        've_relatorio_mensal': ve_receitas and ve_despesas,
+        've_relatorio_contabil': ve_receitas and ve_despesas and ve_documentos,
         'mes_atual': hoje.month,
         'ano_atual': hoje.year,
         'meses': ReceitaAluguel.MESES,
@@ -249,15 +304,22 @@ def export_inadimplencia(request, formato):
 
 
 @login_required
-@permission_required('financeiro.view_receitaaluguel', raise_exception=True)
+@permission_required(
+    ('financeiro.view_receitaaluguel', 'financeiro.view_despesa'), raise_exception=True,
+)
 def export_relatorio_mensal(request, formato):
+    """Relatório mensal completo (receitas + despesas + resumo por imóvel): exige as duas permissões."""
     mes, ano, _, _, _ = _filtros_periodo(request)
     return exportar_relatorio_mensal_xlsx(request, mes, ano)
 
 
 @login_required
-@permission_required('financeiro.view_receitaaluguel', raise_exception=True)
+@permission_required(
+    ('financeiro.view_receitaaluguel', 'financeiro.view_despesa', 'documentos.view_documento'),
+    raise_exception=True,
+)
 def export_relatorio_contabilidade(request):
+    """Relatório contábil completo: exige receitas + despesas + documentos."""
     mes, ano = mes_ano_da_request(request)
     return exportar_relatorio_contabilidade_xlsx(request, mes, ano)
 
@@ -409,17 +471,41 @@ def baixa_receitas_mes_view(request):
 
 
 @login_required
-@permission_required('financeiro.view_receitaaluguel', raise_exception=True)
 def checklist_mensal_view(request):
     """
     GET: exibe checklist de fechamento mensal com indicadores de status.
     POST action=marcar_enviado: registra envio à contabilidade no FechamentoMensal.
+
+    Cada etapa só é montada — e a consulta correspondente só é feita — quando
+    o usuário tem a permissão de leitura da área envolvida:
+    receitas/recebimentos/inadimplência → financeiro.view_receitaaluguel;
+    despesas pagas → financeiro.view_despesa;
+    documentos p/ contabilidade e validade → documentos.view_documento;
+    documentos obrigatórios → documentos.view_documentoobrigatorio;
+    reajustes → patrimonio.view_contrato;
+    conciliação → conciliacao.view_extratoimportado;
+    fechamento → financeiro.view_fechamentomensal.
+    Acessar a tela exige pelo menos uma dessas permissões; sem nenhuma, 403.
     """
     from .models import receitas_inadimplentes_qs
-    from documentos.models import Documento, DocumentoObrigatorio, documentos_vencendo_qs
 
     hoje = timezone.localdate()
     mes, ano = mes_ano_da_request(request)
+
+    pode = request.user.has_perm
+    ve_receitas = pode('financeiro.view_receitaaluguel')
+    ve_despesas = pode('financeiro.view_despesa')
+    ve_documentos = pode('documentos.view_documento')
+    ve_doc_obrigatorios = pode('documentos.view_documentoobrigatorio')
+    ve_contratos = pode('patrimonio.view_contrato')
+    ve_conciliacao = pode('conciliacao.view_extratoimportado')
+    ve_fechamento = pode('financeiro.view_fechamentomensal')
+
+    if not any([
+        ve_receitas, ve_despesas, ve_documentos, ve_doc_obrigatorios,
+        ve_contratos, ve_conciliacao, ve_fechamento,
+    ]):
+        raise PermissionDenied
 
     if request.method == 'POST':
         action = request.POST.get('action', '')
@@ -434,54 +520,25 @@ def checklist_mensal_view(request):
             messages.success(request, f'Mês {mes:02d}/{ano} marcado como enviado à contabilidade.')
         return HttpResponseRedirect(f"{reverse('checklist_mensal')}?mes={mes}&ano={ano}")
 
-    receitas_mes = ReceitaAluguel.objects.filter(competencia_mes=mes, competencia_ano=ano)
-    total_receitas = receitas_mes.count()
-    # Regra centralizada de SALDO (não de status): pagamento parcial NÃO conta
-    # como confirmado — permanece pendente até o saldo em aberto zerar.
-    receitas_recebidas = receitas_mes.quitadas().exclude(status='cancelado').count()
-    receitas_pendentes = receitas_mes.em_aberto().count()
-    receitas_canceladas = receitas_mes.filter(status='cancelado').count()
+    checklist = []
 
-    despesas_mes = Despesa.objects.filter(competencia_mes=mes, competencia_ano=ano)
-    total_despesas = despesas_mes.count()
-    despesas_pagas = despesas_mes.filter(status='paga').count()
+    if ve_receitas:
+        receitas_mes = ReceitaAluguel.objects.filter(competencia_mes=mes, competencia_ano=ano)
+        total_receitas = receitas_mes.count()
+        # Regra centralizada de SALDO (não de status): pagamento parcial NÃO
+        # conta como confirmado — permanece pendente até o saldo zerar.
+        receitas_recebidas = receitas_mes.quitadas().exclude(status='cancelado').count()
+        receitas_pendentes = receitas_mes.em_aberto().count()
+        receitas_canceladas = receitas_mes.filter(status='cancelado').count()
+        inadimplentes = receitas_inadimplentes_qs().count()
 
-    inadimplentes = receitas_inadimplentes_qs().count()
-
-    docs_pendentes_cnt = Documento.objects.filter(
-        tipo__in=Documento.TIPOS_CONTABILIDADE, enviado_contabilidade=False
-    ).count()
-
-    docs_obrigatorios_pendentes = DocumentoObrigatorio.objects.filter(
-        obrigatorio=True, documento__isnull=True
-    ).count()
-
-    docs_validade_cnt = documentos_vencendo_qs().count()
-
-    from conciliacao.services import transacoes_pendentes_qs
-    extrato_pendentes = transacoes_pendentes_qs().filter(
-        data__year=ano, data__month=mes
-    ).count()
-
-    reajustes_pendentes = Contrato.objects.filter(
-        status='ativo', data_proximo_reajuste__isnull=False, data_proximo_reajuste__lte=hoje,
-    ).count()
-
-    try:
-        fechamento = FechamentoMensal.objects.get(mes=mes, ano=ano)
-    except FechamentoMensal.DoesNotExist:
-        fechamento = None
-
-    nome_mes = dict(ReceitaAluguel.MESES).get(mes, str(mes))
-
-    checklist = [
-        {
+        checklist.append({
             'item': 'Receitas geradas',
             'ok': total_receitas > 0,
             'detalhe': f'{total_receitas} receita(s) cadastrada(s)' if total_receitas else 'Nenhuma receita gerada ainda',
             'link': reverse('gerar_receitas_mes') + f'?mes={mes}&ano={ano}',
-        },
-        {
+        })
+        checklist.append({
             'item': 'Recebimentos confirmados',
             'ok': total_receitas > 0 and receitas_pendentes == 0,
             # Discrimina recebidas/canceladas/em aberto em vez de "0/1 recebida" —
@@ -492,14 +549,22 @@ def checklist_mensal_view(request):
                 f'{receitas_pendentes} em aberto'
             ) if total_receitas else '—',
             'link': reverse('baixa_receitas_mes') + f'?mes={mes}&ano={ano}',
-        },
-        {
+        })
+        checklist.append({
             'item': 'Inadimplência em dia',
             'ok': inadimplentes == 0,
             'detalhe': f'{inadimplentes} receita(s) inadimplente(s) em aberto' if inadimplentes else 'Sem inadimplência em aberto',
             'link': None,
-        },
-        {
+        })
+    else:
+        total_receitas = receitas_recebidas = receitas_pendentes = receitas_canceladas = None
+        inadimplentes = None
+
+    if ve_contratos:
+        reajustes_pendentes = Contrato.objects.filter(
+            status='ativo', data_proximo_reajuste__isnull=False, data_proximo_reajuste__lte=hoje,
+        ).count()
+        checklist.append({
             'item': 'Reajustes em dia',
             'ok': reajustes_pendentes == 0,
             'detalhe': (
@@ -507,30 +572,36 @@ def checklist_mensal_view(request):
                 if reajustes_pendentes else 'Nenhum reajuste pendente'
             ),
             'link': reverse('contrato_list') + '?reajuste_pendente=1',
-        },
-        {
+        })
+    else:
+        reajustes_pendentes = None
+
+    if ve_despesas:
+        despesas_mes = Despesa.objects.filter(competencia_mes=mes, competencia_ano=ano)
+        total_despesas = despesas_mes.count()
+        despesas_pagas = despesas_mes.filter(status='paga').count()
+        checklist.append({
             'item': 'Despesas pagas',
             'ok': total_despesas == 0 or despesas_pagas == total_despesas,
             'detalhe': f'{despesas_pagas}/{total_despesas} paga(s)' if total_despesas else 'Sem despesas no período',
             'link': reverse('despesas_list') + f'?mes={mes}&ano={ano}',
-        },
-        {
+        })
+    else:
+        total_despesas = despesas_pagas = None
+
+    if ve_documentos:
+        from documentos.models import Documento, documentos_vencendo_qs
+        docs_pendentes_cnt = Documento.objects.filter(
+            tipo__in=Documento.TIPOS_CONTABILIDADE, enviado_contabilidade=False
+        ).count()
+        docs_validade_cnt = documentos_vencendo_qs().count()
+        checklist.append({
             'item': 'Documentos enviados à contabilidade',
             'ok': docs_pendentes_cnt == 0,
             'detalhe': f'{docs_pendentes_cnt} documento(s) pendente(s)' if docs_pendentes_cnt else 'Todos enviados',
             'link': reverse('documento_list') + '?pendente=1',
-        },
-        {
-            'item': 'Documentos obrigatórios revisados',
-            'ok': docs_obrigatorios_pendentes == 0,
-            'detalhe': (
-                f'{docs_obrigatorios_pendentes} documento(s) obrigatório(s) pendente(s)'
-                if docs_obrigatorios_pendentes
-                else 'Todos os documentos obrigatórios vinculados'
-            ),
-            'link': reverse('admin:documentos_documentoobrigatorio_changelist'),
-        },
-        {
+        })
+        checklist.append({
             'item': 'Validade dos documentos em dia',
             'ok': docs_validade_cnt == 0,
             'detalhe': (
@@ -538,8 +609,39 @@ def checklist_mensal_view(request):
                 if docs_validade_cnt else 'Nenhum documento com validade vencendo'
             ),
             'link': reverse('documento_list') + '?vencendo=1',
-        },
-        {
+        })
+    else:
+        docs_pendentes_cnt = docs_validade_cnt = None
+
+    if ve_doc_obrigatorios:
+        from documentos.models import DocumentoObrigatorio
+        docs_obrigatorios_pendentes = DocumentoObrigatorio.objects.filter(
+            obrigatorio=True, documento__isnull=True
+        ).count()
+        # Link para o Admin: só faz sentido oferecer para quem pode acessá-lo.
+        link_obrigatorios = (
+            reverse('admin:documentos_documentoobrigatorio_changelist')
+            if request.user.is_staff else None
+        )
+        checklist.append({
+            'item': 'Documentos obrigatórios revisados',
+            'ok': docs_obrigatorios_pendentes == 0,
+            'detalhe': (
+                f'{docs_obrigatorios_pendentes} documento(s) obrigatório(s) pendente(s)'
+                if docs_obrigatorios_pendentes
+                else 'Todos os documentos obrigatórios vinculados'
+            ),
+            'link': link_obrigatorios,
+        })
+    else:
+        docs_obrigatorios_pendentes = None
+
+    if ve_conciliacao:
+        from conciliacao.services import transacoes_pendentes_qs
+        extrato_pendentes = transacoes_pendentes_qs().filter(
+            data__year=ano, data__month=mes
+        ).count()
+        checklist.append({
             'item': 'Extrato bancário conciliado',
             'ok': extrato_pendentes == 0,
             'detalhe': (
@@ -547,15 +649,27 @@ def checklist_mensal_view(request):
                 if extrato_pendentes else 'Nenhuma transação de extrato pendente no mês'
             ),
             'link': reverse('extrato_list'),
-        },
-        {
+        })
+    else:
+        extrato_pendentes = None
+
+    # Relatório contábil completo exige receitas + despesas + documentos
+    # (mesma exigência da view de exportação) — sem as três, não oferece o link.
+    if ve_receitas and ve_despesas and ve_documentos:
+        checklist.append({
             'item': 'Relatório contábil exportado',
             'ok': False,
             'informativa': True,
             'detalhe': 'Baixe o relatório contábil após revisar receitas, despesas e documentos',
             'link': reverse('export_relatorio_contabilidade') + f'?mes={mes}&ano={ano}',
-        },
-        {
+        })
+
+    if ve_fechamento:
+        try:
+            fechamento = FechamentoMensal.objects.get(mes=mes, ano=ano)
+        except FechamentoMensal.DoesNotExist:
+            fechamento = None
+        checklist.append({
             'item': 'Fechamento registrado e enviado',
             'ok': fechamento is not None and fechamento.enviado_contabilidade,
             'detalhe': (
@@ -564,8 +678,11 @@ def checklist_mensal_view(request):
                 else 'Pendente'
             ),
             'link': None,
-        },
-    ]
+        })
+    else:
+        fechamento = None
+
+    nome_mes = dict(ReceitaAluguel.MESES).get(mes, str(mes))
 
     context = {
         'mes_atual': mes,
@@ -575,6 +692,13 @@ def checklist_mensal_view(request):
         'anos': anos_para_filtro(),
         'checklist': checklist,
         'fechamento': fechamento,
+        've_receitas': ve_receitas,
+        've_despesas': ve_despesas,
+        've_documentos': ve_documentos,
+        've_doc_obrigatorios': ve_doc_obrigatorios,
+        've_contratos': ve_contratos,
+        've_conciliacao': ve_conciliacao,
+        've_fechamento': ve_fechamento,
         'total_receitas': total_receitas,
         'receitas_recebidas': receitas_recebidas,
         'receitas_pendentes': receitas_pendentes,

@@ -605,3 +605,52 @@ def lancar_despesa(transacao, categoria, descricao, fornecedor=None, imovel=None
 def transacoes_pendentes_qs():
     """Transações de extrato ainda não tratadas — usada em dashboard e checklist."""
     return TransacaoExtrato.objects.filter(status='pendente')
+
+
+def extrato_pode_ser_excluido(extrato):
+    """
+    Um extrato só pode ser excluído se NENHUMA transação dele foi tratada:
+    todas 'pendente', sem recebimento, despesa ou vínculo de conciliação.
+    Excluir um extrato tratado apagaria em CASCADE as TransacaoExtrato (e com
+    elas ConciliacaoReceita/ConciliacaoComissao), deixando RecebimentoReceita
+    órfãos (transacao_extrato=None) e comissões marcadas como pagas sem
+    nenhum jeito de desfazer a conciliação que as pagou.
+
+    Como conciliar_com_receitas()/lancar_despesa() só mudam o status da
+    transação para 'conciliada' DENTRO da mesma transação atômica em que
+    criam esses vínculos, `status='pendente'` já garante por construção que
+    nenhum vínculo financeiro existe — as checagens extras abaixo são
+    defesa em profundidade contra qualquer estado legado/inconsistente.
+    """
+    transacoes = extrato.transacoes.all()
+    if transacoes.exclude(status='pendente').exists():
+        return False
+    if RecebimentoReceita.objects.filter(transacao_extrato__extrato=extrato).exists():
+        return False
+    if transacoes.filter(despesa__isnull=False).exists():
+        return False
+    if ConciliacaoReceita.objects.filter(transacao__extrato=extrato).exists():
+        return False
+    if ConciliacaoComissao.objects.filter(transacao__extrato=extrato).exists():
+        return False
+    return True
+
+
+@transaction.atomic
+def excluir_extrato_sem_movimentacoes(extrato_id, usuario=None):
+    """
+    Exclui um ExtratoImportado — só quando NENHUMA de suas transações foi
+    tratada (ver extrato_pode_ser_excluido). Bloqueia o extrato e suas
+    transações com select_for_update() para evitar corrida com uma
+    conciliação simultânea entre a checagem e a exclusão.
+    """
+    extrato = ExtratoImportado.objects.select_for_update().get(pk=extrato_id)
+    list(extrato.transacoes.select_for_update())  # trava as transações também
+    if not extrato_pode_ser_excluido(extrato):
+        raise ConciliacaoInvalidaError(
+            'Este extrato possui transação(ões) conciliada(s), ignorada(s) ou com '
+            'vínculo financeiro (recebimento, despesa ou conciliação) — não pode ser '
+            'excluído. Desfaça as conciliações e reabra as transações ignoradas antes '
+            'de excluir, ou exclua apenas extratos totalmente pendentes.'
+        )
+    extrato.delete()

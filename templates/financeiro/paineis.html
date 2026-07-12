@@ -45,6 +45,7 @@
 
 <div class="row g-3">
     <!-- Ocupação -->
+    {% if ve_imoveis %}
     <div class="col-lg-6">
         <div class="card shadow-sm h-100">
             <div class="card-header bg-white fw-semibold border-bottom d-flex justify-content-between align-items-center">
@@ -70,8 +71,10 @@
             </div>
         </div>
     </div>
+    {% endif %}
 
     <!-- Inadimplência -->
+    {% if ve_receitas %}
     <div class="col-lg-6">
         <div class="card shadow-sm h-100">
             <div class="card-header bg-white fw-semibold border-bottom d-flex justify-content-between align-items-center">
@@ -98,25 +101,43 @@
             </div>
         </div>
     </div>
+    {% endif %}
 
-    <!-- Receitas × Despesas por imóvel -->
+    <!-- Receitas × Despesas por imóvel (degrada para só-receita ou só-despesa conforme permissão) -->
+    {% if ve_receitas or ve_despesas %}
     <div class="col-lg-6">
         <div class="card shadow-sm h-100">
             <div class="card-header bg-white fw-semibold border-bottom d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-houses me-2 text-primary"></i>Receitas × despesas por imóvel</span>
+                <span><i class="bi bi-houses me-2 text-primary"></i>
+                    {% if ve_receitas and ve_despesas %}Receitas × despesas por imóvel
+                    {% elif ve_receitas %}Receitas recebidas por imóvel
+                    {% else %}Despesas pagas por imóvel{% endif %}
+                </span>
                 <button class="btn btn-sm btn-outline-secondary py-0" type="button" data-bs-toggle="collapse" data-bs-target="#tab-imovel">Tabela</button>
             </div>
             <div class="card-body">
                 <div style="min-height: 260px; height: {% widthratio por_imovel|length 1 44 %}px;">
-                    <canvas id="grafico-por-imovel" role="img" aria-label="Gráfico de barras horizontais com receita recebida e despesa paga por imóvel"></canvas>
+                    <canvas id="grafico-por-imovel" role="img" aria-label="Gráfico de barras horizontais com receita recebida e/ou despesa paga por imóvel, conforme permissão"></canvas>
                 </div>
                 <div class="collapse mt-3" id="tab-imovel">
                     <div class="table-responsive">
                         <table class="table table-sm mb-0">
-                            <thead class="table-light"><tr><th>Imóvel</th><th class="text-end">Recebido (R$)</th><th class="text-end">Pago (R$)</th><th class="text-end">Resultado (R$)</th></tr></thead>
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Imóvel</th>
+                                    {% if ve_receitas %}<th class="text-end">Recebido (R$)</th>{% endif %}
+                                    {% if ve_despesas %}<th class="text-end">Pago (R$)</th>{% endif %}
+                                    {% if ve_receitas and ve_despesas %}<th class="text-end">Resultado (R$)</th>{% endif %}
+                                </tr>
+                            </thead>
                             <tbody>
                                 {% for p in por_imovel %}
-                                <tr><td>{{ p.imovel }}</td><td class="text-end">{{ p.recebido|floatformat:2|intcomma }}</td><td class="text-end">{{ p.pago|floatformat:2|intcomma }}</td><td class="text-end">{{ p.resultado|floatformat:2|intcomma }}</td></tr>
+                                <tr>
+                                    <td>{{ p.imovel }}</td>
+                                    {% if ve_receitas %}<td class="text-end">{{ p.recebido|floatformat:2|intcomma }}</td>{% endif %}
+                                    {% if ve_despesas %}<td class="text-end">{{ p.pago|floatformat:2|intcomma }}</td>{% endif %}
+                                    {% if ve_receitas and ve_despesas %}<td class="text-end">{{ p.resultado|floatformat:2|intcomma }}</td>{% endif %}
+                                </tr>
                                 {% endfor %}
                             </tbody>
                         </table>
@@ -125,8 +146,10 @@
             </div>
         </div>
     </div>
+    {% endif %}
 
     <!-- Despesas por categoria -->
+    {% if ve_despesas %}
     <div class="col-lg-6">
         <div class="card shadow-sm h-100">
             <div class="card-header bg-white fw-semibold border-bottom d-flex justify-content-between align-items-center">
@@ -153,12 +176,19 @@
             </div>
         </div>
     </div>
+    {% endif %}
 </div>
 
-{{ ocupacao|json_script:"dados-ocupacao" }}
-{{ inadimplencia|json_script:"dados-inadimplencia" }}
-{{ por_imovel|json_script:"dados-por-imovel" }}
-{{ por_categoria|json_script:"dados-categorias" }}
+{% if ve_imoveis %}{{ ocupacao|json_script:"dados-ocupacao" }}{% endif %}
+{% if ve_receitas %}{{ inadimplencia|json_script:"dados-inadimplencia" }}{% endif %}
+{% if ve_receitas or ve_despesas %}{{ por_imovel|json_script:"dados-por-imovel" }}{% endif %}
+{% if ve_despesas %}{{ por_categoria|json_script:"dados-categorias" }}{% endif %}
+<script>
+window.PAINEIS_PERMS = {
+    veReceitas: {{ ve_receitas|yesno:"true,false" }},
+    veDespesas: {{ ve_despesas|yesno:"true,false" }},
+};
+</script>
 {% endblock %}
 
 {% block extra_js %}
@@ -180,130 +210,143 @@
     const eixoCategoria = { grid: { display: false }, ticks: { color: INK } };
     const tooltipBRL = { callbacks: { label: (ctx) => `${ctx.dataset.label}: ${brl.format(ctx.parsed.x ?? ctx.parsed.y)}` } };
 
-    // 1. Ocupação (linha, %)
-    const oc = dados('dados-ocupacao');
-    new Chart(document.getElementById('grafico-ocupacao'), {
-        type: 'line',
-        data: {
-            labels: oc.map(p => p.label),
-            datasets: [{
-                label: 'Ocupação',
-                data: oc.map(p => p.percentual),
-                borderColor: AZUL,
-                backgroundColor: AZUL,
-                borderWidth: 2,
-                pointRadius: 3,
-                pointHoverRadius: 5,
-                tension: 0.2,
-            }],
-        },
-        options: {
-            responsive: true, maintainAspectRatio: false,
-            interaction: { mode: 'index', intersect: false },
-            plugins: {
-                legend: { display: false },
-                tooltip: { callbacks: { label: (ctx) => {
-                    const p = oc[ctx.dataIndex];
-                    return `Ocupação: ${p.percentual}% (${p.ocupados}/${p.total} unidades)`;
-                } } },
+    const perms = window.PAINEIS_PERMS || { veReceitas: false, veDespesas: false };
+
+    // 1. Ocupação (linha, %) — só existe se o usuário tem permissão patrimonial
+    if (document.getElementById('dados-ocupacao')) {
+        const oc = dados('dados-ocupacao');
+        new Chart(document.getElementById('grafico-ocupacao'), {
+            type: 'line',
+            data: {
+                labels: oc.map(p => p.label),
+                datasets: [{
+                    label: 'Ocupação',
+                    data: oc.map(p => p.percentual),
+                    borderColor: AZUL,
+                    backgroundColor: AZUL,
+                    borderWidth: 2,
+                    pointRadius: 3,
+                    pointHoverRadius: 5,
+                    tension: 0.2,
+                }],
             },
-            scales: {
-                x: eixoCategoria,
-                y: {
-                    beginAtZero: true, max: 100,
-                    grid: { color: GRADE }, border: { display: false },
-                    ticks: { color: INK, callback: (v) => v + '%' },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                interaction: { mode: 'index', intersect: false },
+                plugins: {
+                    legend: { display: false },
+                    tooltip: { callbacks: { label: (ctx) => {
+                        const p = oc[ctx.dataIndex];
+                        return `Ocupação: ${p.percentual}% (${p.ocupados}/${p.total} unidades)`;
+                    } } },
+                },
+                scales: {
+                    x: eixoCategoria,
+                    y: {
+                        beginAtZero: true, max: 100,
+                        grid: { color: GRADE }, border: { display: false },
+                        ticks: { color: INK, callback: (v) => v + '%' },
+                    },
                 },
             },
-        },
-    });
+        });
+    }
 
-    // 2. Inadimplência mensal (barras)
-    const inad = dados('dados-inadimplencia');
-    new Chart(document.getElementById('grafico-inadimplencia'), {
-        type: 'bar',
-        data: {
-            labels: inad.map(p => p.label),
-            datasets: [{
-                label: 'Em aberto',
-                data: inad.map(p => p.valor),
-                backgroundColor: LARANJA,
-                borderRadius: { topLeft: 4, topRight: 4 },
-                borderSkipped: 'bottom',
-                maxBarThickness: 22,
-            }],
-        },
-        options: {
-            responsive: true, maintainAspectRatio: false,
-            plugins: {
-                legend: { display: false },
-                tooltip: { callbacks: { label: (ctx) => {
-                    const p = inad[ctx.dataIndex];
-                    return `${brl.format(p.valor)} em ${p.quantidade} receita(s)`;
-                } } },
+    // 2. Inadimplência mensal (barras) — só existe com permissão de receitas
+    if (document.getElementById('dados-inadimplencia')) {
+        const inad = dados('dados-inadimplencia');
+        new Chart(document.getElementById('grafico-inadimplencia'), {
+            type: 'bar',
+            data: {
+                labels: inad.map(p => p.label),
+                datasets: [{
+                    label: 'Em aberto',
+                    data: inad.map(p => p.valor),
+                    backgroundColor: LARANJA,
+                    borderRadius: { topLeft: 4, topRight: 4 },
+                    borderSkipped: 'bottom',
+                    maxBarThickness: 22,
+                }],
             },
-            scales: { x: eixoCategoria, y: eixoValor },
-        },
-    });
-
-    // 3. Receitas × despesas por imóvel (barras horizontais)
-    const im = dados('dados-por-imovel');
-    new Chart(document.getElementById('grafico-por-imovel'), {
-        type: 'bar',
-        data: {
-            labels: im.map(p => p.imovel),
-            datasets: [
-                {
-                    label: 'Recebido', data: im.map(p => p.recebido),
-                    backgroundColor: AZUL, maxBarThickness: 18,
-                    borderRadius: { topRight: 4, bottomRight: 4 }, borderSkipped: 'left',
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: { callbacks: { label: (ctx) => {
+                        const p = inad[ctx.dataIndex];
+                        return `${brl.format(p.valor)} em ${p.quantidade} receita(s)`;
+                    } } },
                 },
-                {
-                    label: 'Pago', data: im.map(p => p.pago),
-                    backgroundColor: VERMELHO, maxBarThickness: 18,
-                    borderRadius: { topRight: 4, bottomRight: 4 }, borderSkipped: 'left',
-                },
-            ],
-        },
-        options: {
-            indexAxis: 'y',
-            responsive: true, maintainAspectRatio: false,
-            plugins: {
-                legend: { position: 'top', align: 'end', labels: { boxWidth: 12, boxHeight: 12, color: INK2 } },
-                tooltip: tooltipBRL,
+                scales: { x: eixoCategoria, y: eixoValor },
             },
-            scales: { x: eixoValor, y: eixoCategoria },
-        },
-    });
+        });
+    }
 
-    // 4. Despesas por categoria (barras horizontais)
-    const cat = dados('dados-categorias');
-    new Chart(document.getElementById('grafico-categorias'), {
-        type: 'bar',
-        data: {
-            labels: cat.map(p => p.categoria),
-            datasets: [{
-                label: 'Despesas',
-                data: cat.map(p => p.valor),
-                backgroundColor: VERMELHO,
-                maxBarThickness: 18,
-                borderRadius: { topRight: 4, bottomRight: 4 },
-                borderSkipped: 'left',
-            }],
-        },
-        options: {
-            indexAxis: 'y',
-            responsive: true, maintainAspectRatio: false,
-            plugins: {
-                legend: { display: false },
-                tooltip: { callbacks: { label: (ctx) => {
-                    const p = cat[ctx.dataIndex];
-                    return `${brl.format(p.valor)} em ${p.quantidade} lançamento(s)`;
-                } } },
+    // 3. Receitas × despesas por imóvel (barras horizontais) — datasets
+    // presentes conforme permissão (recebido e/ou pago; nunca ambos com 0
+    // fictício quando a área não é permitida — o dataset simplesmente não existe).
+    if (document.getElementById('dados-por-imovel')) {
+        const im = dados('dados-por-imovel');
+        const datasetsImovel = [];
+        if (perms.veReceitas) {
+            datasetsImovel.push({
+                label: 'Recebido', data: im.map(p => p.recebido),
+                backgroundColor: AZUL, maxBarThickness: 18,
+                borderRadius: { topRight: 4, bottomRight: 4 }, borderSkipped: 'left',
+            });
+        }
+        if (perms.veDespesas) {
+            datasetsImovel.push({
+                label: 'Pago', data: im.map(p => p.pago),
+                backgroundColor: VERMELHO, maxBarThickness: 18,
+                borderRadius: { topRight: 4, bottomRight: 4 }, borderSkipped: 'left',
+            });
+        }
+        new Chart(document.getElementById('grafico-por-imovel'), {
+            type: 'bar',
+            data: { labels: im.map(p => p.imovel), datasets: datasetsImovel },
+            options: {
+                indexAxis: 'y',
+                responsive: true, maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'top', align: 'end', labels: { boxWidth: 12, boxHeight: 12, color: INK2 } },
+                    tooltip: tooltipBRL,
+                },
+                scales: { x: eixoValor, y: eixoCategoria },
             },
-            scales: { x: eixoValor, y: eixoCategoria },
-        },
-    });
+        });
+    }
+
+    // 4. Despesas por categoria (barras horizontais) — só existe com permissão de despesas
+    if (document.getElementById('dados-categorias')) {
+        const cat = dados('dados-categorias');
+        new Chart(document.getElementById('grafico-categorias'), {
+            type: 'bar',
+            data: {
+                labels: cat.map(p => p.categoria),
+                datasets: [{
+                    label: 'Despesas',
+                    data: cat.map(p => p.valor),
+                    backgroundColor: VERMELHO,
+                    maxBarThickness: 18,
+                    borderRadius: { topRight: 4, bottomRight: 4 },
+                    borderSkipped: 'left',
+                }],
+            },
+            options: {
+                indexAxis: 'y',
+                responsive: true, maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: { callbacks: { label: (ctx) => {
+                        const p = cat[ctx.dataIndex];
+                        return `${brl.format(p.valor)} em ${p.quantidade} lançamento(s)`;
+                    } } },
+                },
+                scales: { x: eixoValor, y: eixoCategoria },
+            },
+        });
+    }
 })();
 </script>
 {% endblock %}

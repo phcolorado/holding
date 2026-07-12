@@ -86,7 +86,11 @@
                 <i class="bi bi-lightbulb me-1 text-warning"></i>
                 <strong>Dica:</strong> Para gerar receitas de toda a vigência de um contrato de uma vez,
                 use a <strong>action "Gerar receitas esperadas"</strong> na listagem de Contratos do Admin
+                {% if user.is_staff and perms.patrimonio.change_contrato %}
                 (<a href="{% url 'admin:patrimonio_contrato_changelist' %}">acessar Admin → Contratos</a>).
+                {% else %}
+                (disponível para usuários com permissão de edição de contratos).
+                {% endif %}
             </div>
         </div>
     </div>

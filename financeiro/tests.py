@@ -12,7 +12,9 @@ from django.urls import reverse
 from django.utils import timezone
 
 from patrimonio.models import Imovel, Pessoa, Contrato, EncargoContrato
-from financeiro.models import ReceitaAluguel, ReceitaAluguelItem, Despesa, receitas_inadimplentes_qs
+from financeiro.models import (
+    ReceitaAluguel, ReceitaAluguelItem, RecebimentoReceita, Despesa, receitas_inadimplentes_qs,
+)
 from financeiro.services import gerar_receitas_para_contrato, gerar_receitas_mes, contratos_para_geracao_mes
 
 
@@ -800,6 +802,83 @@ class RelatorioContabilidadeTest(TestCase):
         self.assertTrue(any(self.imovel.nome in str(v) for v in valores))
 
 
+class RelatoriosExportacoesPermissoesTest(TestCase):
+    """Item 4 (rodada pós-revisão): permissões por tipo de exportação."""
+
+    def setUp(self):
+        from django.contrib.auth.models import Permission
+        self.Permission = Permission
+        self.client = Client()
+        self.imovel, self.locatario = _criar_base()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, data_inicio=date(2024, 1, 1), data_fim=date(2024, 12, 31),
+        )
+        Despesa.objects.create(
+            imovel=self.imovel, categoria='iptu', descricao='IPTU', data_vencimento=date(2024, 3, 10),
+            data_pagamento=date(2024, 3, 10), valor=Decimal('200.00'), status='paga',
+        )
+
+    def _usuario(self, nome, *perms):
+        user = User.objects.create_user(nome, password='pass')
+        if perms:
+            user.user_permissions.add(*self.Permission.objects.filter(codename__in=perms))
+        self.client.login(username=nome, password='pass')
+        return user
+
+    def test_usuario_so_de_receitas_nao_exporta_despesas(self):
+        self._usuario('rel_so_rec_1', 'view_receitaaluguel')
+        response = self.client.get(reverse('export_despesas', args=['csv']), {'mes': 3, 'ano': 2024})
+        self.assertEqual(response.status_code, 403)
+
+    def test_usuario_so_de_receitas_nao_exporta_relatorio_mensal_completo(self):
+        self._usuario('rel_so_rec_2', 'view_receitaaluguel')
+        response = self.client.get(reverse('export_relatorio_mensal', args=['xlsx']), {'mes': 3, 'ano': 2024})
+        self.assertEqual(response.status_code, 403)
+
+    def test_usuario_sem_documentos_nao_exporta_relatorio_contabil_completo(self):
+        self._usuario('rel_sem_docs', 'view_receitaaluguel', 'view_despesa')
+        response = self.client.get(reverse('export_relatorio_contabilidade'), {'mes': 3, 'ano': 2024})
+        self.assertEqual(response.status_code, 403)
+
+    def test_usuario_com_todas_as_permissoes_exporta_todas_as_abas(self):
+        self._usuario(
+            'rel_completo', 'view_receitaaluguel', 'view_despesa', 'view_documento',
+        )
+        response = self.client.get(reverse('export_relatorio_mensal', args=['xlsx']), {'mes': 3, 'ano': 2024})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('spreadsheetml', response['Content-Type'])
+        response = self.client.get(reverse('export_relatorio_contabilidade'), {'mes': 3, 'ano': 2024})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('spreadsheetml', response['Content-Type'])
+
+    def test_fornecedor_nao_aparece_para_usuario_sem_view_despesa(self):
+        """Sem view_despesa, o relatório mensal completo (que tem a aba Despesas/Fornecedor) é inacessível."""
+        self._usuario('rel_sem_desp', 'view_receitaaluguel')
+        response = self.client.get(reverse('export_relatorio_mensal', args=['xlsx']), {'mes': 3, 'ano': 2024})
+        self.assertEqual(response.status_code, 403)
+
+    def test_documentos_nao_aparecem_para_usuario_sem_view_documento(self):
+        """Sem view_documento, o relatório contábil (aba Docs. Pendentes) é inacessível."""
+        self._usuario('rel_sem_doc_view', 'view_receitaaluguel', 'view_despesa')
+        response = self.client.get(reverse('export_relatorio_contabilidade'), {'mes': 3, 'ano': 2024})
+        self.assertEqual(response.status_code, 403)
+
+    def test_tela_relatorios_esconde_cards_sem_permissao(self):
+        self._usuario('rel_tela_so_rec', 'view_receitaaluguel')
+        response = self.client.get(reverse('relatorios'))
+        self.assertEqual(response.status_code, 200)
+        conteudo = response.content.decode()
+        self.assertIn('Receitas por Período', conteudo)
+        self.assertNotIn('Despesas por Período', conteudo)
+        self.assertNotIn('Relatório para Contabilidade', conteudo)
+        self.assertIn('exige acesso a receitas', conteudo)
+
+    def test_tela_relatorios_sem_nenhuma_permissao_403(self):
+        self._usuario('rel_tela_sem_perm')
+        response = self.client.get(reverse('relatorios'))
+        self.assertEqual(response.status_code, 403)
+
+
 # ─── Testes de DocumentoObrigatorio ──────────────────────────────────────────
 
 class DocumentoObrigatorioTest(TestCase):
@@ -1300,6 +1379,118 @@ class ChecklistMensalViewTest(TestCase):
         self.assertIsNotNone(etapa)
         self.assertTrue(etapa.get('informativa', False))
         self.assertIn(reverse('export_relatorio_contabilidade'), etapa['link'])
+
+
+class ChecklistPermissoesTest(TestCase):
+    """Item 5 (rodada pós-revisão): cada etapa do checklist respeita sua permissão."""
+
+    def setUp(self):
+        from django.contrib.auth.models import Permission
+        self.Permission = Permission
+        self.client = Client()
+        hoje = timezone.localdate()
+        self.mes, self.ano = hoje.month, hoje.year
+        self.imovel, self.locatario = _criar_base()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
+        )
+
+    def _usuario(self, nome, *perms):
+        user = User.objects.create_user(nome, password='pass')
+        if perms:
+            user.user_permissions.add(*self.Permission.objects.filter(codename__in=perms))
+        self.client.login(username=nome, password='pass')
+        return user
+
+    def _get(self):
+        return self.client.get(reverse('checklist_mensal'), {'mes': self.mes, 'ano': self.ano})
+
+    def test_sem_nenhuma_permissao_403(self):
+        self._usuario('chk_sem_perm')
+        self.assertEqual(self._get().status_code, 403)
+
+    def test_apenas_receitas_mostra_so_etapas_de_receita(self):
+        self._usuario('chk_so_receitas', 'view_receitaaluguel')
+        resposta = self._get()
+        self.assertEqual(resposta.status_code, 200)
+        itens = [e['item'] for e in resposta.context['checklist']]
+        self.assertIn('Receitas geradas', itens)
+        self.assertIn('Recebimentos confirmados', itens)
+        self.assertIn('Inadimplência em dia', itens)
+        self.assertNotIn('Despesas pagas', itens)
+        self.assertNotIn('Documentos enviados à contabilidade', itens)
+        self.assertNotIn('Documentos obrigatórios revisados', itens)
+        self.assertNotIn('Reajustes em dia', itens)
+        self.assertNotIn('Extrato bancário conciliado', itens)
+        # relatório contábil completo exige despesas+documentos também — não aparece
+        self.assertNotIn('Relatório contábil exportado', itens)
+        self.assertNotIn('Fechamento registrado e enviado', itens)
+        conteudo = resposta.content.decode()
+        self.assertNotIn('Despesas</div>', conteudo)
+        # não deve haver link para a tela de despesas (403 se clicado)
+        self.assertNotIn(reverse('despesas_list'), conteudo)
+
+    def test_apenas_despesas_mostra_so_etapa_de_despesa(self):
+        self._usuario('chk_so_despesas', 'view_despesa')
+        resposta = self._get()
+        self.assertEqual(resposta.status_code, 200)
+        itens = [e['item'] for e in resposta.context['checklist']]
+        self.assertEqual(itens, ['Despesas pagas'])
+        self.assertIsNone(resposta.context['total_receitas'])
+        self.assertIsNone(resposta.context['inadimplentes'])
+
+    def test_apenas_documentos_mostra_etapas_de_documento(self):
+        self._usuario('chk_so_docs', 'view_documento')
+        resposta = self._get()
+        self.assertEqual(resposta.status_code, 200)
+        itens = [e['item'] for e in resposta.context['checklist']]
+        self.assertIn('Documentos enviados à contabilidade', itens)
+        self.assertIn('Validade dos documentos em dia', itens)
+        self.assertNotIn('Documentos obrigatórios revisados', itens)
+        self.assertNotIn('Receitas geradas', itens)
+
+    def test_apenas_doc_obrigatorios_mostra_essa_etapa_com_link_so_para_staff(self):
+        user = self._usuario('chk_so_doc_obrig', 'view_documentoobrigatorio')
+        resposta = self._get()
+        itens = [e['item'] for e in resposta.context['checklist']]
+        self.assertEqual(itens, ['Documentos obrigatórios revisados'])
+        etapa = resposta.context['checklist'][0]
+        self.assertIsNone(etapa['link'])  # usuário não é staff — sem link para o Admin
+        user.is_staff = True
+        user.save()
+        resposta2 = self._get()
+        etapa2 = resposta2.context['checklist'][0]
+        self.assertIsNotNone(etapa2['link'])
+
+    def test_apenas_contratos_mostra_etapa_de_reajustes(self):
+        self._usuario('chk_so_contratos', 'view_contrato')
+        resposta = self._get()
+        itens = [e['item'] for e in resposta.context['checklist']]
+        self.assertEqual(itens, ['Reajustes em dia'])
+
+    def test_apenas_conciliacao_mostra_etapa_de_extrato(self):
+        self._usuario('chk_so_conciliacao', 'view_extratoimportado')
+        resposta = self._get()
+        itens = [e['item'] for e in resposta.context['checklist']]
+        self.assertEqual(itens, ['Extrato bancário conciliado'])
+
+    def test_acesso_total_mostra_relatorio_contabil_e_fechamento(self):
+        self._usuario(
+            'chk_total', 'view_receitaaluguel', 'view_despesa', 'view_documento',
+            'view_documentoobrigatorio', 'view_contrato', 'view_extratoimportado', 'view_fechamentomensal',
+        )
+        resposta = self._get()
+        itens = [e['item'] for e in resposta.context['checklist']]
+        self.assertIn('Relatório contábil exportado', itens)
+        self.assertIn('Fechamento registrado e enviado', itens)
+
+    def test_post_marcar_enviado_continua_protegido_por_change_fechamentomensal(self):
+        self._usuario('chk_post_sem_change', 'view_fechamentomensal')
+        response = self.client.post(
+            reverse('checklist_mensal'),
+            {'mes': self.mes, 'ano': self.ano, 'action': 'marcar_enviado'},
+        )
+        self.assertEqual(response.status_code, 403)
 
 
 # ─── Testes de baixa de aluguéis filtrada por imóvel ─────────────────────────
@@ -2098,7 +2289,10 @@ class FluxoCaixa12mTest(TestCase):
             data_vencimento=hoje, data_pagamento=hoje, valor=Decimal('300.00'), status='paga',
         )
         serie = serie_fluxo_caixa_12m(hoje, incluir_despesas=False)
-        self.assertEqual(sum(p['pago'] for p in serie), 0.0)
+        # Item 9: sem despesas incluídas, 'pago'/'saldo' são None (não 0.0) —
+        # None sinaliza "não consultado", nunca "despesa zero".
+        self.assertTrue(all(p['pago'] is None for p in serie))
+        self.assertTrue(all(p['saldo'] is None for p in serie))
 
 
 # ─── Painéis gráficos ─────────────────────────────────────────────────────────
@@ -2160,7 +2354,7 @@ class PaineisSeriesTest(TestCase):
         Despesa.objects.create(
             imovel=self.imovel, descricao='Condomínio',
             competencia_mes=self.hoje.month, competencia_ano=self.hoje.year,
-            data_vencimento=self.hoje, valor=Decimal('300.00'), status='paga',
+            data_vencimento=self.hoje, data_pagamento=self.hoje, valor=Decimal('300.00'), status='paga',
         )
         serie = serie_receita_despesa_por_imovel(12, self.hoje)
         self.assertEqual(len(serie), 1)
@@ -2194,7 +2388,7 @@ class PaineisSeriesTest(TestCase):
         Despesa.objects.create(
             imovel=self.imovel, descricao='IPTU', categoria='iptu',
             competencia_mes=self.hoje.month, competencia_ano=self.hoje.year,
-            data_vencimento=self.hoje, valor=Decimal('800.00'), status='paga',
+            data_vencimento=self.hoje, data_pagamento=self.hoje, valor=Decimal('800.00'), status='paga',
         )
         Despesa.objects.create(
             imovel=self.imovel, descricao='Cancelada', categoria='manutencao',
@@ -2238,6 +2432,97 @@ class PaineisViewTest(TestCase):
         response = self.client.get(reverse('paineis'), {'janela': '24'})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.context['ocupacao']), 24)
+
+
+class PaineisPermissoesTest(TestCase):
+    """Item 3 (rodada pós-revisão): painéis escondem despesas/resultado sem permissão."""
+
+    def setUp(self):
+        from django.contrib.auth.models import Permission
+        self.Permission = Permission
+        self.client = Client()
+        imovel, locatario = _criar_base()
+        contrato = _criar_contrato(imovel, locatario, date(2024, 1, 1), date(2024, 12, 31))
+        Despesa.objects.create(
+            imovel=imovel, categoria='iptu', descricao='IPTU', data_vencimento=date(2024, 3, 10),
+            data_pagamento=date(2024, 3, 10), valor=Decimal('200.00'), status='paga',
+        )
+
+    def _usuario(self, nome, *perms):
+        user = User.objects.create_user(nome, password='pass')
+        if perms:
+            user.user_permissions.add(*self.Permission.objects.filter(codename__in=perms))
+        self.client.login(username=nome, password='pass')
+        return user
+
+    def _get(self):
+        return self.client.get(reverse('paineis'))
+
+    def test_sem_nenhuma_permissao_403(self):
+        self._usuario('painel_sem_perm')
+        self.assertEqual(self._get().status_code, 403)
+
+    def test_apenas_receitas_esconde_despesas_e_resultado(self):
+        self._usuario('painel_so_receitas', 'view_receitaaluguel')
+        resposta = self._get()
+        self.assertEqual(resposta.status_code, 200)
+        conteudo = resposta.content.decode()
+        self.assertIsNone(resposta.context['por_categoria'])
+        self.assertIsNone(resposta.context['ocupacao'])
+        self.assertIsNotNone(resposta.context['inadimplencia'])
+        self.assertIsNotNone(resposta.context['por_imovel'])
+        for linha in resposta.context['por_imovel']:
+            self.assertIsNone(linha['pago'])
+            self.assertIsNone(linha['resultado'])
+        self.assertNotIn('id="grafico-categorias"', conteudo)
+        self.assertNotIn('id="grafico-ocupacao"', conteudo)
+        self.assertIn('id="grafico-por-imovel"', conteudo)
+        self.assertIn('Receitas recebidas por imóvel', conteudo)
+        self.assertNotIn('Pago (R$)', conteudo)
+
+    def test_apenas_despesas_esconde_receitas_e_inadimplencia(self):
+        self._usuario('painel_so_despesas', 'view_despesa')
+        resposta = self._get()
+        self.assertEqual(resposta.status_code, 200)
+        conteudo = resposta.content.decode()
+        self.assertIsNone(resposta.context['inadimplencia'])
+        self.assertIsNotNone(resposta.context['por_categoria'])
+        self.assertIsNotNone(resposta.context['por_imovel'])
+        for linha in resposta.context['por_imovel']:
+            self.assertIsNone(linha['recebido'])
+            self.assertIsNone(linha['resultado'])
+        self.assertNotIn('id="grafico-inadimplencia"', conteudo)
+        self.assertIn('id="grafico-categorias"', conteudo)
+        self.assertIn('Despesas pagas por imóvel', conteudo)
+        self.assertNotIn('Recebido (R$)', conteudo)
+
+    def test_apenas_patrimonio_mostra_so_ocupacao(self):
+        self._usuario('painel_so_patrimonio', 'view_imovel')
+        resposta = self._get()
+        self.assertEqual(resposta.status_code, 200)
+        conteudo = resposta.content.decode()
+        self.assertIsNotNone(resposta.context['ocupacao'])
+        self.assertIsNone(resposta.context['inadimplencia'])
+        self.assertIsNone(resposta.context['por_categoria'])
+        self.assertIsNone(resposta.context['por_imovel'])
+        self.assertIn('id="grafico-ocupacao"', conteudo)
+        self.assertNotIn('id="grafico-por-imovel"', conteudo)
+        self.assertNotIn('id="grafico-categorias"', conteudo)
+        self.assertNotIn('id="grafico-inadimplencia"', conteudo)
+
+    def test_receitas_e_despesas_mostra_tudo_com_resultado(self):
+        self._usuario('painel_completo', 'view_receitaaluguel', 'view_despesa')
+        resposta = self._get()
+        self.assertEqual(resposta.status_code, 200)
+        conteudo = resposta.content.decode()
+        self.assertIsNotNone(resposta.context['por_categoria'])
+        self.assertIsNotNone(resposta.context['inadimplencia'])
+        for linha in resposta.context['por_imovel']:
+            self.assertIsNotNone(linha['recebido'])
+            self.assertIsNotNone(linha['pago'])
+            self.assertIsNotNone(linha['resultado'])
+        self.assertIn('Receitas × despesas por imóvel', conteudo)
+        self.assertIn('Resultado (R$)', conteudo)
 
 
 # ─── Pagamentos parciais e RecebimentoReceita (rodada de correções) ───────────
@@ -2629,6 +2914,291 @@ class RegistrarRecebimentoServiceTest(TestCase):
         self.assertEqual(recebimento.observacoes, 'teste')
 
 
+class AtualizarRecebimentosDaReceitaTest(TestCase):
+    """
+    Item 1 (rodada pós-revisão): atualizar_recebimentos_da_receita() trata o
+    formset inteiro do inline do Admin como uma única operação financeira.
+    """
+    def setUp(self):
+        self.imovel, self.locatario = _criar_base()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
+        )
+        self.receita = ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=2, competencia_ano=2030,
+            data_vencimento=date(2030, 2, 10), valor_previsto=Decimal('1000.00'), status='previsto',
+        )
+
+    def test_duas_novas_linhas_que_somadas_excedem_saldo_sao_rejeitadas(self):
+        from financeiro.services import atualizar_recebimentos_da_receita
+        novos = [
+            {'data_recebimento': date(2030, 2, 12), 'valor': Decimal('600.00'), 'observacoes': ''},
+            {'data_recebimento': date(2030, 2, 13), 'valor': Decimal('600.00'), 'observacoes': ''},
+        ]
+        with self.assertRaises(ValidationError):
+            atualizar_recebimentos_da_receita(self.receita.pk, novos=novos)
+        self.assertEqual(self.receita.recebimentos.count(), 0)
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.status, 'previsto')
+
+    def test_uma_linha_de_600_e_outra_de_400_sao_aceitas(self):
+        from financeiro.services import atualizar_recebimentos_da_receita
+        novos = [
+            {'data_recebimento': date(2030, 2, 12), 'valor': Decimal('600.00'), 'observacoes': ''},
+            {'data_recebimento': date(2030, 2, 13), 'valor': Decimal('400.00'), 'observacoes': 'quitação'},
+        ]
+        atualizar_recebimentos_da_receita(self.receita.pk, novos=novos)
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.recebimentos.count(), 2)
+        self.assertEqual(self.receita.valor_recebido, Decimal('1000.00'))
+        self.assertEqual(self.receita.status, 'recebido')
+
+    def test_editar_dois_recebimentos_simultaneamente_respeita_total_final(self):
+        from financeiro.services import atualizar_recebimentos_da_receita
+        r1 = RecebimentoReceita.objects.create(
+            receita=self.receita, data_recebimento=date(2030, 2, 5), valor=Decimal('500.00'), origem='manual',
+        )
+        r2 = RecebimentoReceita.objects.create(
+            receita=self.receita, data_recebimento=date(2030, 2, 6), valor=Decimal('500.00'), origem='manual',
+        )
+        # 300 + 700 = 1000: válido em conjunto, mas r2 isolado (700) excederia
+        # o saldo se validado individualmente contra o saldo atual (0 em aberto).
+        alterados = [
+            {'pk': r1.pk, 'data_recebimento': r1.data_recebimento, 'valor': Decimal('300.00'), 'observacoes': ''},
+            {'pk': r2.pk, 'data_recebimento': r2.data_recebimento, 'valor': Decimal('700.00'), 'observacoes': ''},
+        ]
+        atualizar_recebimentos_da_receita(self.receita.pk, alterados=alterados)
+        r1.refresh_from_db(); r2.refresh_from_db()
+        self.assertEqual(r1.valor, Decimal('300.00'))
+        self.assertEqual(r2.valor, Decimal('700.00'))
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.valor_recebido, Decimal('1000.00'))
+        self.assertEqual(self.receita.status, 'recebido')
+
+    def test_excluir_um_recebimento_e_aumentar_outro_usa_saldo_final_correto(self):
+        from financeiro.services import atualizar_recebimentos_da_receita
+        r1 = RecebimentoReceita.objects.create(
+            receita=self.receita, data_recebimento=date(2030, 2, 5), valor=Decimal('300.00'), origem='manual',
+        )
+        r2 = RecebimentoReceita.objects.create(
+            receita=self.receita, data_recebimento=date(2030, 2, 6), valor=Decimal('300.00'), origem='manual',
+        )
+        # Exclui r1 (300) e aumenta r2 para 1000 — total final = 1000, válido.
+        atualizar_recebimentos_da_receita(
+            self.receita.pk,
+            alterados=[{'pk': r2.pk, 'data_recebimento': r2.data_recebimento, 'valor': Decimal('1000.00'), 'observacoes': ''}],
+            excluidos=[r1.pk],
+        )
+        self.assertFalse(RecebimentoReceita.objects.filter(pk=r1.pk).exists())
+        r2.refresh_from_db()
+        self.assertEqual(r2.valor, Decimal('1000.00'))
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.valor_recebido, Decimal('1000.00'))
+        self.assertEqual(self.receita.status, 'recebido')
+
+    def test_erro_em_uma_linha_causa_rollback_de_todas(self):
+        from financeiro.services import atualizar_recebimentos_da_receita
+        r1 = RecebimentoReceita.objects.create(
+            receita=self.receita, data_recebimento=date(2030, 2, 5), valor=Decimal('200.00'), origem='manual',
+        )
+        novos = [{'data_recebimento': date(2030, 2, 12), 'valor': Decimal('300.00'), 'observacoes': ''}]
+        alterados = [{'pk': r1.pk, 'data_recebimento': r1.data_recebimento, 'valor': Decimal('-50.00'), 'observacoes': ''}]
+        with self.assertRaises(ValidationError):
+            atualizar_recebimentos_da_receita(self.receita.pk, novos=novos, alterados=alterados)
+        # nada foi persistido: nem a linha nova, nem a alteração da existente
+        self.assertEqual(self.receita.recebimentos.count(), 1)
+        r1.refresh_from_db()
+        self.assertEqual(r1.valor, Decimal('200.00'))
+
+    def test_receita_cancelada_rejeita_inclusao(self):
+        from financeiro.services import atualizar_recebimentos_da_receita
+        self.receita.cancelar()
+        novos = [{'data_recebimento': date(2030, 2, 12), 'valor': Decimal('100.00'), 'observacoes': ''}]
+        with self.assertRaises(ValidationError):
+            atualizar_recebimentos_da_receita(self.receita.pk, novos=novos)
+        self.assertEqual(self.receita.recebimentos.count(), 0)
+
+    def test_recebimento_de_conciliacao_nao_pode_ser_editado(self):
+        from financeiro.services import atualizar_recebimentos_da_receita
+        r1 = RecebimentoReceita.objects.create(
+            receita=self.receita, data_recebimento=date(2030, 2, 5), valor=Decimal('500.00'), origem='conciliacao',
+        )
+        alterados = [{'pk': r1.pk, 'data_recebimento': r1.data_recebimento, 'valor': Decimal('600.00'), 'observacoes': ''}]
+        with self.assertRaises(ValidationError) as ctx:
+            atualizar_recebimentos_da_receita(self.receita.pk, alterados=alterados)
+        self.assertIn('conciliação', str(ctx.exception))
+        r1.refresh_from_db()
+        self.assertEqual(r1.valor, Decimal('500.00'))
+
+    def test_recebimento_de_conciliacao_nao_pode_ser_excluido(self):
+        from financeiro.services import atualizar_recebimentos_da_receita
+        r1 = RecebimentoReceita.objects.create(
+            receita=self.receita, data_recebimento=date(2030, 2, 5), valor=Decimal('500.00'), origem='conciliacao',
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            atualizar_recebimentos_da_receita(self.receita.pk, excluidos=[r1.pk])
+        self.assertIn('conciliação', str(ctx.exception))
+        self.assertTrue(RecebimentoReceita.objects.filter(pk=r1.pk).exists())
+
+    def test_recebimentos_manuais_continuam_editaveis(self):
+        from financeiro.services import atualizar_recebimentos_da_receita
+        r1 = RecebimentoReceita.objects.create(
+            receita=self.receita, data_recebimento=date(2030, 2, 5), valor=Decimal('500.00'), origem='manual',
+        )
+        alterados = [{'pk': r1.pk, 'data_recebimento': date(2030, 2, 6), 'valor': Decimal('450.00'), 'observacoes': 'ajuste'}]
+        atualizar_recebimentos_da_receita(self.receita.pk, alterados=alterados)
+        r1.refresh_from_db()
+        self.assertEqual(r1.valor, Decimal('450.00'))
+        self.assertEqual(r1.data_recebimento, date(2030, 2, 6))
+        self.assertEqual(r1.observacoes, 'ajuste')
+
+    def test_consolidado_final_corresponde_exatamente_a_soma_das_linhas(self):
+        from financeiro.services import atualizar_recebimentos_da_receita
+        r1 = RecebimentoReceita.objects.create(
+            receita=self.receita, data_recebimento=date(2030, 2, 5), valor=Decimal('300.00'), origem='manual',
+        )
+        novos = [{'data_recebimento': date(2030, 2, 12), 'valor': Decimal('250.00'), 'observacoes': ''}]
+        alterados = [{'pk': r1.pk, 'data_recebimento': r1.data_recebimento, 'valor': Decimal('350.00'), 'observacoes': ''}]
+        atualizar_recebimentos_da_receita(self.receita.pk, novos=novos, alterados=alterados)
+        self.receita.refresh_from_db()
+        soma_persistida = sum((r.valor for r in self.receita.recebimentos.all()), Decimal('0.00'))
+        self.assertEqual(soma_persistida, Decimal('600.00'))
+        self.assertEqual(self.receita.valor_recebido, soma_persistida)
+
+
+class RecebimentoInlineAdminFormsetTest(TestCase):
+    """
+    Item 1: exercita o formset REAL do inline (não uma versão simplificada),
+    para provar que os campos disabled=True de fato bloqueiam alteração e
+    exclusão de recebimentos de conciliação no nível do Django forms, e que
+    ReceitaAluguelAdmin.save_formset delega ao service corretamente.
+    """
+    def setUp(self):
+        from django.contrib.auth.models import User
+        self.superuser = User.objects.create_superuser('admin_receb', 'a@a.com', 'pass')
+        self.imovel, self.locatario = _criar_base()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
+        )
+        self.receita = ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=2, competencia_ano=2030,
+            data_vencimento=date(2030, 2, 10), valor_previsto=Decimal('1000.00'), status='previsto',
+        )
+
+    def _request(self):
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+        request = RequestFactory().post('/admin/financeiro/receitaaluguel/%d/change/' % self.receita.pk)
+        request.user = self.superuser
+        request.session = {}
+        request._messages = FallbackStorage(request)
+        return request
+
+    def _formset_class(self, request):
+        from django.contrib import admin as django_admin
+        from financeiro.admin import RecebimentoReceitaInline
+        inline = RecebimentoReceitaInline(ReceitaAluguel, django_admin.site)
+        return inline.get_formset(request, obj=self.receita)
+
+    def _post_data(self, prefix, linhas):
+        inicial = sum(1 for linha in linhas if linha.get('id'))
+        dados = {
+            f'{prefix}-TOTAL_FORMS': str(len(linhas)),
+            f'{prefix}-INITIAL_FORMS': str(inicial),
+            f'{prefix}-MIN_NUM_FORMS': '0',
+            f'{prefix}-MAX_NUM_FORMS': '1000',
+        }
+        for i, linha in enumerate(linhas):
+            dados[f'{prefix}-{i}-id'] = str(linha.get('id', ''))
+            dados[f'{prefix}-{i}-data_recebimento'] = linha.get('data_recebimento', '')
+            dados[f'{prefix}-{i}-valor'] = linha.get('valor', '')
+            dados[f'{prefix}-{i}-observacoes'] = linha.get('observacoes', '')
+            if linha.get('DELETE'):
+                dados[f'{prefix}-{i}-DELETE'] = 'on'
+        return dados
+
+    def test_recebimento_de_conciliacao_ignora_alteracao_no_nivel_do_formset(self):
+        r1 = RecebimentoReceita.objects.create(
+            receita=self.receita, data_recebimento=date(2030, 2, 5), valor=Decimal('500.00'), origem='conciliacao',
+        )
+        request = self._request()
+        FormSetClass = self._formset_class(request)
+        prefix = FormSetClass.get_default_prefix()
+        dados = self._post_data(prefix, [
+            {'id': r1.pk, 'data_recebimento': '2030-02-09', 'valor': '999.00', 'observacoes': 'tentativa'},
+        ])
+        formset = FormSetClass(data=dados, instance=self.receita, prefix=prefix)
+        self.assertTrue(formset.is_valid(), formset.errors)
+        formset.save(commit=False)
+        # campo disabled: o valor submetido é ignorado — nenhuma mudança detectada
+        self.assertEqual(formset.changed_objects, [])
+
+    def test_recebimento_de_conciliacao_ignora_exclusao_no_nivel_do_formset(self):
+        r1 = RecebimentoReceita.objects.create(
+            receita=self.receita, data_recebimento=date(2030, 2, 5), valor=Decimal('500.00'), origem='conciliacao',
+        )
+        request = self._request()
+        FormSetClass = self._formset_class(request)
+        prefix = FormSetClass.get_default_prefix()
+        dados = self._post_data(prefix, [
+            {'id': r1.pk, 'data_recebimento': '2030-02-05', 'valor': '500.00', 'observacoes': '', 'DELETE': True},
+        ])
+        formset = FormSetClass(data=dados, instance=self.receita, prefix=prefix)
+        self.assertTrue(formset.is_valid(), formset.errors)
+        formset.save(commit=False)
+        # checkbox DELETE disabled: exclusão nunca é considerada
+        self.assertEqual(formset.deleted_objects, [])
+
+    def test_save_formset_duas_novas_linhas_excedem_saldo_nao_persiste_e_avisa(self):
+        from types import SimpleNamespace
+        from django.contrib import admin as django_admin
+        from financeiro.admin import ReceitaAluguelAdmin
+
+        request = self._request()
+        FormSetClass = self._formset_class(request)
+        prefix = FormSetClass.get_default_prefix()
+        dados = self._post_data(prefix, [
+            {'id': '', 'data_recebimento': '2030-02-12', 'valor': '600.00', 'observacoes': ''},
+            {'id': '', 'data_recebimento': '2030-02-13', 'valor': '600.00', 'observacoes': ''},
+        ])
+        formset = FormSetClass(data=dados, instance=self.receita, prefix=prefix)
+        self.assertTrue(formset.is_valid(), formset.errors)
+
+        admin_instance = ReceitaAluguelAdmin(ReceitaAluguel, django_admin.site)
+        form = SimpleNamespace(instance=self.receita)
+        admin_instance.save_formset(request, form, formset, change=True)
+
+        self.assertEqual(self.receita.recebimentos.count(), 0)
+        mensagens = [str(m) for m in request._messages]
+        self.assertTrue(any('excederia' in m for m in mensagens))
+
+    def test_save_formset_linhas_validas_persiste(self):
+        from types import SimpleNamespace
+        from django.contrib import admin as django_admin
+        from financeiro.admin import ReceitaAluguelAdmin
+
+        request = self._request()
+        FormSetClass = self._formset_class(request)
+        prefix = FormSetClass.get_default_prefix()
+        dados = self._post_data(prefix, [
+            {'id': '', 'data_recebimento': '2030-02-12', 'valor': '600.00', 'observacoes': ''},
+            {'id': '', 'data_recebimento': '2030-02-13', 'valor': '400.00', 'observacoes': ''},
+        ])
+        formset = FormSetClass(data=dados, instance=self.receita, prefix=prefix)
+        self.assertTrue(formset.is_valid(), formset.errors)
+
+        admin_instance = ReceitaAluguelAdmin(ReceitaAluguel, django_admin.site)
+        form = SimpleNamespace(instance=self.receita)
+        admin_instance.save_formset(request, form, formset, change=True)
+
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.recebimentos.count(), 2)
+        self.assertEqual(self.receita.valor_recebido, Decimal('1000.00'))
+        self.assertEqual(self.receita.status, 'recebido')
+
+
 class RegistrarRecebimentoConcorrenciaTest(TransactionTestCase):
     """
     Concorrência real (select_for_update bloqueando de fato) só é garantida
@@ -2739,3 +3309,313 @@ class CaixaReceitaCanceladaTest(TestCase):
         resumo = dict(_resumo_por_imovel([self.receita], []))
         self.assertEqual(resumo[self.imovel.nome]['rec_rec'], Decimal('500.00'))
         self.assertEqual(resumo[self.imovel.nome]['em_aberto'], 0)
+
+    # ─── Item 8 (rodada pós-revisão): valor lançado × exigível × recebido ────
+
+    def test_dashboard_receitas_previstas_exclui_cancelada(self):
+        """Valor exigível (item 8): a receita cancelada não conta em 'Receita Prevista'."""
+        user = com_leitura(User.objects.create_user('caixa_cancel_prev', password='pass'))
+        client = Client()
+        client.login(username='caixa_cancel_prev', password='pass')
+        resposta = client.get(reverse('dashboard'))
+        self.assertEqual(resposta.context['receitas_previstas'], 0)
+        # o recebido continua contando (500), mesmo com previsto zerado
+        self.assertEqual(resposta.context['receitas_recebidas'], Decimal('500.00'))
+
+    def test_resumo_por_imovel_exigivel_exclui_cancelada_e_guarda_lancado(self):
+        from financeiro.exports import _resumo_por_imovel
+        resumo = dict(_resumo_por_imovel([self.receita], []))
+        item = resumo[self.imovel.nome]
+        self.assertEqual(item['rec_prev'], Decimal('0.00'))  # exigível: exclui cancelada
+        self.assertEqual(item['rec_cancel'], Decimal('2000.00'))  # lançado histórico, à parte
+        self.assertEqual(item['rec_rec'], Decimal('500.00'))  # recebido: sempre conta
+
+    def test_relatorio_mensal_resumo_exclui_cancelada_da_receita_exigivel(self):
+        try:
+            import openpyxl
+        except ImportError:
+            self.skipTest('openpyxl não instalado')
+        import io
+        client = Client()
+        com_leitura(User.objects.create_user('caixa_cancel_rel', password='pass'))
+        client.login(username='caixa_cancel_rel', password='pass')
+        response = client.get(
+            reverse('export_relatorio_mensal', args=['xlsx']),
+            {'mes': self.hoje.month, 'ano': self.hoje.year},
+        )
+        wb = openpyxl.load_workbook(io.BytesIO(response.content))
+        ws = wb['Resumo por Imóvel']
+        linhas = list(ws.iter_rows(min_row=2, values_only=True))
+        linha = next(l for l in linhas if l[0] == self.imovel.nome)
+        # colunas: Imóvel, Receita Exigível, Receita Cancelada (Lançado), Receita Recebida, Despesas Pagas, Resultado
+        self.assertEqual(linha[1], 0.0)
+        self.assertEqual(linha[2], 2000.0)
+        self.assertEqual(linha[3], 500.0)
+
+    def test_relatorio_contabil_resumo_exclui_cancelada_da_receita_exigivel(self):
+        try:
+            import openpyxl
+        except ImportError:
+            self.skipTest('openpyxl não instalado')
+        import io
+        client = Client()
+        com_leitura(User.objects.create_user('caixa_cancel_cont', password='pass'))
+        client.login(username='caixa_cancel_cont', password='pass')
+        response = client.get(
+            reverse('export_relatorio_contabilidade'),
+            {'mes': self.hoje.month, 'ano': self.hoje.year},
+        )
+        wb = openpyxl.load_workbook(io.BytesIO(response.content))
+        ws = wb['Resumo']
+        campos = {row[0]: row[1] for row in ws.iter_rows(min_row=2, values_only=True) if row[0]}
+        self.assertEqual(campos['Total Receitas Exigíveis (R$)'], 0.0)
+        self.assertEqual(campos['Total Receitas Canceladas — Lançado (R$)'], 2000.0)
+        self.assertEqual(campos['Total Receitas Recebidas (R$)'], 500.0)
+
+
+class ValorExigivelReceitaCanceladaTest(TestCase):
+    """
+    Item 8: cenários adicionais de receita cancelada sem recebimento e com
+    pagamento integral, confirmando que o valor exigível some (0) em ambos,
+    mas o valor lançado e o recebido seguem as regras corretas.
+    """
+
+    def setUp(self):
+        self.imovel, self.locatario = _criar_base()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
+        )
+        self.hoje = timezone.localdate()
+
+    def test_cancelada_sem_recebimento_nao_conta_como_exigivel(self):
+        from financeiro.exports import _resumo_por_imovel
+        receita = ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=self.hoje.month, competencia_ano=self.hoje.year,
+            data_vencimento=self.hoje, valor_previsto=Decimal('1500.00'), status='previsto',
+        )
+        receita.cancelar()
+        resumo = dict(_resumo_por_imovel([receita], []))
+        item = resumo[self.imovel.nome]
+        self.assertEqual(item['rec_prev'], Decimal('0.00'))
+        self.assertEqual(item['rec_cancel'], Decimal('1500.00'))
+        self.assertEqual(item['rec_rec'], Decimal('0.00'))
+
+    def test_cancelada_apos_pagamento_integral_nao_conta_como_exigivel(self):
+        from financeiro.exports import _resumo_por_imovel
+        from financeiro.services import registrar_recebimento
+        receita = ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=self.hoje.month, competencia_ano=self.hoje.year,
+            data_vencimento=self.hoje, valor_previsto=Decimal('1000.00'), status='previsto',
+        )
+        registrar_recebimento(receita.pk, Decimal('1000.00'), self.hoje)
+        receita.refresh_from_db()
+        receita.cancelar()
+        resumo = dict(_resumo_por_imovel([receita], []))
+        item = resumo[self.imovel.nome]
+        self.assertEqual(item['rec_prev'], Decimal('0.00'))
+        self.assertEqual(item['rec_cancel'], Decimal('1000.00'))
+        self.assertEqual(item['rec_rec'], Decimal('1000.00'))
+        self.assertEqual(receita.saldo_em_aberto, Decimal('0.00'))
+
+    def test_receitas_list_total_previsto_exclui_cancelada(self):
+        outro_contrato = _criar_contrato(
+            self.imovel, self.locatario, data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
+        )
+        ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=self.hoje.month, competencia_ano=self.hoje.year,
+            data_vencimento=self.hoje, valor_previsto=Decimal('1000.00'), status='previsto',
+        )
+        cancelada = ReceitaAluguel.objects.create(
+            contrato=outro_contrato, imovel=self.imovel,
+            competencia_mes=self.hoje.month, competencia_ano=self.hoje.year,
+            data_vencimento=self.hoje, valor_previsto=Decimal('500.00'), status='previsto',
+        )
+        cancelada.cancelar()
+
+        client = Client()
+        com_leitura(User.objects.create_user('receitas_list_total', password='pass'))
+        client.login(username='receitas_list_total', password='pass')
+        response = client.get(
+            reverse('receitas_list'), {'mes': self.hoje.month, 'ano': self.hoje.year},
+        )
+        self.assertEqual(response.context['total_previsto'], Decimal('1000.00'))
+        conteudo = response.content.decode()
+        self.assertIn('Total exigível', conteudo)
+
+
+# ─── Item 10 (rodada pós-revisão): integridade do model Despesa ───────────────
+
+class DespesaIntegridadeTest(TestCase):
+    def setUp(self):
+        self.imovel, _ = _criar_base()
+        self.hoje = timezone.localdate()
+
+    def _despesa(self, **kwargs):
+        defaults = dict(
+            imovel=self.imovel, descricao='Despesa teste', categoria='outro',
+            data_vencimento=self.hoje, valor=Decimal('100.00'), status='prevista',
+        )
+        defaults.update(kwargs)
+        return Despesa(**defaults)
+
+    def test_valor_zero_rejeitado(self):
+        despesa = self._despesa(valor=Decimal('0.00'))
+        with self.assertRaises(ValidationError):
+            despesa.full_clean()
+
+    def test_valor_negativo_rejeitado(self):
+        despesa = self._despesa(valor=Decimal('-50.00'))
+        with self.assertRaises(ValidationError):
+            despesa.full_clean()
+
+    def test_paga_sem_data_rejeitada(self):
+        despesa = self._despesa(status='paga', data_pagamento=None)
+        with self.assertRaises(ValidationError) as ctx:
+            despesa.full_clean()
+        self.assertIn('data_pagamento', ctx.exception.message_dict)
+
+    def test_prevista_com_data_rejeitada(self):
+        despesa = self._despesa(status='prevista', data_pagamento=self.hoje)
+        with self.assertRaises(ValidationError) as ctx:
+            despesa.full_clean()
+        self.assertIn('data_pagamento', ctx.exception.message_dict)
+
+    def test_atrasada_com_data_rejeitada(self):
+        despesa = self._despesa(status='atrasada', data_pagamento=self.hoje)
+        with self.assertRaises(ValidationError) as ctx:
+            despesa.full_clean()
+        self.assertIn('data_pagamento', ctx.exception.message_dict)
+
+    def test_cancelada_com_data_rejeitada(self):
+        despesa = self._despesa(status='cancelada', data_pagamento=self.hoje)
+        with self.assertRaises(ValidationError) as ctx:
+            despesa.full_clean()
+        self.assertIn('data_pagamento', ctx.exception.message_dict)
+
+    def test_valor_zero_rejeitado_no_banco_mesmo_sem_full_clean(self):
+        """A constraint do banco protege mesmo criação direta via ORM sem full_clean()."""
+        from django.db import IntegrityError, transaction as db_transaction
+        with self.assertRaises(IntegrityError):
+            with db_transaction.atomic():
+                Despesa.objects.create(
+                    imovel=self.imovel, descricao='Sem clean', categoria='outro',
+                    data_vencimento=self.hoje, valor=Decimal('0.00'), status='prevista',
+                )
+
+    def test_status_data_incoerentes_rejeitados_no_banco_mesmo_sem_full_clean(self):
+        from django.db import IntegrityError, transaction as db_transaction
+        with self.assertRaises(IntegrityError):
+            with db_transaction.atomic():
+                Despesa.objects.create(
+                    imovel=self.imovel, descricao='Incoerente', categoria='outro',
+                    data_vencimento=self.hoje, valor=Decimal('100.00'),
+                    status='paga', data_pagamento=None,
+                )
+
+    def test_marcar_como_paga(self):
+        from financeiro.services import marcar_despesa_como_paga
+        despesa = Despesa.objects.create(
+            imovel=self.imovel, descricao='A pagar', categoria='outro',
+            data_vencimento=self.hoje, valor=Decimal('250.00'), status='prevista',
+        )
+        marcar_despesa_como_paga(despesa.pk, self.hoje)
+        despesa.refresh_from_db()
+        self.assertEqual(despesa.status, 'paga')
+        self.assertEqual(despesa.data_pagamento, self.hoje)
+
+    def test_marcar_como_paga_sem_data_e_rejeitado(self):
+        from financeiro.services import marcar_despesa_como_paga
+        despesa = Despesa.objects.create(
+            imovel=self.imovel, descricao='A pagar 2', categoria='outro',
+            data_vencimento=self.hoje, valor=Decimal('250.00'), status='prevista',
+        )
+        with self.assertRaises(ValidationError):
+            marcar_despesa_como_paga(despesa.pk, None)
+
+    def test_reabrir_despesa_limpa_data(self):
+        from financeiro.services import marcar_despesa_como_paga, reabrir_despesa
+        despesa = Despesa.objects.create(
+            imovel=self.imovel, descricao='A reabrir', categoria='outro',
+            data_vencimento=self.hoje + timedelta(days=10), valor=Decimal('300.00'), status='prevista',
+        )
+        marcar_despesa_como_paga(despesa.pk, self.hoje)
+        reabrir_despesa(despesa.pk)
+        despesa.refresh_from_db()
+        self.assertIsNone(despesa.data_pagamento)
+        self.assertEqual(despesa.status, 'prevista')
+
+    def test_reabrir_despesa_vencida_marca_atrasada(self):
+        from financeiro.services import marcar_despesa_como_paga, reabrir_despesa
+        despesa = Despesa.objects.create(
+            imovel=self.imovel, descricao='A reabrir vencida', categoria='outro',
+            data_vencimento=self.hoje - timedelta(days=5), valor=Decimal('300.00'), status='prevista',
+        )
+        marcar_despesa_como_paga(despesa.pk, self.hoje)
+        reabrir_despesa(despesa.pk)
+        despesa.refresh_from_db()
+        self.assertIsNone(despesa.data_pagamento)
+        self.assertEqual(despesa.status, 'atrasada')
+
+    def test_cancelar_despesa_limpa_data(self):
+        from financeiro.services import marcar_despesa_como_paga, cancelar_despesa
+        despesa = Despesa.objects.create(
+            imovel=self.imovel, descricao='A cancelar', categoria='outro',
+            data_vencimento=self.hoje, valor=Decimal('300.00'), status='prevista',
+        )
+        marcar_despesa_como_paga(despesa.pk, self.hoje)
+        cancelar_despesa(despesa.pk)
+        despesa.refresh_from_db()
+        self.assertIsNone(despesa.data_pagamento)
+        self.assertEqual(despesa.status, 'cancelada')
+
+    def test_conciliacao_de_debito_cria_estado_coerente(self):
+        from conciliacao.models import ContaBancaria, ExtratoImportado, TransacaoExtrato
+        from conciliacao.services import lancar_despesa
+        conta = ContaBancaria.objects.create(nome='Conta Débito')
+        extrato = ExtratoImportado.objects.create(conta=conta, hash_arquivo='hdesp10')
+        transacao = TransacaoExtrato.objects.create(
+            extrato=extrato, conta=conta, fitid='td1', data=self.hoje,
+            valor=Decimal('-150.00'), tipo='debito', descricao='CEMIG',
+        )
+        despesa = lancar_despesa(transacao, categoria='outro', descricao='Energia', fornecedor=None, imovel=None)
+        self.assertEqual(despesa.status, 'paga')
+        self.assertEqual(despesa.data_pagamento, self.hoje)
+        despesa.full_clean()  # não deve levantar — estado coerente
+
+    def test_desfazer_repasse_reabre_comissao_e_limpa_data(self):
+        from patrimonio.models import Pessoa, Contrato
+        from conciliacao.models import ContaBancaria, ExtratoImportado, TransacaoExtrato
+        from conciliacao.services import conciliar_com_receitas, desfazer_conciliacao
+        from financeiro.services import gerar_receitas_para_contrato
+
+        locatario = Pessoa.objects.create(nome='Locatário Desp10', tipo='locatario')
+        imob = Pessoa.objects.create(nome='Imob Desp10', tipo='imobiliaria')
+        contrato = Contrato.objects.create(
+            imovel=self.imovel, locatario=locatario, imobiliaria=imob,
+            data_inicio=date(2026, 1, 1), data_fim=date(2026, 12, 31),
+            dia_vencimento=10, valor_aluguel=Decimal('2000.00'),
+            comissao_imobiliaria_percentual=Decimal('10.00'),
+        )
+        gerar_receitas_para_contrato(contrato, data_inicio=date(2026, 3, 1), data_fim=date(2026, 3, 31))
+        receita = ReceitaAluguel.objects.get(contrato=contrato)
+        comissao = Despesa.objects.get(contrato=contrato, origem_automatica=True)
+
+        conta = ContaBancaria.objects.create(nome='Conta Repasse10')
+        extrato = ExtratoImportado.objects.create(conta=conta, hash_arquivo='hdesp10b')
+        transacao = TransacaoExtrato.objects.create(
+            extrato=extrato, conta=conta, fitid='td2', data=date(2026, 3, 12),
+            valor=Decimal('1800.00'), tipo='credito', descricao='REPASSE',
+        )
+        conciliar_com_receitas(transacao, [receita], marcar_comissoes=True)
+        comissao.refresh_from_db()
+        self.assertEqual(comissao.status, 'paga')
+        self.assertIsNotNone(comissao.data_pagamento)
+
+        desfazer_conciliacao(transacao)
+        comissao.refresh_from_db()
+        self.assertEqual(comissao.status, 'prevista')
+        self.assertIsNone(comissao.data_pagamento)
+        comissao.full_clean()  # estado coerente após desfazer
