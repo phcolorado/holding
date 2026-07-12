@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from django.db.models import Model, Q
+from django.db.models import Q
 
 from .models import ReceitaAluguel, ReceitaAluguelItem, RecebimentoReceita, Despesa
 
@@ -83,81 +83,55 @@ def _recebimento_e_protegido(rec):
     return rec.origem == 'conciliacao' or rec.transacao_extrato_id is not None
 
 
-@transaction.atomic
-def atualizar_recebimentos_da_receita(receita_id, novos=None, alterados=None, excluidos=None, usuario=None):
+def validar_ids_e_protecao_recebimentos(receita, existentes, alterados_pks, excluidos_pks, tem_novos):
     """
-    Aplica, como uma ÚNICA operação financeira atômica, inclusões, alterações
-    e exclusões de RecebimentoReceita de uma mesma receita — usada pelo
-    inline de "Recebimentos da Receita" no Admin de ReceitaAluguel.
+    Validações de INTEGRIDADE do lote (não de valor) — compartilhadas entre a
+    validação do formset do Admin (RecebimentoReceitaInlineFormSet.clean(),
+    que barra o salvamento no ciclo correto do Django, antes de qualquer
+    persistência) e o service transacional abaixo (que repete TODAS as
+    validações dentro da transação — a do formset melhora a experiência e
+    evita salvamento parcial, mas nunca a substitui).
 
-    Bloqueia a receita com select_for_update(), calcula o total FINAL de
-    todos os recebimentos considerando as três listas em CONJUNTO (não uma
-    validação por linha isolada, que poderia aprovar duas novas linhas que,
-    somadas, excedem o saldo mas cada uma isoladamente não excede) e só
-    persiste se esse total não ultrapassar valor_total_devido. Qualquer
-    rejeição levanta ValidationError e a transação inteira é revertida —
-    nenhuma das linhas é gravada parcialmente.
-
-    novos: lista de dicts {'data_recebimento', 'valor', 'observacoes'}.
-    alterados: lista de dicts {'pk', 'data_recebimento', 'valor', 'observacoes'}.
-    excluidos: lista de pks (int) de recebimentos a excluir.
-
-    Recebimentos originados de conciliação bancária (origem='conciliacao' ou
-    transacao_extrato preenchida) nunca podem ser alterados ou excluídos por
-    aqui — devem ser corrigidos desfazendo a conciliação correspondente.
-
-    A receita é reconsolidada (recalcular_recebimentos) UMA ÚNICA VEZ, ao
-    final — as gravações individuais usam Model.save()/Model.delete() direto
-    (contornando o save()/delete() de RecebimentoReceita, que reconsolidaria
-    a cada linha) para evitar reconsolidações redundantes.
+    `existentes`: dict {pk: RecebimentoReceita} da receita.
+    `alterados_pks`/`excluidos_pks`: sets de pks presentes no lote.
+    `tem_novos`: True se o lote inclui alguma inclusão.
     """
-    novos = novos or []
-    alterados = alterados or []
-    excluidos = list(excluidos or [])
-
-    receita = ReceitaAluguel.objects.select_for_update().get(pk=receita_id)
-
-    if novos and receita.status == 'cancelado':
+    invalidos = (excluidos_pks | alterados_pks) - set(existentes)
+    if invalidos:
         raise ValidationError(
-            'Não é possível registrar recebimento em uma receita cancelada — reabra a receita primeiro.'
+            f'Recebimento(s) {sorted(invalidos)} não pertence(m) a esta receita.'
         )
-
-    if novos:
-        # Idempotente: só materializa se houver valor_recebido legado sem
-        # recebimentos — evita perder um consolidado preexistente ao somar
-        # o primeiro recebimento novo do lote.
-        receita.garantir_recebimento_legado()
-
-    existentes = {r.pk: r for r in receita.recebimentos.all()}
-
-    for pk in excluidos:
-        if pk not in existentes:
-            raise ValidationError(f'Recebimento {pk} não pertence a esta receita.')
-    alterados_por_pk = {}
-    for dados in alterados:
-        pk = dados['pk']
-        if pk not in existentes:
-            raise ValidationError(f'Recebimento {pk} não pertence a esta receita.')
-        alterados_por_pk[pk] = dados
-
     protegidos = {pk for pk, rec in existentes.items() if _recebimento_e_protegido(rec)}
-    if (set(excluidos) | set(alterados_por_pk)) & protegidos:
+    if (excluidos_pks | alterados_pks) & protegidos:
         raise ValidationError(
             'Recebimentos originados de conciliação bancária não podem ser editados ou '
             'excluídos por aqui — desfaça a conciliação correspondente para corrigi-los.'
         )
+    if tem_novos and receita.status == 'cancelado':
+        raise ValidationError(
+            'Não é possível registrar recebimento em uma receita cancelada — reabra a receita primeiro.'
+        )
 
-    excluidos_set = set(excluidos)
+
+def validar_total_final_recebimentos(receita, existentes, alterados_valores, excluidos_pks, novos_valores):
+    """
+    Calcula o total FINAL de todos os recebimentos da receita considerando
+    existentes (menos excluídos, com os alterados já no valor novo) e novos
+    EM CONJUNTO — nunca uma validação por linha isolada, que poderia aprovar
+    duas novas linhas que, somadas, excedem o saldo mas cada uma
+    isoladamente não excede. Levanta ValidationError na primeira violação;
+    retorna o total final (Decimal) quando tudo é válido. Compartilhada pelo
+    formset do Admin e pelo service (ver validar_ids_e_protecao_recebimentos).
+    """
     total_final = Decimal('0.00')
     for pk, rec in existentes.items():
-        if pk in excluidos_set:
+        if pk in excluidos_pks:
             continue
-        valor = alterados_por_pk[pk]['valor'] if pk in alterados_por_pk else rec.valor
+        valor = alterados_valores.get(pk, rec.valor)
         if valor is None or valor <= 0:
             raise ValidationError('O valor de cada recebimento deve ser maior que zero.')
         total_final += valor
-    for dados in novos:
-        valor = dados.get('valor')
+    for valor in novos_valores:
         if valor is None or valor <= 0:
             raise ValidationError('O valor de cada recebimento deve ser maior que zero.')
         total_final += valor
@@ -167,31 +141,87 @@ def atualizar_recebimentos_da_receita(receita_id, novos=None, alterados=None, ex
             f'A soma dos recebimentos (R$ {total_final}) excederia o valor total devido '
             f'da receita (R$ {receita.valor_total_devido}) — ajuste os valores antes de salvar.'
         )
+    return total_final
 
-    # Validado — persiste. Model.save()/Model.delete() chamam diretamente a
-    # implementação-base (contornando RecebimentoReceita.save()/delete(), que
-    # reconsolidaria a receita a cada linha); a reconsolidação acontece uma
-    # única vez, ao final.
+
+@transaction.atomic
+def atualizar_recebimentos_da_receita(receita_id, novos=None, alterados=None, excluidos=None, usuario=None):
+    """
+    Aplica, como uma ÚNICA operação financeira atômica, inclusões, alterações
+    e exclusões de RecebimentoReceita de uma mesma receita — usada pelo
+    inline de "Recebimentos da Receita" no Admin de ReceitaAluguel.
+
+    Bloqueia a receita com select_for_update() e repete as mesmas validações
+    de validar_ids_e_protecao_recebimentos()/validar_total_final_
+    recebimentos() já aplicadas por RecebimentoReceitaInlineFormSet.clean()
+    (que barra o salvamento no ciclo do Django ANTES de qualquer
+    persistência) — a validação do formset nunca substitui esta, que é quem
+    realmente garante a consistência sob concorrência.
+
+    novos: lista de dicts {'data_recebimento', 'valor', 'observacoes'}.
+    alterados: lista de dicts {'pk', 'data_recebimento', 'valor', 'observacoes'}.
+    excluidos: lista de pks (int) de recebimentos a excluir.
+
+    A receita é reconsolidada (recalcular_recebimentos) UMA ÚNICA VEZ, ao
+    final — cada gravação individual usa o flag _pular_recalculo_receita
+    (RecebimentoReceita.save()/delete() continuam disparando os sinais do
+    django-simple-history normalmente, só pulam a reconsolidação por linha).
+    """
+    novos = novos or []
+    alterados = alterados or []
+    excluidos = list(excluidos or [])
+
+    if len(excluidos) != len(set(excluidos)):
+        raise ValidationError('Recebimento duplicado na lista de exclusões.')
+    pks_alterados = [dados['pk'] for dados in alterados]
+    if len(pks_alterados) != len(set(pks_alterados)):
+        raise ValidationError('Recebimento duplicado na lista de alterações.')
+
+    receita = ReceitaAluguel.objects.select_for_update().get(pk=receita_id)
+
+    if novos:
+        # Idempotente: só materializa se houver valor_recebido legado sem
+        # recebimentos — evita perder um consolidado preexistente ao somar
+        # o primeiro recebimento novo do lote.
+        receita.garantir_recebimento_legado()
+
+    existentes = {r.pk: r for r in receita.recebimentos.all()}
+    excluidos_set = set(excluidos)
+    alterados_por_pk = {dados['pk']: dados for dados in alterados}
+
+    validar_ids_e_protecao_recebimentos(
+        receita, existentes, set(alterados_por_pk), excluidos_set, bool(novos),
+    )
+    alterados_valores = {pk: dados['valor'] for pk, dados in alterados_por_pk.items()}
+    novos_valores = [dados.get('valor') for dados in novos]
+    validar_total_final_recebimentos(receita, existentes, alterados_valores, excluidos_set, novos_valores)
+
+    # Validado — persiste. save()/delete() continuam disparando os sinais do
+    # histórico (django-simple-history) normalmente; _pular_recalculo_receita
+    # evita reconsolidar a receita a cada linha — a reconsolidação acontece
+    # uma única vez, ao final.
     for pk in excluidos_set:
-        Model.delete(existentes[pk])
+        rec = existentes[pk]
+        rec._pular_recalculo_receita = True
+        rec.delete()
     for dados in alterados:
         rec = existentes[dados['pk']]
         rec.data_recebimento = dados['data_recebimento']
         rec.valor = dados['valor']
         rec.observacoes = dados.get('observacoes', '')
-        Model.save(rec, update_fields=['data_recebimento', 'valor', 'observacoes'])
-    if novos:
-        RecebimentoReceita.objects.bulk_create([
-            RecebimentoReceita(
-                receita=receita,
-                data_recebimento=dados['data_recebimento'],
-                valor=dados['valor'],
-                observacoes=dados.get('observacoes', ''),
-                origem='manual',
-                criado_por=usuario,
-            )
-            for dados in novos
-        ])
+        rec._pular_recalculo_receita = True
+        rec.save(update_fields=['data_recebimento', 'valor', 'observacoes'])
+    for dados in novos:
+        novo = RecebimentoReceita(
+            receita=receita,
+            data_recebimento=dados['data_recebimento'],
+            valor=dados['valor'],
+            observacoes=dados.get('observacoes', ''),
+            origem='manual',
+            criado_por=usuario,
+        )
+        novo._pular_recalculo_receita = True
+        novo.save()
 
     receita.recalcular_recebimentos()
 

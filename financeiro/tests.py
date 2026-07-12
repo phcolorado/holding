@@ -14,6 +14,7 @@ from django.utils import timezone
 from patrimonio.models import Imovel, Pessoa, Contrato, EncargoContrato
 from financeiro.models import (
     ReceitaAluguel, ReceitaAluguelItem, RecebimentoReceita, Despesa, receitas_inadimplentes_qs,
+    valor_total_devido_expr,
 )
 from financeiro.services import gerar_receitas_para_contrato, gerar_receitas_mes, contratos_para_geracao_mes
 
@@ -3151,11 +3152,14 @@ class RecebimentoInlineAdminFormsetTest(TestCase):
         # checkbox DELETE disabled: exclusão nunca é considerada
         self.assertEqual(formset.deleted_objects, [])
 
-    def test_save_formset_duas_novas_linhas_excedem_saldo_nao_persiste_e_avisa(self):
-        from types import SimpleNamespace
-        from django.contrib import admin as django_admin
-        from financeiro.admin import ReceitaAluguelAdmin
-
+    def test_formset_duas_novas_linhas_excedem_saldo_fica_invalido_sem_persistir(self):
+        """
+        Item 1: a inconsistência do lote agora invalida o FORMSET no ciclo de
+        validação do Django (formset.is_valid() == False) — antes de
+        qualquer persistência, e não mais só depois via save_formset()
+        capturando ValidationError e emitindo messages.error. No Admin real,
+        um formset inválido nunca chega a save_model()/save_formset().
+        """
         request = self._request()
         FormSetClass = self._formset_class(request)
         prefix = FormSetClass.get_default_prefix()
@@ -3164,15 +3168,9 @@ class RecebimentoInlineAdminFormsetTest(TestCase):
             {'id': '', 'data_recebimento': '2030-02-13', 'valor': '600.00', 'observacoes': ''},
         ])
         formset = FormSetClass(data=dados, instance=self.receita, prefix=prefix)
-        self.assertTrue(formset.is_valid(), formset.errors)
-
-        admin_instance = ReceitaAluguelAdmin(ReceitaAluguel, django_admin.site)
-        form = SimpleNamespace(instance=self.receita)
-        admin_instance.save_formset(request, form, formset, change=True)
-
+        self.assertFalse(formset.is_valid())
+        self.assertTrue(any('excederia' in erro for erro in formset.non_form_errors()))
         self.assertEqual(self.receita.recebimentos.count(), 0)
-        mensagens = [str(m) for m in request._messages]
-        self.assertTrue(any('excederia' in m for m in mensagens))
 
     def test_save_formset_linhas_validas_persiste(self):
         from types import SimpleNamespace
@@ -3197,6 +3195,293 @@ class RecebimentoInlineAdminFormsetTest(TestCase):
         self.assertEqual(self.receita.recebimentos.count(), 2)
         self.assertEqual(self.receita.valor_recebido, Decimal('1000.00'))
         self.assertEqual(self.receita.status, 'recebido')
+
+
+class RecebimentoInlineAdminIntegracaoTest(TestCase):
+    """
+    Item 1 (rodada final): testes de integração com SUBMISSÃO REAL ao
+    change form do Django Admin via Client.post() — não chamada direta a
+    save_formset(). Prova que o lote inválido invalida o formset no ciclo
+    correto (antes de qualquer save_model()/save_related()): nada é
+    persistido (nem multa do form principal, nem recebimentos), a página é
+    reapresentada com os valores submetidos e sem mensagem de sucesso.
+    """
+    def setUp(self):
+        from django.contrib.auth.models import User
+        self.superuser = User.objects.create_superuser('admin_receb_full', 'a@a.com', 'pass')
+        self.client = Client()
+        self.client.login(username='admin_receb_full', password='pass')
+        self.imovel, self.locatario = _criar_base()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
+        )
+        self.receita = ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=2, competencia_ano=2030,
+            data_vencimento=date(2030, 2, 10), valor_previsto=Decimal('1000.00'), status='previsto',
+        )
+        self.url = reverse('admin:financeiro_receitaaluguel_change', args=[self.receita.pk])
+
+    def _get_form_e_formsets(self):
+        resposta = self.client.get(self.url)
+        return resposta, resposta.context['adminform'], resposta.context['inline_admin_formsets']
+
+    def _dados_base(self, adminform, inline_formsets):
+        """Monta o POST a partir do changeform REAL renderizado — nunca
+        adivinha nomes de campo/prefixo (evita testes frágeis). Inclui os
+        dados de CADA linha existente de cada inline (id/valor/etc.), não só
+        os totais do management form — necessário para reenviar linhas
+        existentes inalteradas junto com as que o teste efetivamente altera."""
+        dados = {}
+        for name, field in adminform.form.fields.items():
+            valor = adminform.form.initial.get(name, field.initial)
+            if valor is None:
+                valor = ''
+            if hasattr(valor, 'pk'):
+                valor = valor.pk
+            dados[name] = valor
+        for iaf in inline_formsets:
+            fs = iaf.formset
+            mgmt = fs.management_form.initial
+            for campo in ('TOTAL_FORMS', 'INITIAL_FORMS', 'MIN_NUM_FORMS', 'MAX_NUM_FORMS'):
+                dados[f'{fs.prefix}-{campo}'] = mgmt.get(campo, 0)
+            for form in fs.forms:
+                for name, field in form.fields.items():
+                    valor = form.initial.get(name, field.initial)
+                    if valor is None:
+                        valor = ''
+                    if hasattr(valor, 'pk'):
+                        valor = valor.pk
+                    dados[form.add_prefix(name)] = valor
+        return dados
+
+    def _formset_recebimentos(self, inline_formsets):
+        for iaf in inline_formsets:
+            if iaf.formset.model is RecebimentoReceita:
+                return iaf.formset
+        raise AssertionError('inline de recebimentos não encontrado no changeform')
+
+    def _adicionar_novo_recebimento(self, dados, prefix, indice, valor, data='2030-02-12', obs=''):
+        dados[f'{prefix}-{indice}-id'] = ''
+        dados[f'{prefix}-{indice}-data_recebimento'] = data
+        dados[f'{prefix}-{indice}-valor'] = valor
+        dados[f'{prefix}-{indice}-observacoes'] = obs
+
+    def test_alterar_multa_e_duas_linhas_de_600_reapresenta_form_com_erro(self):
+        """Cenário 1 (10 testes obrigatórios do item 1, combinados aqui)."""
+        _resposta, adminform, inline_formsets = self._get_form_e_formsets()
+        fs = self._formset_recebimentos(inline_formsets)
+        dados = self._dados_base(adminform, inline_formsets)
+        dados['multa'] = '50.00'
+        dados[f'{fs.prefix}-TOTAL_FORMS'] = '2'
+        self._adicionar_novo_recebimento(dados, fs.prefix, 0, '600.00', '2030-02-12')
+        self._adicionar_novo_recebimento(dados, fs.prefix, 1, '600.00', '2030-02-13')
+
+        resposta = self.client.post(self.url, dados)
+
+        # reapresenta o formulário com erro (200), não redireciona (302)
+        self.assertEqual(resposta.status_code, 200)
+        self.receita.refresh_from_db()
+        # multa não persistida
+        self.assertEqual(self.receita.multa, Decimal('0.00'))
+        # nenhum recebimento criado
+        self.assertEqual(self.receita.recebimentos.count(), 0)
+        # sem mensagem de sucesso do Admin
+        conteudo = resposta.content.decode()
+        self.assertNotIn('foi alterad', conteudo.lower())
+        self.assertNotIn('was changed successfully', conteudo.lower())
+        # valores submetidos continuam visíveis no formulário reapresentado
+        self.assertIn('600.00', conteudo)
+        self.assertIn('50.00', conteudo)
+        # erro do lote aparece no formset de recebimentos
+        self.assertTrue(any('excederia' in erro for erro in resposta.context['inline_admin_formsets'][1].formset.non_form_errors()))
+
+    def test_seiscentos_mais_quatrocentos_salva_tudo(self):
+        """Cenário 9: R$ 600 + R$ 400 (saldo exato de R$ 1.000) deve quitar a receita."""
+        _resposta, adminform, inline_formsets = self._get_form_e_formsets()
+        fs = self._formset_recebimentos(inline_formsets)
+        dados = self._dados_base(adminform, inline_formsets)
+        dados[f'{fs.prefix}-TOTAL_FORMS'] = '2'
+        self._adicionar_novo_recebimento(dados, fs.prefix, 0, '600.00', '2030-02-12')
+        self._adicionar_novo_recebimento(dados, fs.prefix, 1, '400.00', '2030-02-13')
+
+        resposta = self.client.post(self.url, dados)
+
+        self.assertEqual(resposta.status_code, 302)  # redireciona = sucesso
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.recebimentos.count(), 2)
+        self.assertEqual(self.receita.valor_recebido, Decimal('1000.00'))
+        self.assertEqual(self.receita.status, 'recebido')
+
+    def test_alteracao_e_exclusao_simultaneas_validadas_pelo_estado_final(self):
+        """Cenário 10: dois recebimentos existentes (R$300+R$300, saldo livre
+        R$400) — a submissão aumenta um para R$650 e exclui o outro; o
+        estado FINAL (só R$650) cabe no saldo, mesmo que a soma intermediária
+        (existente 300 + alterado 650) pareça exceder olhando linha a linha."""
+        from financeiro.services import atualizar_recebimentos_da_receita
+        r1 = RecebimentoReceita.objects.create(
+            receita=self.receita, data_recebimento=date(2030, 2, 5), valor=Decimal('300.00'), origem='manual',
+        )
+        r2 = RecebimentoReceita.objects.create(
+            receita=self.receita, data_recebimento=date(2030, 2, 6), valor=Decimal('300.00'), origem='manual',
+        )
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.valor_recebido, Decimal('600.00'))
+
+        _resposta, adminform, inline_formsets = self._get_form_e_formsets()
+        fs = self._formset_recebimentos(inline_formsets)
+        dados = self._dados_base(adminform, inline_formsets)
+        # dois formulários existentes (r1, r2) já vêm no INITIAL_FORMS/TOTAL_FORMS
+        indice_r1 = next(i for i, f in enumerate(fs.forms) if f.instance.pk == r1.pk)
+        indice_r2 = next(i for i, f in enumerate(fs.forms) if f.instance.pk == r2.pk)
+        dados[f'{fs.prefix}-{indice_r1}-valor'] = '650.00'
+        dados[f'{fs.prefix}-{indice_r2}-DELETE'] = 'on'
+
+        resposta = self.client.post(self.url, dados)
+
+        self.assertEqual(resposta.status_code, 302)
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.recebimentos.count(), 1)
+        r1.refresh_from_db()
+        self.assertEqual(r1.valor, Decimal('650.00'))
+        self.assertEqual(self.receita.valor_recebido, Decimal('650.00'))
+
+
+class HistoricoRecebimentosEmLoteTest(TestCase):
+    """
+    Item 2 (rodada final): novos recebimentos do lote são salvos com save()
+    individual (não bulk_create()) — o histórico (django-simple-history) é
+    preservado por linha, mesmo que a reconsolidação da receita só aconteça
+    uma vez ao final do lote.
+    """
+    def setUp(self):
+        from financeiro.models import HistoricalRecebimentoReceita
+        self.HistoricalRecebimentoReceita = HistoricalRecebimentoReceita
+        self.usuario = User.objects.create_user('lote_hist', password='pass')
+        self.imovel, self.locatario = _criar_base()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
+        )
+        self.receita = ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=2, competencia_ano=2030,
+            data_vencimento=date(2030, 2, 10), valor_previsto=Decimal('1000.00'), status='previsto',
+        )
+
+    def test_novo_recebimento_possui_historico_de_criacao(self):
+        from financeiro.services import atualizar_recebimentos_da_receita
+        novos = [{'data_recebimento': date(2030, 2, 12), 'valor': Decimal('300.00'), 'observacoes': ''}]
+        atualizar_recebimentos_da_receita(self.receita.pk, novos=novos, usuario=self.usuario)
+        rec = self.receita.recebimentos.get()
+        historico = self.HistoricalRecebimentoReceita.objects.filter(id=rec.pk, history_type='+')
+        self.assertEqual(historico.count(), 1)
+        self.assertEqual(historico.first().criado_por_id, self.usuario.pk)
+
+    def test_dois_recebimentos_na_mesma_submissao_possuem_historicos_separados(self):
+        from financeiro.services import atualizar_recebimentos_da_receita
+        novos = [
+            {'data_recebimento': date(2030, 2, 12), 'valor': Decimal('300.00'), 'observacoes': ''},
+            {'data_recebimento': date(2030, 2, 13), 'valor': Decimal('300.00'), 'observacoes': ''},
+        ]
+        atualizar_recebimentos_da_receita(self.receita.pk, novos=novos)
+        pks = list(self.receita.recebimentos.values_list('pk', flat=True))
+        self.assertEqual(len(pks), 2)
+        for pk in pks:
+            self.assertEqual(
+                self.HistoricalRecebimentoReceita.objects.filter(id=pk, history_type='+').count(), 1,
+            )
+
+    def test_alteracao_gera_historico(self):
+        from financeiro.services import atualizar_recebimentos_da_receita
+        r1 = RecebimentoReceita.objects.create(
+            receita=self.receita, data_recebimento=date(2030, 2, 5), valor=Decimal('300.00'), origem='manual',
+        )
+        alterados = [{'pk': r1.pk, 'data_recebimento': r1.data_recebimento, 'valor': Decimal('350.00'), 'observacoes': ''}]
+        atualizar_recebimentos_da_receita(self.receita.pk, alterados=alterados)
+        self.assertEqual(
+            self.HistoricalRecebimentoReceita.objects.filter(id=r1.pk, history_type='~').count(), 1,
+        )
+
+    def test_exclusao_gera_historico(self):
+        from financeiro.services import atualizar_recebimentos_da_receita
+        r1 = RecebimentoReceita.objects.create(
+            receita=self.receita, data_recebimento=date(2030, 2, 5), valor=Decimal('300.00'), origem='manual',
+        )
+        pk = r1.pk
+        atualizar_recebimentos_da_receita(self.receita.pk, excluidos=[pk])
+        self.assertFalse(RecebimentoReceita.objects.filter(pk=pk).exists())
+        self.assertEqual(
+            self.HistoricalRecebimentoReceita.objects.filter(id=pk, history_type='-').count(), 1,
+        )
+
+    def test_lote_rejeitado_nao_gera_historico(self):
+        from financeiro.services import atualizar_recebimentos_da_receita
+        novos = [
+            {'data_recebimento': date(2030, 2, 12), 'valor': Decimal('600.00'), 'observacoes': ''},
+            {'data_recebimento': date(2030, 2, 13), 'valor': Decimal('600.00'), 'observacoes': ''},
+        ]
+        with self.assertRaises(ValidationError):
+            atualizar_recebimentos_da_receita(self.receita.pk, novos=novos)
+        self.assertEqual(RecebimentoReceita.objects.filter(receita=self.receita).count(), 0)
+        self.assertEqual(
+            self.HistoricalRecebimentoReceita.objects.filter(receita_id=self.receita.pk).count(), 0,
+        )
+
+    def test_rollback_nao_deixa_registros_historicos_orfaos(self):
+        """
+        Simula uma falha REAL no meio da persistência (não uma rejeição de
+        validação, que nunca chega a salvar nada) — a primeira linha chega a
+        ser salva (e gera histórico de criação) antes da segunda falhar; o
+        transaction.atomic() do service reverte TUDO, inclusive o histórico
+        da primeira linha, já que o sinal post_save do simple-history grava
+        dentro da MESMA transação.
+        """
+        from unittest.mock import patch
+        from financeiro.services import atualizar_recebimentos_da_receita
+
+        original_save = RecebimentoReceita.save
+        chamadas = {'n': 0}
+
+        def save_com_falha_na_segunda(self, *args, **kwargs):
+            chamadas['n'] += 1
+            if chamadas['n'] == 2:
+                raise RuntimeError('falha simulada no meio do lote')
+            return original_save(self, *args, **kwargs)
+
+        novos = [
+            {'data_recebimento': date(2030, 2, 12), 'valor': Decimal('300.00'), 'observacoes': ''},
+            {'data_recebimento': date(2030, 2, 13), 'valor': Decimal('300.00'), 'observacoes': ''},
+        ]
+        with patch.object(RecebimentoReceita, 'save', save_com_falha_na_segunda):
+            with self.assertRaises(RuntimeError):
+                atualizar_recebimentos_da_receita(self.receita.pk, novos=novos)
+
+        self.assertEqual(RecebimentoReceita.objects.filter(receita=self.receita).count(), 0)
+        self.assertEqual(
+            self.HistoricalRecebimentoReceita.objects.filter(receita_id=self.receita.pk).count(), 0,
+        )
+
+    def test_receita_reconsolidada_uma_unica_vez_por_lote(self):
+        from unittest.mock import patch
+        from financeiro.services import atualizar_recebimentos_da_receita
+
+        original = ReceitaAluguel.recalcular_recebimentos
+        chamadas = []
+
+        def contador(self, *args, **kwargs):
+            chamadas.append(self.pk)
+            return original(self, *args, **kwargs)
+
+        novos = [
+            {'data_recebimento': date(2030, 2, 12), 'valor': Decimal('300.00'), 'observacoes': ''},
+            {'data_recebimento': date(2030, 2, 13), 'valor': Decimal('300.00'), 'observacoes': ''},
+        ]
+        with patch.object(ReceitaAluguel, 'recalcular_recebimentos', contador):
+            atualizar_recebimentos_da_receita(self.receita.pk, novos=novos)
+
+        self.assertEqual(chamadas.count(self.receita.pk), 1)
+        self.receita.refresh_from_db()
+        self.assertEqual(self.receita.valor_recebido, Decimal('600.00'))
 
 
 class RegistrarRecebimentoConcorrenciaTest(TransactionTestCase):
@@ -3419,7 +3704,7 @@ class ValorExigivelReceitaCanceladaTest(TestCase):
         self.assertEqual(item['rec_rec'], Decimal('1000.00'))
         self.assertEqual(receita.saldo_em_aberto, Decimal('0.00'))
 
-    def test_receitas_list_total_previsto_exclui_cancelada(self):
+    def test_receitas_list_total_exigivel_exclui_cancelada(self):
         outro_contrato = _criar_contrato(
             self.imovel, self.locatario, data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
         )
@@ -3441,9 +3726,152 @@ class ValorExigivelReceitaCanceladaTest(TestCase):
         response = client.get(
             reverse('receitas_list'), {'mes': self.hoje.month, 'ano': self.hoje.year},
         )
-        self.assertEqual(response.context['total_previsto'], Decimal('1000.00'))
+        self.assertEqual(response.context['total_exigivel'], Decimal('1000.00'))
         conteudo = response.content.decode()
         self.assertIn('Total exigível', conteudo)
+
+
+class ReceitaExigivelComEncargosTest(TestCase):
+    """
+    Item 7 (rodada final): "Receita Exigível"/"Total Exigível"/"Valor
+    Exigível" é SEMPRE valor_previsto + multa + juros − desconto — nunca
+    valor_previsto isolado. Exemplo do enunciado: previsto R$ 2.000, multa
+    R$ 100, juros R$ 50, desconto R$ 20 → total devido R$ 2.130.
+    """
+    def setUp(self):
+        self.imovel, self.locatario = _criar_base()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
+        )
+        self.hoje = timezone.localdate()
+
+    def _receita(self, **kwargs):
+        defaults = dict(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=self.hoje.month, competencia_ano=self.hoje.year,
+            data_vencimento=self.hoje, valor_previsto=Decimal('2000.00'), status='previsto',
+        )
+        defaults.update(kwargs)
+        return ReceitaAluguel.objects.create(**defaults)
+
+    def test_receita_simples_sem_encargos(self):
+        r = self._receita()
+        self.assertEqual(r.valor_total_devido, Decimal('2000.00'))
+
+    def test_receita_com_multa(self):
+        r = self._receita(multa=Decimal('100.00'))
+        self.assertEqual(r.valor_total_devido, Decimal('2100.00'))
+
+    def test_receita_com_juros(self):
+        r = self._receita(juros=Decimal('50.00'))
+        self.assertEqual(r.valor_total_devido, Decimal('2050.00'))
+
+    def test_receita_com_desconto(self):
+        r = self._receita(desconto=Decimal('20.00'))
+        self.assertEqual(r.valor_total_devido, Decimal('1980.00'))
+
+    def test_combinacao_multa_juros_desconto(self):
+        r = self._receita(multa=Decimal('100.00'), juros=Decimal('50.00'), desconto=Decimal('20.00'))
+        self.assertEqual(r.valor_total_devido, Decimal('2130.00'))
+
+    def test_cancelada_com_encargos_nao_conta_no_exigivel_agregado(self):
+        r = self._receita(multa=Decimal('100.00'), juros=Decimal('50.00'), desconto=Decimal('20.00'))
+        r.cancelar()
+        total = ReceitaAluguel.objects.exclude(status='cancelado').aggregate(
+            total=models.Sum(valor_total_devido_expr())
+        )['total']
+        self.assertIsNone(total)
+
+    def test_parcialmente_recebida_mantem_valor_total_devido_correto(self):
+        from financeiro.services import registrar_recebimento
+        r = self._receita(multa=Decimal('100.00'), juros=Decimal('50.00'), desconto=Decimal('20.00'))
+        registrar_recebimento(r.pk, Decimal('500.00'), self.hoje)
+        r.refresh_from_db()
+        self.assertEqual(r.valor_total_devido, Decimal('2130.00'))
+        self.assertEqual(r.saldo_em_aberto, Decimal('1630.00'))
+
+    def test_dashboard_soma_valor_total_devido_nao_valor_previsto_isolado(self):
+        self._receita(multa=Decimal('100.00'), juros=Decimal('50.00'), desconto=Decimal('20.00'))
+        client = Client()
+        com_leitura(User.objects.create_user('exig_dash', password='pass'))
+        client.login(username='exig_dash', password='pass')
+        resposta = client.get(reverse('receitas_list'), {'mes': self.hoje.month, 'ano': self.hoje.year})
+        self.assertEqual(resposta.context['total_exigivel'], Decimal('2130.00'))
+
+    def test_resumo_por_imovel_usa_valor_total_devido(self):
+        from financeiro.exports import _resumo_por_imovel
+        r = self._receita(multa=Decimal('100.00'), juros=Decimal('50.00'), desconto=Decimal('20.00'))
+        resumo = dict(_resumo_por_imovel([r], []))
+        self.assertEqual(resumo[self.imovel.nome]['rec_prev'], Decimal('2130.00'))
+
+    def test_relatorio_mensal_exporta_valor_total_devido(self):
+        try:
+            import openpyxl
+        except ImportError:
+            self.skipTest('openpyxl não instalado')
+        import io
+        self._receita(multa=Decimal('100.00'), juros=Decimal('50.00'), desconto=Decimal('20.00'))
+        client = Client()
+        com_leitura(User.objects.create_user('exig_rel_mensal', password='pass'))
+        client.login(username='exig_rel_mensal', password='pass')
+        response = client.get(
+            reverse('export_relatorio_mensal', args=['xlsx']),
+            {'mes': self.hoje.month, 'ano': self.hoje.year},
+        )
+        wb = openpyxl.load_workbook(io.BytesIO(response.content))
+        ws = wb['Resumo por Imóvel']
+        linha = next(l for l in ws.iter_rows(min_row=2, values_only=True) if l[0] == self.imovel.nome)
+        self.assertEqual(linha[1], 2130.0)
+
+    def test_relatorio_contabil_exporta_valor_total_devido(self):
+        try:
+            import openpyxl
+        except ImportError:
+            self.skipTest('openpyxl não instalado')
+        import io
+        self._receita(multa=Decimal('100.00'), juros=Decimal('50.00'), desconto=Decimal('20.00'))
+        client = Client()
+        com_leitura(User.objects.create_user('exig_rel_cont', password='pass'))
+        client.login(username='exig_rel_cont', password='pass')
+        response = client.get(
+            reverse('export_relatorio_contabilidade'),
+            {'mes': self.hoje.month, 'ano': self.hoje.year},
+        )
+        wb = openpyxl.load_workbook(io.BytesIO(response.content))
+        ws_resumo = wb['Resumo']
+        campos = {row[0]: row[1] for row in ws_resumo.iter_rows(min_row=2, values_only=True) if row[0]}
+        self.assertEqual(campos['Total Receitas Exigíveis (R$)'], 2130.0)
+        ws_por_im = wb['Por Imóvel']
+        linha = next(l for l in ws_por_im.iter_rows(min_row=2, values_only=True) if l[0] == self.imovel.nome)
+        self.assertEqual(linha[1], 2130.0)
+
+    def test_export_receitas_csv_e_xlsx_distinguem_previsto_de_total_devido(self):
+        r = self._receita(multa=Decimal('100.00'), juros=Decimal('50.00'), desconto=Decimal('20.00'))
+        client = Client()
+        com_leitura(User.objects.create_user('exig_csv_xlsx', password='pass'))
+        client.login(username='exig_csv_xlsx', password='pass')
+
+        resp_csv = client.get(
+            reverse('export_receitas', args=['csv']), {'mes': self.hoje.month, 'ano': self.hoje.year},
+        )
+        conteudo_csv = resp_csv.content.decode('utf-8-sig')
+        self.assertIn('2000', conteudo_csv)  # Valor Previsto
+        self.assertIn('2130', conteudo_csv)  # Valor Total Devido
+
+        try:
+            import openpyxl
+        except ImportError:
+            self.skipTest('openpyxl não instalado')
+        import io
+        resp_xlsx = client.get(
+            reverse('export_receitas', args=['xlsx']), {'mes': self.hoje.month, 'ano': self.hoje.year},
+        )
+        wb = openpyxl.load_workbook(io.BytesIO(resp_xlsx.content))
+        ws = wb['Receitas']
+        cabecalho = [c.value for c in ws[1]]
+        linha = dict(zip(cabecalho, next(ws.iter_rows(min_row=2, max_row=2, values_only=True))))
+        self.assertEqual(linha['Valor Previsto'], 2000.0)
+        self.assertEqual(linha['Valor Total Devido'], 2130.0)
 
 
 # ─── Item 10 (rodada pós-revisão): integridade do model Despesa ───────────────

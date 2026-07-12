@@ -516,19 +516,32 @@ def conciliar_com_receitas(transacao, receitas, marcar_comissoes=False, usuario=
 @transaction.atomic
 def desfazer_conciliacao(transacao):
     """
-    Desfaz a conciliação de um crédito: remove os recebimentos criados por
-    ela (recalculando saldo/status das receitas), reabre as comissões que a
-    conciliação marcou como pagas, remove os vínculos e devolve a transação
-    para 'pendente'. Registrada no histórico da transação (simple-history).
+    Desfaz a conciliação de uma transação — trata créditos (recebimentos +
+    comissões de repasse) e débitos (despesa lançada) igualmente: NUNCA
+    apaga o dinheiro que de fato entrou/saiu, apenas desfaz os VÍNCULOS de
+    conciliação e devolve a transação para 'pendente'.
+
+    Crédito: remove os recebimentos criados por ela (recalculando saldo/
+    status das receitas) e reabre as comissões que a conciliação marcou
+    como pagas.
+
+    Débito: desvincula a despesa lançada (transacao.despesa = None) sem
+    excluí-la — a despesa representa um pagamento que de fato ocorreu;
+    Despesa.delete() é bloqueado enquanto ela estiver vinculada a uma
+    transação conciliada (item 4), então a única forma de "desfazer" um
+    débito é por aqui, nunca excluindo a despesa direto pelo Admin.
+
+    Registrada no histórico da transação (simple-history).
     """
     transacao = TransacaoExtrato.objects.select_for_update().get(pk=transacao.pk)
     if transacao.status != 'conciliada':
         raise ConciliacaoInvalidaError('Só é possível desfazer transações conciliadas.')
+
     if transacao.despesa_id:
-        raise ConciliacaoInvalidaError(
-            'Desfazer automático está disponível apenas para créditos conciliados com '
-            'receitas. Para débitos, exclua a despesa vinculada pelo Admin.'
-        )
+        transacao.despesa = None
+        transacao.status = 'pendente'
+        transacao.save(update_fields=['despesa', 'status'])
+        return transacao
 
     if transacao.comissoes_marcadas:
         # Reabre EXCLUSIVAMENTE as comissões vinculadas por ConciliacaoComissao
@@ -538,10 +551,14 @@ def desfazer_conciliacao(transacao):
         if vinculos:
             for vinculo in vinculos:
                 despesa = vinculo.despesa
+                # Remove o vínculo ANTES de alterar a despesa: Despesa.save()
+                # consulta despesa_tem_conciliacao_ativa() (que olha
+                # conciliacoes_comissao) e rejeitaria a alteração se este
+                # vínculo ainda existisse no momento do save() abaixo.
+                vinculo.delete()
                 despesa.status = 'prevista'
                 despesa.data_pagamento = None
                 despesa.save(update_fields=['status', 'data_pagamento'])
-            transacao.itens_comissao.all().delete()
         else:
             # Conciliação antiga, anterior ao vínculo explícito: não é possível
             # identificar com segurança quais comissões ELA pagou — exige revisão
@@ -643,9 +660,22 @@ def excluir_extrato_sem_movimentacoes(extrato_id, usuario=None):
     tratada (ver extrato_pode_ser_excluido). Bloqueia o extrato e suas
     transações com select_for_update() para evitar corrida com uma
     conciliação simultânea entre a checagem e a exclusão.
+
+    TransacaoExtrato.extrato é PROTECT (não CASCADE) — por isso as
+    transações pendentes são excluídas EXPLICITAMENTE aqui, uma a uma, antes
+    do extrato (cada .delete() individual passa pela proteção de instância
+    de TransacaoExtrato, que só permite isso por já estarem pendentes e sem
+    vínculo — confirmado por extrato_pode_ser_excluido() acima). O arquivo
+    físico só é removido do storage DEPOIS do commit (transaction.on_commit)
+    — se a transação reverter por qualquer motivo, o arquivo nunca é tocado.
+
+    `usuario`, quando informado, é registrado como autor da exclusão no
+    histórico (django-simple-history) via _history_user — funciona mesmo
+    fora de uma requisição HTTP (onde HistoryRequestMiddleware não tem
+    request.user para capturar automaticamente via thread-local).
     """
     extrato = ExtratoImportado.objects.select_for_update().get(pk=extrato_id)
-    list(extrato.transacoes.select_for_update())  # trava as transações também
+    transacoes = list(extrato.transacoes.select_for_update())
     if not extrato_pode_ser_excluido(extrato):
         raise ConciliacaoInvalidaError(
             'Este extrato possui transação(ões) conciliada(s), ignorada(s) ou com '
@@ -653,4 +683,21 @@ def excluir_extrato_sem_movimentacoes(extrato_id, usuario=None):
             'excluído. Desfaça as conciliações e reabra as transações ignoradas antes '
             'de excluir, ou exclua apenas extratos totalmente pendentes.'
         )
+
+    if usuario is not None:
+        extrato._history_user = usuario
+
+    for transacao in transacoes:
+        if usuario is not None:
+            transacao._history_user = usuario
+        transacao.delete()
+
+    arquivo = extrato.arquivo
+    storage = arquivo.storage if arquivo else None
+    nome_arquivo = arquivo.name if arquivo else None
+
+    extrato._exclusao_via_service_seguro = True
     extrato.delete()
+
+    if storage and nome_arquivo:
+        transaction.on_commit(lambda: storage.delete(nome_arquivo))

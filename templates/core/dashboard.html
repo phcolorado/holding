@@ -337,7 +337,7 @@
                     <a href="{% url 'documento_list' %}?pendente=1" class="alert-link ms-1">Ver</a>
                 </div>
                 {% endif %}
-                {% if docs_obrigatorios_pendentes > 0 and perms.documentos.view_documento %}
+                {% if docs_obrigatorios_pendentes > 0 and perms.documentos.view_documentoobrigatorio %}
                 <div class="alert alert-danger mt-2 mb-0 py-2">
                     <i class="bi bi-file-earmark-x me-1"></i>
                     <strong>{{ docs_obrigatorios_pendentes }}</strong> documento(s) obrigatório(s) pendente(s).

@@ -30,6 +30,19 @@ def saldo_em_aberto_expr():
     )
 
 
+def valor_total_devido_expr():
+    """
+    Expressão de banco do valor EXIGÍVEL de uma receita: valor_previsto +
+    multa + juros − desconto (equivalente ao property valor_total_devido,
+    mas agregável em queryset sem materializar cada linha em Python).
+    "Exigível" nunca é valor_previsto isolado — é sempre esta soma (item 7).
+    """
+    return ExpressionWrapper(
+        F('valor_previsto') + F('multa') + F('juros') - F('desconto'),
+        output_field=DecimalField(max_digits=14, decimal_places=2),
+    )
+
+
 class ReceitaAluguelQuerySet(models.QuerySet):
     """
     Consultas centralizadas de situação financeira das receitas.
@@ -389,6 +402,13 @@ class RecebimentoReceita(models.Model):
         if self._state.adding and self.receita_id and not getattr(self, '_eh_legado', False):
             self.receita.garantir_recebimento_legado()
         super().save(*args, **kwargs)
+        if getattr(self, '_pular_recalculo_receita', False):
+            # Usado SOMENTE por financeiro.services.atualizar_recebimentos_da_
+            # receita() ao gravar um lote inteiro (Admin): save() continua
+            # disparando os sinais do histórico (django-simple-history)
+            # normalmente — só a reconsolidação por linha é pulada, porque o
+            # chamador reconsolida UMA ÚNICA VEZ ao final do lote.
+            return
         # Recarrega a receita do banco em vez de reusar self.receita (que
         # pode ser uma instância em memória desatualizada — ex.: cancelada
         # por outro objeto Python apontando para a mesma linha dentro da
@@ -398,7 +418,10 @@ class RecebimentoReceita(models.Model):
 
     def delete(self, *args, **kwargs):
         receita_id = self.receita_id
+        pular_recalculo = getattr(self, '_pular_recalculo_receita', False)
         super().delete(*args, **kwargs)
+        if pular_recalculo:
+            return
         # preservar_legado=False: se este era o último recebimento, o
         # consolidado deve zerar (a exclusão é uma decisão explícita), e não
         # ser confundido com um valor legado não materializado. Recarrega a
@@ -419,6 +442,59 @@ class ReceitaAluguelItem(models.Model):
 
     def __str__(self):
         return f'{self.descricao or self.tipo} — R$ {self.valor}'
+
+
+def despesa_tem_conciliacao_ativa(despesa):
+    """
+    True quando a despesa está vinculada a uma conciliação bancária ATIVA —
+    ou porque uma transação de repasse líquido a marcou como comissão paga
+    (ConciliacaoComissao), ou porque ela foi lançada a partir de um débito
+    do extrato e essa transação ainda está 'conciliada' (transacoes_extrato
+    é related_name de TransacaoExtrato.despesa). Enquanto isso for verdade,
+    a despesa é somente-leitura nos campos financeiros — a única forma de
+    voltar a editá-la é desfazer a conciliação correspondente primeiro
+    (conciliacao.services.desfazer_conciliacao). Usa apenas os accessors
+    reversos (nunca importa models de conciliacao) para evitar import
+    circular — conciliacao já importa financeiro.models.
+    """
+    if not despesa.pk:
+        return False
+    if despesa.conciliacoes_comissao.exists():
+        return True
+    if despesa.transacoes_extrato.filter(status='conciliada').exists():
+        return True
+    return False
+
+
+class DespesaQuerySet(models.QuerySet):
+    """
+    QuerySet.update()/QuerySet.delete() operam direto no banco e não passam
+    por Despesa.save()/delete() — sem esta camada, uma edição ou exclusão em
+    massa contornaria a proteção de despesas com conciliação ativa.
+    """
+    CAMPOS_SEGUROS_PARA_UPDATE_EM_MASSA = frozenset({'observacoes', 'atualizado_em'})
+
+    def _com_conciliacao_ativa(self):
+        return self.filter(
+            Q(conciliacoes_comissao__isnull=False) | Q(transacoes_extrato__status='conciliada')
+        ).distinct()
+
+    def update(self, **kwargs):
+        campos_nao_seguros = set(kwargs) - self.CAMPOS_SEGUROS_PARA_UPDATE_EM_MASSA
+        if campos_nao_seguros and self._com_conciliacao_ativa().exists():
+            raise ValidationError(
+                'Este conjunto inclui despesa(s) com conciliação bancária ativa — desfaça a '
+                'conciliação correspondente antes de alterar campos financeiros em massa.'
+            )
+        return super().update(**kwargs)
+
+    def delete(self):
+        if self._com_conciliacao_ativa().exists():
+            raise ValidationError(
+                'Este conjunto inclui despesa(s) com conciliação bancária ativa — desfaça a '
+                'conciliação correspondente antes de excluir.'
+            )
+        return super().delete()
 
 
 class Despesa(models.Model):
@@ -443,7 +519,17 @@ class Despesa(models.Model):
     # Statuses that indicate the expense is settled
     STATUS_ENCERRADOS = frozenset({'paga', 'cancelada'})
 
+    # Campos que ficam somente-leitura enquanto despesa_tem_conciliacao_
+    # ativa() for True — cobre valor/status/data_pagamento/categoria/
+    # fornecedor/vínculos financeiros; observações continuam editáveis.
+    CAMPOS_PROTEGIDOS_COM_CONCILIACAO_ATIVA = (
+        'valor', 'status', 'data_pagamento', 'categoria',
+        'fornecedor_id', 'imovel_id', 'contrato_id', 'receita_id',
+    )
+
     MESES = MESES
+
+    objects = DespesaQuerySet.as_manager()
 
     imovel = models.ForeignKey(Imovel, on_delete=models.PROTECT, null=True, blank=True, verbose_name='Imóvel')
     contrato = models.ForeignKey(
@@ -514,6 +600,34 @@ class Despesa(models.Model):
             )
         if erros:
             raise ValidationError(erros)
+
+    def save(self, *args, **kwargs):
+        # Protege pelo estado REALMENTE persistido — despesa_tem_conciliacao_
+        # ativa() consulta relações reversas via self.pk, então reflete o
+        # banco mesmo que self já tenha os campos alterados em memória.
+        if self.pk and despesa_tem_conciliacao_ativa(self):
+            persistido = Despesa.objects.filter(pk=self.pk).values(
+                *self.CAMPOS_PROTEGIDOS_COM_CONCILIACAO_ATIVA
+            ).first()
+            if persistido:
+                for campo in self.CAMPOS_PROTEGIDOS_COM_CONCILIACAO_ATIVA:
+                    if getattr(self, campo) != persistido[campo]:
+                        nome = campo[:-3] if campo.endswith('_id') else campo
+                        raise ValidationError({
+                            nome: (
+                                'Esta despesa está vinculada a uma conciliação bancária ativa — '
+                                'desfaça a conciliação correspondente para editar este campo.'
+                            )
+                        })
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if despesa_tem_conciliacao_ativa(self):
+            raise ValidationError(
+                'Esta despesa está vinculada a uma conciliação bancária ativa e não pode ser '
+                'excluída — desfaça a conciliação correspondente primeiro.'
+            )
+        super().delete(*args, **kwargs)
 
     @property
     def esta_atrasada(self):

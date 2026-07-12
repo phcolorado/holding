@@ -31,6 +31,7 @@ def dashboard(request):
     ve_contratos = pode('patrimonio.view_contrato')
     ve_manutencoes = pode('patrimonio.view_manutencao')
     ve_documentos = pode('documentos.view_documento')
+    ve_documentos_obrigatorios = pode('documentos.view_documentoobrigatorio')
     ve_conciliacao = pode('conciliacao.view_extratoimportado')
 
     if ve_imoveis:
@@ -118,17 +119,22 @@ def dashboard(request):
             tipo__in=Documento.TIPOS_CONTABILIDADE,
             enviado_contabilidade=False,
         ).count()
-        docs_obrigatorios_pendentes = DocumentoObrigatorio.objects.filter(
-            obrigatorio=True, documento__isnull=True
-        ).count()
         docs_vencendo_qs = documentos_vencendo_qs().select_related('imovel')
         docs_vencendo_cnt = docs_vencendo_qs.count()
         docs_vencendo = docs_vencendo_qs[:10]
     else:
         docs_pendentes_contabilidade = 0
-        docs_obrigatorios_pendentes = 0
         docs_vencendo_cnt = 0
         docs_vencendo = Documento.objects.none()
+
+    if ve_documentos_obrigatorios:
+        # Item 6.3: DocumentoObrigatorio nunca é consultado com apenas
+        # documentos.view_documento — exige a permissão própria do model.
+        docs_obrigatorios_pendentes = DocumentoObrigatorio.objects.filter(
+            obrigatorio=True, documento__isnull=True
+        ).count()
+    else:
+        docs_obrigatorios_pendentes = 0
 
     if ve_conciliacao:
         extrato_pendentes = transacoes_pendentes_qs().count()
@@ -153,6 +159,7 @@ def dashboard(request):
         'manutencoes_abertas': manutencoes_abertas,
         'docs_pendentes_contabilidade': docs_pendentes_contabilidade,
         'docs_obrigatorios_pendentes': docs_obrigatorios_pendentes,
+        've_documentos_obrigatorios': ve_documentos_obrigatorios,
         'docs_vencendo': docs_vencendo,
         'docs_vencendo_cnt': docs_vencendo_cnt,
         'fluxo_caixa': fluxo_caixa,

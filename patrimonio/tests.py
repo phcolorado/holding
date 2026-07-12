@@ -1579,12 +1579,18 @@ class ReajusteProtegidoTest(TestCase):
             desatualizada.delete()
         self.assertTrue(ReajusteContrato.objects.filter(pk=self.reajuste.pk).exists())
 
-    def test_queryset_update_em_massa_e_bloqueado_quando_inclui_aplicado(self):
+    def test_queryset_update_em_massa_de_observacoes_funciona_mesmo_aplicado(self):
+        """
+        Item 3 (rodada final): a partir desta rodada, QuerySet.update()
+        bloqueia pelo NOME dos campos (não pelo estado do conjunto) —
+        observacoes é sempre um campo seguro, pendente ou aplicado, porque
+        não tem nenhum efeito colateral de negócio (ao contrário de
+        aplicado/aplicado_em/valor_novo etc., que exigem aplicar()).
+        """
         self.reajuste.aplicar()
-        with self.assertRaises(ValidationError):
-            ReajusteContrato.objects.filter(contrato=self.contrato).update(observacoes='alterado em massa')
+        ReajusteContrato.objects.filter(contrato=self.contrato).update(observacoes='alterado em massa')
         self.reajuste.refresh_from_db()
-        self.assertNotEqual(self.reajuste.observacoes, 'alterado em massa')
+        self.assertEqual(self.reajuste.observacoes, 'alterado em massa')
 
     def test_queryset_delete_em_massa_e_bloqueado_quando_inclui_aplicado(self):
         self.reajuste.aplicar()
@@ -1600,6 +1606,85 @@ class ReajusteProtegidoTest(TestCase):
         ReajusteContrato.objects.filter(pk=pendente.pk).update(observacoes='nota em lote')
         pendente.refresh_from_db()
         self.assertEqual(pendente.observacoes, 'nota em lote')
+
+    def test_queryset_update_aplicado_true_e_rejeitado(self):
+        """
+        Item 3.1: mesmo um reajuste PENDENTE não pode ser marcado como
+        aplicado por QuerySet.update() — isso contornaria aplicar() (não
+        atualizaria Contrato.valor_aluguel, o encargo de aluguel nem
+        avançaria data_proximo_reajuste).
+        """
+        pendente = ReajusteContrato.objects.create(
+            contrato=self.contrato, data_reajuste=date(2025, 6, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2100.00'), aplicado=False,
+        )
+        with self.assertRaises(ValidationError):
+            ReajusteContrato.objects.filter(pk=pendente.pk).update(
+                aplicado=True, aplicado_em=timezone.now(),
+            )
+        pendente.refresh_from_db()
+        self.assertFalse(pendente.aplicado)
+        self.assertIsNone(pendente.aplicado_em)
+        self.contrato.refresh_from_db()
+        self.assertEqual(self.contrato.valor_aluguel, Decimal('2000.00'))
+
+    def test_queryset_update_aplicado_em_isolado_e_rejeitado(self):
+        pendente = ReajusteContrato.objects.create(
+            contrato=self.contrato, data_reajuste=date(2025, 6, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2100.00'), aplicado=False,
+        )
+        with self.assertRaises(ValidationError):
+            ReajusteContrato.objects.filter(pk=pendente.pk).update(aplicado_em=timezone.now())
+        pendente.refresh_from_db()
+        self.assertIsNone(pendente.aplicado_em)
+
+    def test_queryset_update_valor_novo_e_rejeitado(self):
+        pendente = ReajusteContrato.objects.create(
+            contrato=self.contrato, data_reajuste=date(2025, 6, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2100.00'), aplicado=False,
+        )
+        with self.assertRaises(ValidationError):
+            ReajusteContrato.objects.filter(pk=pendente.pk).update(valor_novo=Decimal('9999.00'))
+        pendente.refresh_from_db()
+        self.assertEqual(pendente.valor_novo, Decimal('2100.00'))
+
+        self.reajuste.aplicar()
+        with self.assertRaises(ValidationError):
+            ReajusteContrato.objects.filter(pk=self.reajuste.pk).update(valor_novo=Decimal('9999.00'))
+        self.reajuste.refresh_from_db()
+        self.assertEqual(self.reajuste.valor_novo, Decimal('2150.00'))
+
+    def test_excluir_contrato_com_reajuste_aplicado_gera_protected_error(self):
+        from django.db.models import ProtectedError
+        self.reajuste.aplicar()
+        with self.assertRaises(ProtectedError):
+            self.contrato.delete()
+        self.assertTrue(Contrato.objects.filter(pk=self.contrato.pk).exists())
+        self.assertTrue(ReajusteContrato.objects.filter(pk=self.reajuste.pk).exists())
+
+    def test_excluir_contrato_sem_reajustes_funciona_normalmente(self):
+        outro_imovel = _criar_imovel('Imóvel Sem Reajuste')
+        outro_locatario = _criar_pessoa('Locatário Sem Reajuste')
+        contrato_livre = _criar_contrato(
+            outro_imovel, outro_locatario, date(2024, 1, 1), date(2026, 12, 31),
+        )
+        contrato_livre.delete()
+        self.assertFalse(Contrato.objects.filter(pk=contrato_livre.pk).exists())
+
+    def test_admin_delete_view_de_contrato_com_reajuste_aplicado_nao_oferece_exclusao(self):
+        """Item 3.4: Django Admin já bloqueia e explica via ProtectedError — confirma o comportamento."""
+        from django.contrib.auth.models import User
+        self.reajuste.aplicar()
+        superuser = User.objects.create_superuser('admin_reaj_del', 'a@a.com', 'pass')
+        client = Client()
+        client.force_login(superuser)
+        url = reverse('admin:patrimonio_contrato_delete', args=[self.contrato.pk])
+        resposta = client.get(url)
+        conteudo = resposta.content.decode()
+        # Django Admin renderiza a página de "não pode excluir" (protected),
+        # sem botão de confirmação de exclusão.
+        self.assertNotIn('name="post"', conteudo)
+        self.assertTrue(Contrato.objects.filter(pk=self.contrato.pk).exists())
 
 
 # ─── Rodada 2: unicidade de CPF/CNPJ no banco ─────────────────────────────────
@@ -1923,6 +2008,29 @@ class DashboardPermissoesTest(TestCase):
         conteudo = resposta.content.decode()
         self.assertIn('Documentos vencidos', conteudo)
         self.assertEqual(resposta.context['docs_vencendo_cnt'], 1)
+
+    def test_view_documento_sem_view_documentoobrigatorio_nao_mostra_contagem(self):
+        """Item 6.3: DocumentoObrigatorio nunca é consultado só com documentos.view_documento."""
+        from documentos.models import DocumentoObrigatorio
+        DocumentoObrigatorio.objects.create(
+            imovel=self.imovel, tipo='matricula', descricao='Matrícula', obrigatorio=True,
+        )
+        self._usuario('dash_doc_sem_obrig', 'view_documento')
+        resposta = self._get()
+        self.assertFalse(resposta.context['ve_documentos_obrigatorios'])
+        self.assertEqual(resposta.context['docs_obrigatorios_pendentes'], 0)
+        self.assertNotIn('documento(s) obrigatório(s) pendente(s)', resposta.content.decode())
+
+    def test_view_documentoobrigatorio_mostra_contagem(self):
+        from documentos.models import DocumentoObrigatorio
+        DocumentoObrigatorio.objects.create(
+            imovel=self.imovel, tipo='matricula', descricao='Matrícula', obrigatorio=True,
+        )
+        self._usuario('dash_com_obrig', 'view_documentoobrigatorio')
+        resposta = self._get()
+        self.assertTrue(resposta.context['ve_documentos_obrigatorios'])
+        self.assertEqual(resposta.context['docs_obrigatorios_pendentes'], 1)
+        self.assertIn('documento(s) obrigatório(s) pendente(s)', resposta.content.decode())
 
     def test_acesso_financeiro_completo_mostra_receitas_e_despesas(self):
         self._usuario('dash_financeiro', 'view_receitaaluguel', 'view_despesa')

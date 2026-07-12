@@ -11,6 +11,7 @@
     {% endif %}
 </div>
 
+{% if pode_importar_extrato %}
 {% if not tem_conta %}
 <div class="alert alert-warning">
     <i class="bi bi-exclamation-circle me-1"></i>
@@ -52,6 +53,7 @@
         </div>
     </div>
 </div>
+{% endif %}
 
 <!-- Lista de extratos -->
 <div class="card shadow-sm">

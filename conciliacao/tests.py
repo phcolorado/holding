@@ -4,8 +4,9 @@ from decimal import Decimal
 
 from django.contrib.auth.models import User, Permission
 from core.test_utils import com_leitura
+from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase, Client, override_settings
+from django.test import TestCase, TransactionTestCase, Client, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
@@ -965,7 +966,6 @@ class ConciliacaoComissaoProtectTest(TestCase):
         return receita, comissao
 
     def test_despesa_vinculada_nao_pode_ser_apagada(self):
-        from django.db.models import ProtectedError
         from .models import ConciliacaoComissao
         imob = Pessoa.objects.create(nome='Imob CCP', tipo='imobiliaria')
         receita, comissao = self._receita_com_comissao(imob)
@@ -973,7 +973,10 @@ class ConciliacaoComissaoProtectTest(TestCase):
         conciliar_com_receitas(tx, [receita], marcar_comissoes=True)
 
         self.assertTrue(ConciliacaoComissao.objects.filter(despesa=comissao).exists())
-        with self.assertRaises(ProtectedError):
+        # Despesa.delete() (item 4, rodada final) bloqueia ANTES de chegar ao
+        # PROTECT do banco — mensagem mais específica orientando a desfazer
+        # a conciliação; o PROTECT continua como defesa em profundidade.
+        with self.assertRaises(ValidationError):
             comissao.delete()
         # a despesa e o vínculo continuam intactos
         self.assertTrue(Despesa.objects.filter(pk=comissao.pk).exists())
@@ -991,6 +994,179 @@ class ConciliacaoComissaoProtectTest(TestCase):
         self.assertFalse(ConciliacaoComissao.objects.filter(despesa=comissao).exists())
         comissao.delete()  # não deve levantar — vínculo já removido pelo desfazer
         self.assertFalse(Despesa.objects.filter(pk=comissao.pk).exists())
+
+
+class DespesaConciliacaoAtivaTest(TestCase):
+    """
+    Item 4 (rodada final): despesas vinculadas a uma conciliação bancária
+    ATIVA (comissão de repasse líquido OU débito lançado do extrato) ficam
+    protegidas contra reabertura/cancelamento/alteração/exclusão — a única
+    forma de voltar a editá-las é desfazer a conciliação correspondente.
+    """
+    def setUp(self):
+        self.conta = ContaBancaria.objects.create(nome='Conta DCA')
+        self.extrato = ExtratoImportado.objects.create(conta=self.conta, hash_arquivo='hdca')
+        self.imovel, self.locatario = _base()
+
+    def _tx(self, valor, fitid, tipo='credito', descricao='TX'):
+        return TransacaoExtrato.objects.create(
+            extrato=self.extrato, conta=self.conta, fitid=fitid,
+            data=date(2026, 3, 12), valor=Decimal(valor), tipo=tipo, descricao=descricao,
+        )
+
+    def _receita_com_comissao(self, imob):
+        from financeiro.services import gerar_receitas_para_contrato
+        c = _contrato(
+            self.imovel, self.locatario, imobiliaria=imob,
+            comissao_imobiliaria_percentual=Decimal('10.00'),
+            data_inicio=date(2026, 1, 1), data_fim=date(2026, 12, 31),
+        )
+        gerar_receitas_para_contrato(c, data_inicio=date(2026, 3, 1), data_fim=date(2026, 3, 31))
+        receita = ReceitaAluguel.objects.get(contrato=c)
+        comissao = Despesa.objects.filter(contrato=c, origem_automatica=True).first()
+        return receita, comissao
+
+    def test_comissao_conciliada_nao_pode_ser_reaberta(self):
+        from financeiro.services import reabrir_despesa
+        imob = Pessoa.objects.create(nome='Imob DCA1', tipo='imobiliaria')
+        receita, comissao = self._receita_com_comissao(imob)
+        conciliar_com_receitas(self._tx('1800.00', 'dca-1'), [receita], marcar_comissoes=True)
+        comissao.refresh_from_db()
+        with self.assertRaises(ValidationError):
+            reabrir_despesa(comissao.pk)
+        comissao.refresh_from_db()
+        self.assertEqual(comissao.status, 'paga')
+
+    def test_comissao_conciliada_nao_pode_ser_cancelada(self):
+        from financeiro.services import cancelar_despesa
+        imob = Pessoa.objects.create(nome='Imob DCA2', tipo='imobiliaria')
+        receita, comissao = self._receita_com_comissao(imob)
+        conciliar_com_receitas(self._tx('1800.00', 'dca-2'), [receita], marcar_comissoes=True)
+        comissao.refresh_from_db()
+        with self.assertRaises(ValidationError):
+            cancelar_despesa(comissao.pk)
+        comissao.refresh_from_db()
+        self.assertEqual(comissao.status, 'paga')
+
+    def test_comissao_conciliada_nao_pode_ter_valor_alterado(self):
+        imob = Pessoa.objects.create(nome='Imob DCA3', tipo='imobiliaria')
+        receita, comissao = self._receita_com_comissao(imob)
+        conciliar_com_receitas(self._tx('1800.00', 'dca-3'), [receita], marcar_comissoes=True)
+        comissao.refresh_from_db()
+        valor_original = comissao.valor
+        comissao.valor = valor_original + Decimal('1.00')
+        with self.assertRaises(ValidationError):
+            comissao.save()
+        comissao.refresh_from_db()
+        self.assertEqual(comissao.valor, valor_original)
+
+    def test_observacao_pode_ser_alterada_com_conciliacao_ativa(self):
+        imob = Pessoa.objects.create(nome='Imob DCA4', tipo='imobiliaria')
+        receita, comissao = self._receita_com_comissao(imob)
+        conciliar_com_receitas(self._tx('1800.00', 'dca-4'), [receita], marcar_comissoes=True)
+        comissao.refresh_from_db()
+        comissao.observacoes = 'nota administrativa'
+        comissao.save()
+        comissao.refresh_from_db()
+        self.assertEqual(comissao.observacoes, 'nota administrativa')
+
+    def test_despesa_de_debito_conciliado_nao_pode_ser_excluida(self):
+        tx = self._tx('-350.00', 'dca-5', tipo='debito', descricao='CONTA DE LUZ')
+        despesa = lancar_despesa(tx, categoria='outro', descricao='Conta de luz')
+        with self.assertRaises(ValidationError):
+            despesa.delete()
+        self.assertTrue(Despesa.objects.filter(pk=despesa.pk).exists())
+
+    def test_transacao_conciliada_nunca_fica_sem_despesa(self):
+        """
+        Tentativas de excluir a despesa (direto ou em massa) nunca deixam a
+        transação com status='conciliada' e despesa=None — o único caminho
+        que desvincula é desfazer_conciliacao(), que também reabre a
+        transação para 'pendente' (nunca 'conciliada' sem despesa).
+        """
+        tx = self._tx('-200.00', 'dca-6', tipo='debito', descricao='ÁGUA')
+        despesa = lancar_despesa(tx, categoria='outro', descricao='Água')
+        with self.assertRaises(ValidationError):
+            despesa.delete()
+        with self.assertRaises(ValidationError):
+            Despesa.objects.filter(pk=despesa.pk).delete()
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'conciliada')
+        self.assertEqual(tx.despesa_id, despesa.pk)
+
+    def test_desfazer_conciliacao_de_debito_desvincula_sem_apagar_despesa(self):
+        from .services import desfazer_conciliacao
+        tx = self._tx('-150.00', 'dca-7', tipo='debito', descricao='INTERNET')
+        despesa = lancar_despesa(tx, categoria='outro', descricao='Internet')
+        desfazer_conciliacao(tx)
+        tx.refresh_from_db()
+        despesa.refresh_from_db()
+        self.assertIsNone(tx.despesa_id)
+        self.assertEqual(tx.status, 'pendente')
+        self.assertTrue(Despesa.objects.filter(pk=despesa.pk).exists())
+        # despesa volta a ser editável/excluível normalmente
+        despesa.observacoes = 'ok'
+        despesa.save()
+        despesa.delete()
+        self.assertFalse(Despesa.objects.filter(pk=despesa.pk).exists())
+
+    def test_acoes_em_massa_nao_alteram_parcialmente_o_conjunto(self):
+        """
+        Uma ação em massa sobre um conjunto que MISTURA despesas protegidas
+        e livres é bloqueada por inteiro — nenhuma das duas é alterada
+        parcialmente (nem mesmo a livre).
+        """
+        imob = Pessoa.objects.create(nome='Imob DCA8', tipo='imobiliaria')
+        receita, comissao = self._receita_com_comissao(imob)
+        conciliar_com_receitas(self._tx('1800.00', 'dca-8'), [receita], marcar_comissoes=True)
+        comissao.refresh_from_db()
+
+        livre = Despesa.objects.create(
+            imovel=self.imovel, descricao='Despesa livre', categoria='outro',
+            data_vencimento=date(2026, 3, 12), valor=Decimal('100.00'), status='prevista',
+        )
+        with self.assertRaises(ValidationError):
+            Despesa.objects.filter(pk__in=[comissao.pk, livre.pk]).update(categoria='iptu')
+        comissao.refresh_from_db()
+        livre.refresh_from_db()
+        self.assertNotEqual(comissao.categoria, 'iptu')
+        self.assertNotEqual(livre.categoria, 'iptu')
+
+    def test_admin_change_form_mostra_campos_financeiros_readonly(self):
+        superuser = User.objects.create_superuser('admin_dca', 'a@a.com', 'pass')
+        client = Client()
+        client.force_login(superuser)
+        imob = Pessoa.objects.create(nome='Imob DCA9', tipo='imobiliaria')
+        receita, comissao = self._receita_com_comissao(imob)
+        conciliar_com_receitas(self._tx('1800.00', 'dca-9'), [receita], marcar_comissoes=True)
+        comissao.refresh_from_db()
+
+        url = reverse('admin:financeiro_despesa_change', args=[comissao.pk])
+        resposta = client.get(url)
+        self.assertEqual(resposta.status_code, 200)
+        conteudo = resposta.content.decode()
+        self.assertIn('Conciliação Bancária', conteudo)
+        self.assertIn('Desfaça a conciliação', conteudo)
+        # campo "valor" não aparece mais como <input> editável
+        self.assertNotIn('name="valor"', conteudo)
+
+    def test_admin_nao_oferece_exclusao_com_conciliacao_ativa(self):
+        superuser = User.objects.create_superuser('admin_dca2', 'a@a.com', 'pass')
+        client = Client()
+        client.force_login(superuser)
+        imob = Pessoa.objects.create(nome='Imob DCA10', tipo='imobiliaria')
+        receita, comissao = self._receita_com_comissao(imob)
+        conciliar_com_receitas(self._tx('1800.00', 'dca-10'), [receita], marcar_comissoes=True)
+        comissao.refresh_from_db()
+
+        url_change = reverse('admin:financeiro_despesa_change', args=[comissao.pk])
+        resposta = client.get(url_change)
+        self.assertNotIn('deletelink', resposta.content.decode())
+
+        url_delete = reverse('admin:financeiro_despesa_delete', args=[comissao.pk])
+        resposta_delete = client.get(url_delete)
+        self.assertEqual(resposta_delete.status_code, 403)
+        self.assertTrue(Despesa.objects.filter(pk=comissao.pk).exists())
 
 
 # ─── FITID por assinatura + conferência rigorosa da conta (rodada 2) ──────────
@@ -1297,3 +1473,261 @@ class ExclusaoDeExtratoTest(TestCase):
         self.assertTrue(ExtratoImportado.objects.filter(pk=extrato.pk).exists())
         mensagens = [str(m) for m in response.context['messages']]
         self.assertTrue(any('não pode ser excluído' in m for m in mensagens) or any('tratada' in m for m in mensagens))
+
+
+@override_settings(MEDIA_ROOT=MEDIA_TEMP)
+class ExclusaoEstruturalTest(TestCase):
+    """
+    Item 5 (rodada final): a proteção contra exclusão de extratos/transações
+    passa a ser ESTRUTURAL (nos models/QuerySets), não apenas na view/Admin —
+    extrato.delete() e TransacaoExtrato.delete()/QuerySet.delete() diretos
+    são bloqueados fora do fluxo seguro.
+    """
+    def setUp(self):
+        self.conta = ContaBancaria.objects.create(nome='Conta Estrutural')
+        self.imovel, self.locatario = _base()
+        self.contrato = _contrato(self.imovel, self.locatario)
+
+    def _importar(self, transacoes, nome='extrato.ofx'):
+        return importar_ofx(_arquivo_ofx(transacoes, nome=nome), self.conta)
+
+    def test_extrato_delete_direto_e_rejeitado(self):
+        extrato = self._importar([('ee1', '20260310', '100.00', 'PIX')])
+        with self.assertRaises(ValidationError):
+            extrato.delete()
+        self.assertTrue(ExtratoImportado.objects.filter(pk=extrato.pk).exists())
+
+    def test_queryset_delete_de_extrato_e_rejeitado(self):
+        extrato = self._importar([('ee2', '20260310', '100.00', 'PIX')])
+        with self.assertRaises(ValidationError):
+            ExtratoImportado.objects.filter(pk=extrato.pk).delete()
+        self.assertTrue(ExtratoImportado.objects.filter(pk=extrato.pk).exists())
+
+    def test_transacao_conciliada_nao_pode_ser_excluida_diretamente(self):
+        receita = _receita(self.contrato, date(2026, 3, 10), Decimal('100.00'))
+        extrato = self._importar([('ee3', '20260310', '100.00', 'PIX')])
+        t = extrato.transacoes.get()
+        conciliar_com_receitas(t, [receita])
+        t.refresh_from_db()
+        with self.assertRaises(ValidationError):
+            t.delete()
+        self.assertTrue(TransacaoExtrato.objects.filter(pk=t.pk).exists())
+
+    def test_transacao_ignorada_nao_pode_ser_excluida_diretamente(self):
+        extrato = self._importar([('ee4', '20260310', '100.00', 'PIX')])
+        t = extrato.transacoes.get()
+        t.status = 'ignorada'
+        t.save(update_fields=['status'])
+        with self.assertRaises(ValidationError):
+            t.delete()
+        self.assertTrue(TransacaoExtrato.objects.filter(pk=t.pk).exists())
+
+    def test_transacao_pendente_sem_vinculo_pode_ser_excluida_pelo_fluxo_permitido(self):
+        """delete() de instância é o "fluxo permitido" para uma transação
+        realmente pendente e sem nenhum vínculo financeiro."""
+        extrato = self._importar([('ee5', '20260310', '100.00', 'PIX')])
+        t = extrato.transacoes.get()
+        t.delete()
+        self.assertFalse(TransacaoExtrato.objects.filter(pk=t.pk).exists())
+
+    def test_queryset_delete_de_transacao_tratada_e_rejeitado(self):
+        receita = _receita(self.contrato, date(2026, 3, 10), Decimal('100.00'))
+        extrato = self._importar([('ee6', '20260310', '100.00', 'PIX')])
+        t = extrato.transacoes.get()
+        conciliar_com_receitas(t, [receita])
+        with self.assertRaises(ValidationError):
+            TransacaoExtrato.objects.filter(pk=t.pk).delete()
+        self.assertTrue(TransacaoExtrato.objects.filter(pk=t.pk).exists())
+
+    def test_admin_nao_oferece_exclusao_insegura_de_extrato(self):
+        superuser = User.objects.create_superuser('admin_estrut', 'a@a.com', 'pass')
+        client = Client()
+        client.force_login(superuser)
+        extrato = self._importar([('ee7', '20260310', '100.00', 'PIX')])
+        url = reverse('admin:conciliacao_extratoimportado_delete', args=[extrato.pk])
+        resposta = client.get(url)
+        self.assertEqual(resposta.status_code, 403)
+        self.assertTrue(ExtratoImportado.objects.filter(pk=extrato.pk).exists())
+
+    def test_exclusao_registra_usuario_no_historico(self):
+        from .models import HistoricalExtratoImportado
+        from .services import excluir_extrato_sem_movimentacoes
+        usuario = User.objects.create_user('excl_auditoria', password='pass')
+        extrato = self._importar([('ee8', '20260310', '100.00', 'PIX')])
+        pk = extrato.pk
+        excluir_extrato_sem_movimentacoes(pk, usuario=usuario)
+        historico_exclusao = HistoricalExtratoImportado.objects.filter(id=pk, history_type='-').first()
+        self.assertIsNotNone(historico_exclusao)
+        self.assertEqual(historico_exclusao.history_user_id, usuario.pk)
+
+
+@override_settings(MEDIA_ROOT=MEDIA_TEMP)
+class ExclusaoDeExtratoArquivoFisicoTest(TransactionTestCase):
+    """
+    Item 5: o arquivo físico do extrato só é removido do storage DEPOIS do
+    commit da transação — nunca antes, e nunca se a transação reverter.
+    Usa TransactionTestCase (commits reais) porque transaction.on_commit()
+    nunca dispara dentro do bloco atômico externo que envolve cada teste em
+    TestCase comum.
+    """
+    def setUp(self):
+        self.conta = ContaBancaria.objects.create(nome='Conta Arquivo Físico')
+
+    def _extrato_pendente_com_arquivo(self, hash_arquivo):
+        arquivo = SimpleUploadedFile('extrato_fisico.ofx', b'conteudo ofx de teste', content_type='application/x-ofx')
+        extrato = ExtratoImportado.objects.create(
+            conta=self.conta, arquivo=arquivo, hash_arquivo=hash_arquivo,
+        )
+        TransacaoExtrato.objects.create(
+            extrato=extrato, conta=self.conta, fitid='af-1',
+            data=date(2026, 3, 1), valor=Decimal('100.00'), tipo='credito', descricao='X',
+        )
+        return extrato
+
+    def test_arquivo_fisico_excluido_apos_commit(self):
+        import os
+        from .services import excluir_extrato_sem_movimentacoes
+
+        extrato = self._extrato_pendente_com_arquivo('hash-arquivo-fisico-1')
+        caminho = extrato.arquivo.path
+        self.assertTrue(os.path.exists(caminho))
+
+        excluir_extrato_sem_movimentacoes(extrato.pk)
+
+        self.assertFalse(os.path.exists(caminho))
+        self.assertFalse(ExtratoImportado.objects.filter(pk=extrato.pk).exists())
+
+    def test_rollback_mantem_arquivo(self):
+        import os
+        from django.db import transaction
+        from .services import excluir_extrato_sem_movimentacoes
+
+        extrato = self._extrato_pendente_com_arquivo('hash-arquivo-fisico-2')
+        caminho = extrato.arquivo.path
+        self.assertTrue(os.path.exists(caminho))
+
+        with self.assertRaises(RuntimeError):
+            with transaction.atomic():
+                excluir_extrato_sem_movimentacoes(extrato.pk)
+                # Força o rollback da transação EXTERNA depois que o service
+                # (que também é @transaction.atomic, mas aqui vira apenas um
+                # savepoint aninhado) já concluiu — o on_commit() registrado
+                # por ele só dispararia no commit desta transação externa,
+                # que nunca acontece.
+                raise RuntimeError('força rollback após a exclusão')
+
+        self.assertTrue(os.path.exists(caminho))
+        self.assertTrue(ExtratoImportado.objects.filter(pk=extrato.pk).exists())
+
+
+@override_settings(MEDIA_ROOT=MEDIA_TEMP)
+class PermissoesResiduaisTest(TestCase):
+    """
+    Item 6 (rodada final): nenhuma tela consulta ou constrói dados de uma
+    área para a qual o usuário não tem permissão — mesmo quando o template
+    esconderia o resultado.
+    """
+    def setUp(self):
+        self.client = Client()
+        self.conta = ContaBancaria.objects.create(nome='Conta PR')
+        self.imovel, self.locatario = _base()
+        self.contrato = _contrato(self.imovel, self.locatario)
+
+    def _usuario(self, nome, *codenames):
+        user = User.objects.create_user(nome, password='pass')
+        user.user_permissions.add(*Permission.objects.filter(codename__in=codenames))
+        self.client.login(username=nome, password='pass')
+        return user
+
+    def test_extrato_list_somente_view_nao_ve_upload_nem_consulta_contas(self):
+        self._usuario('pr_so_view_extrato', 'view_extratoimportado')
+        resposta = self.client.get(reverse('extrato_list'))
+        self.assertEqual(resposta.status_code, 200)
+        self.assertFalse(resposta.context['pode_importar_extrato'])
+        self.assertIsNone(resposta.context['form'])
+        self.assertIsNone(resposta.context['tem_conta'])
+        conteudo = resposta.content.decode()
+        self.assertNotIn('Importar Extrato (OFX)', conteudo)
+        self.assertNotIn('name="arquivo"', conteudo)
+
+    def test_extrato_list_com_add_extratoimportado_mostra_upload(self):
+        self._usuario('pr_com_add_extrato', 'view_extratoimportado', 'add_extratoimportado')
+        resposta = self.client.get(reverse('extrato_list'))
+        self.assertTrue(resposta.context['pode_importar_extrato'])
+        self.assertIsNotNone(resposta.context['form'])
+        self.assertIn('Importar Extrato (OFX)', resposta.content.decode())
+
+    def test_conciliar_sem_permissao_de_receitas_nao_consulta_candidatas(self):
+        from unittest.mock import patch
+        receita = _receita(self.contrato, date(2026, 3, 10), Decimal('2000.00'))
+        extrato = importar_ofx(_arquivo_ofx([('pr1', '20260312', '2000.00', 'PIX')]), self.conta)
+        self._usuario('pr_sem_receitas', 'view_extratoimportado')
+
+        with patch('conciliacao.views.receitas_candidatas') as mock_candidatas, \
+             patch('conciliacao.views.sugerir_receitas') as mock_sugerir:
+            resposta = self.client.get(reverse('conciliar_extrato', args=[extrato.pk]))
+        self.assertEqual(resposta.status_code, 200)
+        mock_candidatas.assert_not_called()
+        mock_sugerir.assert_not_called()
+        self.assertEqual(resposta.context['pendentes'][0]['candidatas'], [])
+        self.assertNotIn(receita.imovel.nome, resposta.content.decode())
+
+    def test_conciliar_com_permissao_de_receitas_consulta_candidatas(self):
+        _receita(self.contrato, date(2026, 3, 10), Decimal('2000.00'))
+        extrato = importar_ofx(_arquivo_ofx([('pr2', '20260312', '2000.00', 'PIX')]), self.conta)
+        self._usuario('pr_com_receitas', 'view_extratoimportado', 'change_receitaaluguel')
+        resposta = self.client.get(reverse('conciliar_extrato', args=[extrato.pk]))
+        self.assertEqual(len(resposta.context['pendentes'][0]['candidatas']), 1)
+
+    def test_conciliar_sem_permissao_de_despesa_nao_constroi_formulario(self):
+        from unittest.mock import patch
+        extrato = importar_ofx(_arquivo_ofx([('pr3', '20260312', '-350.00', 'CEMIG')]), self.conta)
+        self._usuario('pr_sem_despesa', 'view_extratoimportado')
+
+        with patch('conciliacao.views.sugerir_classificacao') as mock_sugerir:
+            resposta = self.client.get(reverse('conciliar_extrato', args=[extrato.pk]))
+        self.assertEqual(resposta.status_code, 200)
+        mock_sugerir.assert_not_called()
+        self.assertIsNone(resposta.context['despesa_form'])
+        self.assertNotIn('name="categoria"', resposta.content.decode())
+
+    def test_conciliar_com_permissao_de_despesa_constroi_formulario(self):
+        extrato = importar_ofx(_arquivo_ofx([('pr4', '20260312', '-350.00', 'CEMIG')]), self.conta)
+        self._usuario('pr_com_despesa', 'view_extratoimportado', 'add_despesa')
+        resposta = self.client.get(reverse('conciliar_extrato', args=[extrato.pk]))
+        self.assertIsNotNone(resposta.context['despesa_form'])
+
+    def test_posts_de_conciliacao_continuam_exigindo_permissao(self):
+        receita = _receita(self.contrato, date(2026, 3, 10), Decimal('2000.00'))
+        extrato = importar_ofx(_arquivo_ofx([('pr5', '20260312', '2000.00', 'PIX')]), self.conta)
+        transacao = extrato.transacoes.get()
+        self._usuario('pr_post_sem_perm', 'view_extratoimportado')
+
+        resposta = self.client.post(reverse('conciliar_extrato', args=[extrato.pk]), {
+            'transacao_id': transacao.pk, 'action': 'conciliar', 'receita_ids': [receita.pk],
+        })
+        self.assertEqual(resposta.status_code, 403)
+        transacao.refresh_from_db()
+        self.assertEqual(transacao.status, 'pendente')
+
+    def test_relatorios_sem_view_contrato_nao_consulta_imobiliarias(self):
+        from unittest.mock import patch
+        user = User.objects.create_user('pr_sem_contrato', password='pass')
+        user.user_permissions.add(*Permission.objects.filter(codename='view_receitaaluguel'))
+        self.client.login(username='pr_sem_contrato', password='pass')
+
+        with patch('financeiro.views.imobiliarias_queryset') as mock_imob:
+            resposta = self.client.get(reverse('relatorios'))
+        self.assertEqual(resposta.status_code, 200)
+        mock_imob.assert_not_called()
+        self.assertEqual(list(resposta.context['imobiliarias']), [])
+
+    def test_relatorios_com_view_contrato_consulta_imobiliarias(self):
+        Pessoa.objects.create(nome='Imob PR', tipo='imobiliaria')
+        user = User.objects.create_user('pr_com_contrato', password='pass')
+        user.user_permissions.add(*Permission.objects.filter(
+            codename__in=['view_contrato', 'view_receitaaluguel'],
+        ))
+        self.client.login(username='pr_com_contrato', password='pass')
+        resposta = self.client.get(reverse('relatorios'))
+        self.assertEqual(len(resposta.context['imobiliarias']), 1)

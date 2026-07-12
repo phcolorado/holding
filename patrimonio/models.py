@@ -546,15 +546,37 @@ class ReajusteContratoQuerySet(models.QuerySet):
     chamam ReajusteContrato.save()/delete() nem clean() — por isso, sem esta
     camada, um `ReajusteContrato.objects.filter(...).update(...)` ou
     `.delete()` em massa contornaria completamente a imutabilidade dos
-    reajustes já aplicados. Bloqueia as duas operações quando o queryset
-    inclui QUALQUER reajuste aplicado (aplicado_em preenchido).
+    reajustes já aplicados.
+
+    update(): bloqueia pelo NOME dos campos, não pelo estado do conjunto —
+    evita a janela de corrida de um exists()+update() (um `.update(aplicado=
+    True, aplicado_em=...)` seria inseguro mesmo sobre um reajuste AINDA
+    pendente no momento da checagem, porque QuerySet.update() nunca executa
+    aplicar() — não atualiza Contrato.valor_aluguel, o encargo de aluguel
+    nem avança data_proximo_reajuste). Campos financeiros e de aplicação são
+    SEMPRE bloqueados, aplicado ou pendente; apenas observacoes (e
+    atualizado_em, que .update() não seta sozinho por não passar por
+    auto_now) podem ser alterados em massa — para o restante, use
+    instance.save() (reforça a imutabilidade) ou o método aplicar().
+
+    delete(): continua bloqueando pelo ESTADO do conjunto (não há como
+    "delete parcial por campo") — qualquer reajuste aplicado no conjunto
+    bloqueia a exclusão em massa inteira.
     """
+    CAMPOS_SEGUROS_PARA_UPDATE_EM_MASSA = frozenset({'observacoes', 'atualizado_em'})
+
     def update(self, **kwargs):
-        if self.filter(aplicado_em__isnull=False).exists():
+        campos_nao_seguros = set(kwargs) - self.CAMPOS_SEGUROS_PARA_UPDATE_EM_MASSA
+        if campos_nao_seguros:
             raise ValidationError(
-                'Este conjunto inclui reajuste(s) já aplicado(s) — atualização em massa '
-                '(QuerySet.update()) não é permitida sobre reajustes aplicados.'
+                'QuerySet.update() de ReajusteContrato só permite alterar '
+                f'{sorted(self.CAMPOS_SEGUROS_PARA_UPDATE_EM_MASSA)} em massa — campos '
+                'financeiros ou de aplicação (ex.: aplicado, aplicado_em, valor_novo, '
+                'contrato, data_reajuste) exigem instance.save() ou o método aplicar(), '
+                'que reforçam a imutabilidade e executam as regras de negócio completas.'
             )
+        if 'observacoes' in kwargs:
+            kwargs.setdefault('atualizado_em', timezone.now())
         return super().update(**kwargs)
 
     def delete(self):
@@ -569,7 +591,15 @@ class ReajusteContratoQuerySet(models.QuerySet):
 class ReajusteContrato(models.Model):
     objects = ReajusteContratoQuerySet.as_manager()
 
-    contrato = models.ForeignKey(Contrato, on_delete=models.CASCADE, related_name='reajustes', verbose_name='Contrato')
+    contrato = models.ForeignKey(
+        # PROTECT (não CASCADE): a exclusão do Contrato NÃO chama
+        # ReajusteContrato.delete() nem o QuerySet customizado (o Collector
+        # de exclusão do Django apaga em lote via SQL direto) — CASCADE
+        # apagaria silenciosamente reajustes já aplicados, contornando toda
+        # a proteção acima. Um contrato com reajuste aplicado exige
+        # tratamento explícito (nunca é apagado automaticamente).
+        Contrato, on_delete=models.PROTECT, related_name='reajustes', verbose_name='Contrato',
+    )
     data_reajuste = models.DateField('Data do Reajuste')
     indice = models.CharField('Índice', max_length=10, choices=Contrato.INDICE_CHOICES)
     percentual_aplicado = models.DecimalField(

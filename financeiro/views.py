@@ -10,7 +10,7 @@ from django.shortcuts import get_object_or_404, render
 from django.urls import reverse
 from django.utils import timezone
 
-from .models import ReceitaAluguel, Despesa, FechamentoMensal
+from .models import ReceitaAluguel, Despesa, FechamentoMensal, valor_total_devido_expr
 from .forms import RegistrarRecebimentoForm, EditarEncargosForm
 from .exports import (
     exportar_imoveis_csv, exportar_imoveis_xlsx,
@@ -22,7 +22,7 @@ from .exports import (
     exportar_relatorio_contabilidade_xlsx,
 )
 from core.utils import anos_para_filtro, int_param, mes_ano_da_request, pk_param
-from patrimonio.models import Imovel, Contrato, imobiliarias_queryset
+from patrimonio.models import Imovel, Contrato, Pessoa, imobiliarias_queryset
 
 ITENS_POR_PAGINA = 50
 
@@ -66,11 +66,12 @@ def receitas_list(request):
     if status:
         receitas = receitas.filter(status=status)
 
-    # Valor EXIGÍVEL do período filtrado (item 8): exclui canceladas — a
-    # cobrança delas foi encerrada, não representam mais previsão de receita.
-    # Soma sobre o queryset completo (antes da paginação), não só a página.
-    total_previsto = receitas.exclude(status='cancelado').aggregate(
-        total=Sum('valor_previsto')
+    # Valor EXIGÍVEL do período filtrado (itens 7-8): previsto + multa +
+    # juros − desconto (nunca só valor_previsto isolado), excluindo
+    # canceladas — a cobrança delas foi encerrada, não representam mais
+    # valor a exigir. Soma sobre o queryset completo (antes da paginação).
+    total_exigivel = receitas.exclude(status='cancelado').aggregate(
+        total=Sum(valor_total_devido_expr())
     )['total'] or Decimal('0.00')
 
     pagina = _paginar(request, receitas)
@@ -78,7 +79,7 @@ def receitas_list(request):
     context = {
         'receitas': pagina,
         'pagina': pagina,
-        'total_previsto': total_previsto,
+        'total_exigivel': total_exigivel,
         'query_string': _query_string_sem_page(request),
         'imoveis': Imovel.objects.all(),
         'mes_atual': mes,
@@ -203,7 +204,11 @@ def relatorios(request):
 
     context = {
         'imoveis': Imovel.objects.all() if precisa_filtro_imovel else Imovel.objects.none(),
-        'imobiliarias': imobiliarias_queryset() if ve_contratos else imobiliarias_queryset().none(),
+        # Item 6.4: imobiliarias_queryset() já executa as queries para
+        # montar o conjunto de ids ANTES de retornar o queryset — chamá-la
+        # só para descartar o resultado com .none() desperdiçaria essas
+        # consultas mesmo sem permissão. Pessoa.objects.none() não consulta nada.
+        'imobiliarias': imobiliarias_queryset() if ve_contratos else Pessoa.objects.none(),
         've_imoveis': ve_imoveis,
         've_contratos': ve_contratos,
         've_receitas': ve_receitas,

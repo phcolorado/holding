@@ -1,6 +1,8 @@
 from django.contrib.auth.models import User
+from django.core.exceptions import ValidationError
 from django.core.validators import FileExtensionValidator
 from django.db import models
+from django.db.models import Q
 from simple_history.models import HistoricalRecords
 
 from financeiro.models import ReceitaAluguel, Despesa
@@ -39,7 +41,24 @@ class ContaBancaria(models.Model):
         return self.nome
 
 
+class ExtratoImportadoQuerySet(models.QuerySet):
+    """
+    QuerySet.delete() em massa nunca é permitido — a exclusão segura de um
+    extrato exige exclusão explícita das transações pendentes ANTES do
+    extrato (ver conciliacao.services.excluir_extrato_sem_movimentacoes),
+    algo que uma exclusão em massa/genérica nunca poderia fazer com
+    segurança. Não há caminho legítimo que precise disto.
+    """
+    def delete(self):
+        raise ValidationError(
+            'Exclusão em massa (QuerySet.delete()) de ExtratoImportado não é permitida — '
+            'exclua um extrato de cada vez pelo fluxo seguro (excluir_extrato_sem_movimentacoes).'
+        )
+
+
 class ExtratoImportado(models.Model):
+    objects = ExtratoImportadoQuerySet.as_manager()
+
     conta = models.ForeignKey(
         ContaBancaria, on_delete=models.PROTECT, related_name='extratos', verbose_name='Conta'
     )
@@ -73,6 +92,39 @@ class ExtratoImportado(models.Model):
     def pendentes(self):
         return self.transacoes.filter(status='pendente').count()
 
+    def delete(self, *args, **kwargs):
+        # Bloqueado, salvo quando chamado pelo service seguro (que já
+        # validou extrato_pode_ser_excluido() e excluiu explicitamente as
+        # transações pendentes antes de chegar aqui) — o sinalizador é
+        # privado e só é setado por excluir_extrato_sem_movimentacoes().
+        if not getattr(self, '_exclusao_via_service_seguro', False):
+            raise ValidationError(
+                'A exclusão direta de ExtratoImportado não é permitida — use o fluxo seguro '
+                '(conciliacao.services.excluir_extrato_sem_movimentacoes), que só permite '
+                'extratos totalmente pendentes.'
+            )
+        super().delete(*args, **kwargs)
+
+
+class TransacaoExtratoQuerySet(models.QuerySet):
+    """
+    QuerySet.delete() em massa nunca pode contornar as regras de instância —
+    bloqueia se o conjunto incluir QUALQUER transação tratada (não pendente)
+    ou com vínculo financeiro (recebimento, despesa, conciliações).
+    """
+    def delete(self):
+        bloqueadas = self.exclude(status='pendente').exists() or self.filter(
+            Q(recebimentos__isnull=False) | Q(despesa__isnull=False)
+            | Q(itens_receita__isnull=False) | Q(itens_comissao__isnull=False)
+        ).distinct().exists()
+        if bloqueadas:
+            raise ValidationError(
+                'Este conjunto inclui transação(ões) tratada(s) ou com vínculo financeiro — '
+                'exclusão em massa (QuerySet.delete()) só é permitida para transações '
+                'totalmente pendentes e sem vínculo.'
+            )
+        return super().delete()
+
 
 class TransacaoExtrato(models.Model):
     TIPO_CHOICES = [
@@ -85,8 +137,16 @@ class TransacaoExtrato(models.Model):
         ('ignorada', 'Ignorada'),
     ]
 
+    objects = TransacaoExtratoQuerySet.as_manager()
+
     extrato = models.ForeignKey(
-        ExtratoImportado, on_delete=models.CASCADE, related_name='transacoes', verbose_name='Extrato'
+        # PROTECT (não CASCADE): a exclusão do ExtratoImportado NUNCA deve
+        # apagar TransacaoExtrato em cascata — o Collector de exclusão do
+        # Django apagaria em lote via SQL direto, contornando totalmente a
+        # proteção de TransacaoExtrato.delete()/QuerySet abaixo. O service
+        # seguro (excluir_extrato_sem_movimentacoes) exclui explicitamente
+        # cada transação pendente ANTES de excluir o extrato.
+        ExtratoImportado, on_delete=models.PROTECT, related_name='transacoes', verbose_name='Extrato'
     )
     conta = models.ForeignKey(
         ContaBancaria, on_delete=models.PROTECT, related_name='transacoes', verbose_name='Conta'
@@ -111,7 +171,14 @@ class TransacaoExtrato(models.Model):
         verbose_name='Receitas Conciliadas', blank=True,
     )
     despesa = models.ForeignKey(
-        Despesa, on_delete=models.SET_NULL, null=True, blank=True,
+        # PROTECT (não SET_NULL): este FK só fica preenchido enquanto a
+        # transação está 'conciliada' (lancar_despesa()/desfazer_conciliacao()
+        # mantêm essa invariante) — por isso PROTECT nunca bloqueia uma
+        # exclusão legítima de despesa, só impede que uma despesa ainda
+        # vinculada a um débito conciliado desapareça e deixe a transação
+        # 'conciliada' sem despesa (trilha de auditoria quebrada). Para
+        # excluir a despesa, desfaça a conciliação primeiro (desvincula).
+        Despesa, on_delete=models.PROTECT, null=True, blank=True,
         related_name='transacoes_extrato', verbose_name='Despesa Lançada',
     )
     observacoes = models.TextField('Observações', blank=True)
@@ -131,6 +198,28 @@ class TransacaoExtrato(models.Model):
     @property
     def valor_absoluto(self):
         return abs(self.valor)
+
+    def delete(self, *args, **kwargs):
+        # Reconsulta o estado REAL (nunca confia em self, que pode estar
+        # desatualizada) antes de decidir — mesmo padrão de ReajusteContrato.
+        # Só permite excluir transação realmente pendente e sem NENHUM
+        # vínculo financeiro (defesa em profundidade: por construção,
+        # status='conciliada'/'ignorada' já implica algum vínculo, mas um
+        # estado legado/inconsistente não deve escapar por aqui).
+        persistida = TransacaoExtrato.objects.filter(pk=self.pk).first()
+        alvo = persistida or self
+        if alvo.status != 'pendente':
+            raise ValidationError(
+                'Transação tratada (conciliada/ignorada) não pode ser excluída diretamente.'
+            )
+        if (
+            alvo.recebimentos.exists() or alvo.despesa_id
+            or alvo.itens_receita.exists() or alvo.itens_comissao.exists()
+        ):
+            raise ValidationError(
+                'Transação com vínculo financeiro não pode ser excluída diretamente.'
+            )
+        super().delete(*args, **kwargs)
 
 
 class ConciliacaoReceita(models.Model):

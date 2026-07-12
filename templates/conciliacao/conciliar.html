@@ -242,7 +242,7 @@
                             <input type="hidden" name="action" value="reabrir">
                             <button type="submit" class="btn btn-sm btn-outline-secondary py-0">Reabrir</button>
                         </form>
-                        {% elif t.status == 'conciliada' and not t.despesa %}
+                        {% elif t.status == 'conciliada' %}
                         <form method="post" class="d-inline">
                             {% csrf_token %}
                             <input type="hidden" name="transacao_id" value="{{ t.pk }}">

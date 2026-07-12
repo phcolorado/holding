@@ -284,10 +284,12 @@ def _resumo_por_imovel(receitas, despesas):
     Retorna lista ordenada por nome: [(nome, {rec_prev, rec_rec, rec_cancel, desp_pagas, em_aberto}), ...],
     omitindo imóveis sem nenhum valor no período.
 
-    rec_prev (valor EXIGÍVEL — item 8): soma valor_previsto só das receitas
-    NÃO canceladas — a cobrança de uma cancelada foi encerrada, não é mais
-    algo a exigir. rec_cancel guarda separadamente o valor_previsto LANÇADO
-    das canceladas (histórico), para quem precisar do total original.
+    rec_prev (valor EXIGÍVEL — itens 7-8): soma valor_total_devido (previsto
+    + multa + juros − desconto — NUNCA valor_previsto isolado) só das
+    receitas NÃO canceladas — a cobrança de uma cancelada foi encerrada, não
+    é mais algo a exigir. rec_cancel guarda separadamente o valor_previsto
+    LANÇADO (valor-base histórico, sem encargos) das canceladas, para quem
+    precisar do total original.
     """
     from collections import defaultdict
     from decimal import Decimal
@@ -301,7 +303,7 @@ def _resumo_por_imovel(receitas, despesas):
         if r.status == 'cancelado':
             item['rec_cancel'] += r.valor_previsto
         else:
-            item['rec_prev'] += r.valor_previsto
+            item['rec_prev'] += r.valor_total_devido
         # Sempre soma valor_recebido, mesmo cancelada: recalcular_recebimentos
         # reconsolida esse campo a partir dos RecebimentoReceita reais
         # independentemente do status — dinheiro recebido não desaparece com
@@ -405,10 +407,11 @@ def exportar_relatorio_contabilidade_xlsx(request, mes, ano):
     ws_res.title = 'Resumo'
     ws_res.append(['Campo', 'Valor'])
     _estilizar_cabecalho(ws_res, 2)
-    # Valor EXIGÍVEL (item 8): exclui canceladas — a cobrança delas foi
-    # encerrada. O valor LANÇADO das canceladas (histórico original) é
-    # reportado à parte, nunca somado ao exigível.
-    total_prev = sum(r.valor_previsto for r in receitas if r.status != 'cancelado')
+    # Valor EXIGÍVEL (itens 7-8): previsto + multa + juros − desconto —
+    # nunca valor_previsto isolado — excluindo canceladas (a cobrança delas
+    # foi encerrada). O valor LANÇADO das canceladas (histórico original,
+    # valor-base sem encargos) é reportado à parte, nunca somado ao exigível.
+    total_prev = sum(r.valor_total_devido for r in receitas if r.status != 'cancelado')
     total_cancelado = sum(r.valor_previsto for r in receitas if r.status == 'cancelado')
     # Soma valor_recebido de TODAS as receitas, mesmo canceladas — dinheiro
     # recebido antes do cancelamento continua no caixa (item 4).

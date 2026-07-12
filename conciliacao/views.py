@@ -75,10 +75,17 @@ def extrato_list(request):
         ExtratoImportado.objects.select_related('conta', 'importado_por')
         .annotate(total_transacoes=Count('transacoes'))
     )
+    # Item 6.1: usuário só com view_extratoimportado vê a lista, mas não o
+    # formulário de upload, a lista de contas para upload nem o aviso para
+    # cadastrar conta — nada disso é construído/consultado sem add_
+    # extratoimportado. O POST continua exigindo a permissão no servidor
+    # (checagem acima), independentemente do que o template mostra.
+    pode_importar_extrato = request.user.has_perm('conciliacao.add_extratoimportado')
     context = {
         'extratos': extratos,
-        'form': UploadExtratoForm(),
-        'tem_conta': ContaBancaria.objects.filter(ativo=True).exists(),
+        'pode_importar_extrato': pode_importar_extrato,
+        'form': UploadExtratoForm() if pode_importar_extrato else None,
+        'tem_conta': ContaBancaria.objects.filter(ativo=True).exists() if pode_importar_extrato else None,
         'total_pendentes': TransacaoExtrato.objects.filter(status='pendente').count(),
     }
     return render(request, 'conciliacao/extrato_list.html', context)
@@ -104,12 +111,19 @@ def extrato_download(request, pk):
         raise Http404('Arquivo não encontrado no armazenamento.')
 
 
-def _contexto_transacao(transacao):
-    """Pré-calcula sugestões e candidatas para exibição na tela de conciliação."""
+def _contexto_transacao(transacao, pode_conciliar_receitas, pode_lancar_despesa):
+    """
+    Pré-calcula sugestões e candidatas para exibição na tela de conciliação
+    — item 6.2: nunca consulta receitas candidatas se o usuário não puder
+    conciliar receitas, nem sugere classificação de débito (que exigiria
+    consultar fornecedores/imóveis do form) se não puder lançar despesa.
+    """
     dados = {'transacao': transacao, 'sugestao': None, 'candidatas': [], 'regra': None}
     if transacao.status != 'pendente':
         return dados
     if transacao.tipo == 'credito':
+        if not pode_conciliar_receitas:
+            return dados
         sugestao = sugerir_receitas(transacao)
         dados['sugestao'] = sugestao
         sugeridas_pks = {r.pk for r in sugestao['receitas']} if sugestao else set()
@@ -118,6 +132,8 @@ def _contexto_transacao(transacao):
             for r in receitas_candidatas(transacao)
         ]
     else:
+        if not pode_lancar_despesa:
+            return dados
         dados['regra'] = sugerir_classificacao(transacao)
     return dados
 
@@ -127,6 +143,9 @@ def _contexto_transacao(transacao):
 def conciliar_extrato(request, pk):
     """Tela de conciliação de um extrato: créditos ↔ receitas, débitos → despesas."""
     extrato = get_object_or_404(ExtratoImportado.objects.select_related('conta'), pk=pk)
+    pode_conciliar_receitas = request.user.has_perm('financeiro.change_receitaaluguel')
+    pode_lancar_despesa = request.user.has_perm('financeiro.add_despesa')
+    pode_alterar_transacao = request.user.has_perm('conciliacao.change_transacaoextrato')
 
     if request.method == 'POST':
         transacao = get_object_or_404(
@@ -202,7 +221,10 @@ def conciliar_extrato(request, pk):
         .prefetch_related('itens_receita__receita__imovel')
         .order_by('data', 'id')
     )
-    pendentes = [_contexto_transacao(t) for t in transacoes if t.status == 'pendente']
+    pendentes = [
+        _contexto_transacao(t, pode_conciliar_receitas, pode_lancar_despesa)
+        for t in transacoes if t.status == 'pendente'
+    ]
     tratadas = [t for t in transacoes if t.status != 'pendente']
 
     context = {
@@ -210,6 +232,12 @@ def conciliar_extrato(request, pk):
         'pendentes': pendentes,
         'tratadas': tratadas,
         'total': len(pendentes) + len(tratadas),
-        'despesa_form': DespesaExtratoForm(),
+        # DespesaExtratoForm() constrói ModelChoiceField de fornecedor/imóvel
+        # (consulta o banco) — só é criado quando o usuário pode lançar
+        # despesa (item 6.2).
+        'despesa_form': DespesaExtratoForm() if pode_lancar_despesa else None,
+        'pode_conciliar_receitas': pode_conciliar_receitas,
+        'pode_lancar_despesa': pode_lancar_despesa,
+        'pode_alterar_transacao': pode_alterar_transacao,
     }
     return render(request, 'conciliacao/conciliar.html', context)
