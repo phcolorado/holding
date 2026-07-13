@@ -2,6 +2,7 @@ from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.core.validators import FileExtensionValidator
 from django.db import models
+from django.db.models import Q
 from simple_history.models import HistoricalRecords
 
 from financeiro.models import ReceitaAluguel, Despesa
@@ -125,6 +126,18 @@ class TransacaoExtratoQuerySet(models.QuerySet):
             'de Conciliação Bancária.'
         )
 
+    def update(self, **kwargs):
+        # despesa_criada_pela_conciliacao é a prova de origem da despesa de
+        # um débito — só pode ser definido por lancar_despesa() (True) ou
+        # desfazer_conciliacao() (False), nunca por uma alteração em massa
+        # que contorne o sinalizador privado de TransacaoExtrato.save().
+        if 'despesa_criada_pela_conciliacao' in kwargs:
+            raise ValidationError(
+                'QuerySet.update() não pode alterar despesa_criada_pela_conciliacao — este '
+                'campo é controlado exclusivamente por lancar_despesa()/desfazer_conciliacao().'
+            )
+        return super().update(**kwargs)
+
 
 class TransacaoExtrato(models.Model):
     TIPO_CHOICES = [
@@ -181,6 +194,16 @@ class TransacaoExtrato(models.Model):
         Despesa, on_delete=models.PROTECT, null=True, blank=True,
         related_name='transacoes_extrato', verbose_name='Despesa Lançada',
     )
+    despesa_criada_pela_conciliacao = models.BooleanField(
+        'Despesa Criada pela Conciliação', default=False, editable=False,
+        help_text=(
+            'True declara que a despesa atualmente vinculada em "despesa" foi criada pelo '
+            'próprio lancar_despesa() para esta transação — única prova de origem aceita para '
+            'excluí-la automaticamente ao desfazer a conciliação. Nunca inferido por '
+            'coincidência de valor/data/status; controlado exclusivamente pelos services de '
+            'conciliação (lancar_despesa()/desfazer_conciliacao()).'
+        ),
+    )
     observacoes = models.TextField('Observações', blank=True)
     criado_em = models.DateTimeField('Criado em', auto_now_add=True)
     atualizado_em = models.DateTimeField('Atualizado em', auto_now=True)
@@ -191,6 +214,18 @@ class TransacaoExtrato(models.Model):
         verbose_name_plural = 'Transações do Extrato'
         ordering = ['data', 'id']
         unique_together = [['conta', 'fitid']]
+        constraints = [
+            # despesa_criada_pela_conciliacao=True só faz sentido para um
+            # débito com despesa vinculada — nunca para crédito, nem sem
+            # despesa. Usa os valores reais de TIPO_CHOICES.
+            models.CheckConstraint(
+                check=(
+                    Q(despesa_criada_pela_conciliacao=False)
+                    | Q(tipo='debito', despesa__isnull=False)
+                ),
+                name='transacaoextrato_origem_despesa_exige_debito_vinculado',
+            ),
+        ]
 
     def __str__(self):
         return f'{self.data:%d/%m/%Y} — {self.descricao or self.memo} (R$ {self.valor})'
@@ -198,6 +233,29 @@ class TransacaoExtrato(models.Model):
     @property
     def valor_absoluto(self):
         return abs(self.valor)
+
+    def save(self, *args, **kwargs):
+        # A transição de False para True só pode ocorrer dentro de
+        # lancar_despesa(), que seta o sinalizador privado
+        # _marcando_origem_despesa nesta instância antes de save() — nunca
+        # disponível como argumento público de save(). Reconsulta o estado
+        # persistido (nunca confia em self) para decidir se é de fato uma
+        # transição ou apenas um resave de um valor já True.
+        if self.despesa_criada_pela_conciliacao:
+            persistido = (
+                TransacaoExtrato.objects.filter(pk=self.pk)
+                .values_list('despesa_criada_pela_conciliacao', flat=True)
+                .first()
+                if self.pk else None
+            )
+            if not persistido and not getattr(self, '_marcando_origem_despesa', False):
+                raise ValidationError({
+                    'despesa_criada_pela_conciliacao': (
+                        'Este campo só pode ser definido como True pelo service '
+                        'lancar_despesa() — não por uma alteração comum (save() direto).'
+                    )
+                })
+        super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):
         # Bloqueado, salvo quando chamado pelo service seguro (que já

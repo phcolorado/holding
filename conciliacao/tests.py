@@ -1406,6 +1406,282 @@ class DesfazerConciliacaoDebitoTest(TestCase):
         self.assertIn('Só é possível desfazer transações conciliadas', str(ctx.exception))
 
 
+# ─── Origem explícita da despesa de débito (identificação inequívoca) ─────────
+
+class OrigemExplicitaDespesaDebitoTest(TestCase):
+    """
+    despesa_criada_pela_conciliacao é a ÚNICA prova de origem aceita por
+    desfazer_conciliacao() para excluir automaticamente a despesa de um
+    débito — nunca mais inferida por valor/data/descrição/status, que só
+    demonstram compatibilidade, não comprovam que lancar_despesa() criou
+    aquele registro especificamente.
+    """
+    def setUp(self):
+        self.conta = ContaBancaria.objects.create(nome='Conta OED')
+        self.extrato = ExtratoImportado.objects.create(conta=self.conta, hash_arquivo='hoed')
+        self.imovel, self.locatario = _base()
+
+    def _tx(self, valor, fitid, descricao='CONTA'):
+        return TransacaoExtrato.objects.create(
+            extrato=self.extrato, conta=self.conta, fitid=fitid,
+            data=date(2026, 3, 12), valor=Decimal(valor), tipo='debito', descricao=descricao,
+        )
+
+    # 1-2: lancar_despesa() marca a origem explícita e concilia a transação
+    def test_lancar_despesa_marca_origem_explicita(self):
+        from .services import lancar_despesa
+        tx = self._tx('-500.00', 'oed-1')
+        despesa = lancar_despesa(tx, categoria='outro', descricao='Reparo')
+
+        tx.refresh_from_db()
+        self.assertTrue(tx.despesa_criada_pela_conciliacao)
+        self.assertEqual(tx.despesa_id, despesa.pk)
+        self.assertEqual(tx.status, 'conciliada')
+
+    # 3: erro intermediário em lancar_despesa() causa rollback completo
+    def test_erro_intermediario_em_lancar_despesa_causa_rollback(self):
+        from unittest.mock import patch
+        from .services import lancar_despesa
+        tx = self._tx('-500.00', 'oed-2')
+
+        with patch.object(TransacaoExtrato, 'save', side_effect=RuntimeError('falha simulada')):
+            with self.assertRaises(RuntimeError):
+                lancar_despesa(tx, categoria='outro', descricao='Reparo')
+
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'pendente')
+        self.assertIsNone(tx.despesa_id)
+        self.assertFalse(tx.despesa_criada_pela_conciliacao)
+        # a despesa criada antes da falha também não pode sobreviver — a
+        # transação atômica reverte TUDO, inclusive o Despesa.objects.create()
+        self.assertFalse(Despesa.objects.filter(descricao='Reparo').exists())
+
+    # 4-5-6: desfazer exclui a despesa com origem explícita e não permite duplicidade
+    def test_desfazer_exclui_despesa_com_origem_explicita(self):
+        from .services import desfazer_conciliacao, lancar_despesa
+        tx = self._tx('-500.00', 'oed-3')
+        despesa = lancar_despesa(tx, categoria='outro', descricao='Reparo')
+        pk_despesa = despesa.pk
+
+        desfazer_conciliacao(tx)
+
+        self.assertFalse(Despesa.objects.filter(pk=pk_despesa).exists())
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'pendente')
+        self.assertIsNone(tx.despesa_id)
+        self.assertFalse(tx.despesa_criada_pela_conciliacao)
+
+    def test_relancar_apos_desfazer_resulta_em_apenas_uma_despesa(self):
+        from .services import desfazer_conciliacao, lancar_despesa
+        tx = self._tx('-500.00', 'oed-4')
+        primeira = lancar_despesa(tx, categoria='outro', descricao='Reparo')
+        desfazer_conciliacao(tx)
+        tx.refresh_from_db()
+        segunda = lancar_despesa(tx, categoria='outro', descricao='Reparo (relançado)')
+
+        self.assertNotEqual(primeira.pk, segunda.pk)
+        self.assertEqual(Despesa.objects.count(), 1)
+        tx.refresh_from_db()
+        self.assertTrue(tx.despesa_criada_pela_conciliacao)
+        self.assertEqual(tx.despesa_id, segunda.pk)
+
+    # 7-8: despesa manual compatível (mesmo valor/data/status), origem False, não é excluída
+    def test_despesa_manual_compativel_nao_e_excluida(self):
+        """
+        O teste crítico desta tarefa: uma despesa lançada MANUALMENTE (não
+        por lancar_despesa()) que coincide em TODOS os critérios que o
+        sistema usava antes como prova indireta — mesmo valor, mesma data,
+        status paga, sem outros vínculos — mas com despesa_criada_pela_
+        conciliacao=False (o padrão) NUNCA é excluída ao desfazer.
+        """
+        from django.db import connection
+        from .services import desfazer_conciliacao, ConciliacaoInvalidaError
+
+        tx = self._tx('-500.00', 'oed-5')
+        despesa_manual = Despesa.objects.create(
+            imovel=self.imovel, categoria='outro', descricao='Despesa lançada manualmente',
+            data_vencimento=date(2026, 3, 12), data_pagamento=date(2026, 3, 12),
+            valor=Decimal('500.00'), status='paga',
+        )
+        # Vincula manualmente (fora de lancar_despesa()) via SQL bruto — o
+        # FK despesa é PROTECT/editável só pelos services normalmente, mas
+        # a vinculação em si (sem passar por lancar_despesa()) é exatamente
+        # o cenário legado/manual que este teste precisa reproduzir.
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE conciliacao_transacaoextrato SET despesa_id = %s, status = 'conciliada' "
+                'WHERE id = %s',
+                [despesa_manual.pk, tx.pk],
+            )
+        tx.refresh_from_db()
+        self.assertEqual(tx.despesa_id, despesa_manual.pk)
+        self.assertFalse(tx.despesa_criada_pela_conciliacao)
+        self.assertEqual(despesa_manual.valor, tx.valor_absoluto)
+        self.assertEqual(despesa_manual.data_pagamento, tx.data)
+        self.assertEqual(despesa_manual.status, 'paga')
+
+        with self.assertRaises(ConciliacaoInvalidaError) as ctx:
+            desfazer_conciliacao(tx)
+        self.assertIn('origem', str(ctx.exception).lower())
+
+        tx.refresh_from_db()
+        despesa_manual.refresh_from_db()
+        self.assertEqual(tx.status, 'conciliada')
+        self.assertEqual(tx.despesa_id, despesa_manual.pk)
+        self.assertTrue(Despesa.objects.filter(pk=despesa_manual.pk).exists())
+
+    # 9: registro legado (despesa preenchida, campo False) é bloqueado
+    def test_registro_legado_sem_origem_e_bloqueado(self):
+        from django.db import connection
+        from .services import desfazer_conciliacao, ConciliacaoInvalidaError
+
+        tx = self._tx('-350.00', 'oed-6')
+        despesa_legada = Despesa.objects.create(
+            categoria='outro', descricao='Despesa de extrato anterior a este controle',
+            data_vencimento=date(2026, 3, 12), data_pagamento=date(2026, 3, 12),
+            valor=Decimal('350.00'), status='paga',
+        )
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE conciliacao_transacaoextrato SET despesa_id = %s, status = 'conciliada' "
+                'WHERE id = %s',
+                [despesa_legada.pk, tx.pk],
+            )
+        tx.refresh_from_db()
+        self.assertFalse(tx.despesa_criada_pela_conciliacao)
+
+        with self.assertRaises(ConciliacaoInvalidaError):
+            desfazer_conciliacao(tx)
+
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'conciliada')
+        self.assertTrue(Despesa.objects.filter(pk=despesa_legada.pk).exists())
+
+    # 10: save() direto tentando marcar a origem é rejeitado
+    def test_save_direto_nao_marca_origem(self):
+        tx = self._tx('-200.00', 'oed-7')
+        tx.despesa_criada_pela_conciliacao = True
+        with self.assertRaises(ValidationError):
+            tx.save()
+        tx.refresh_from_db()
+        self.assertFalse(tx.despesa_criada_pela_conciliacao)
+
+    def test_save_direto_de_registro_ja_marcado_nao_e_bloqueado(self):
+        """Resalvar um campo já True (sem alterar despesa_criada_pela_
+        conciliacao) não deve ser bloqueado — só a TRANSIÇÃO False→True
+        exige o sinalizador privado."""
+        from .services import lancar_despesa
+        tx = self._tx('-200.00', 'oed-7b')
+        lancar_despesa(tx, categoria='outro', descricao='Reparo')
+        tx.refresh_from_db()
+        tx.observacoes = 'nota'
+        tx.save(update_fields=['observacoes'])  # não deve levantar
+        tx.refresh_from_db()
+        self.assertTrue(tx.despesa_criada_pela_conciliacao)
+        self.assertEqual(tx.observacoes, 'nota')
+
+    # 11: QuerySet.update() tentando mudar o campo é rejeitado
+    def test_queryset_update_nao_pode_alterar_origem(self):
+        tx = self._tx('-200.00', 'oed-8')
+        with self.assertRaises(ValidationError):
+            TransacaoExtrato.objects.filter(pk=tx.pk).update(despesa_criada_pela_conciliacao=True)
+        tx.refresh_from_db()
+        self.assertFalse(tx.despesa_criada_pela_conciliacao)
+
+    # 12-13: a CheckConstraint garante coerência no banco
+    def test_constraint_rejeita_true_sem_despesa(self):
+        from django.db import IntegrityError, transaction as db_transaction
+        tx = TransacaoExtrato(
+            extrato=self.extrato, conta=self.conta, fitid='oed-9',
+            data=date(2026, 3, 12), valor=Decimal('-200.00'), tipo='debito',
+            descricao='CONTA', despesa=None, despesa_criada_pela_conciliacao=True,
+        )
+        with self.assertRaises(IntegrityError):
+            with db_transaction.atomic():
+                TransacaoExtrato.objects.bulk_create([tx])
+
+    def test_constraint_rejeita_true_em_transacao_de_credito(self):
+        from django.db import IntegrityError, transaction as db_transaction
+        despesa = Despesa.objects.create(
+            categoria='outro', descricao='Despesa qualquer',
+            data_vencimento=date(2026, 3, 12), data_pagamento=date(2026, 3, 12),
+            valor=Decimal('200.00'), status='paga',
+        )
+        tx = TransacaoExtrato(
+            extrato=self.extrato, conta=self.conta, fitid='oed-10',
+            data=date(2026, 3, 12), valor=Decimal('200.00'), tipo='credito',
+            descricao='PIX', despesa=despesa, despesa_criada_pela_conciliacao=True,
+        )
+        with self.assertRaises(IntegrityError):
+            with db_transaction.atomic():
+                TransacaoExtrato.objects.bulk_create([tx])
+
+    def test_constraint_aceita_false_em_qualquer_situacao(self):
+        """Sanidade: despesa_criada_pela_conciliacao=False nunca viola a
+        constraint, mesmo sem despesa/em crédito — é o estado de todo
+        registro legado."""
+        tx = TransacaoExtrato.objects.create(
+            extrato=self.extrato, conta=self.conta, fitid='oed-11',
+            data=date(2026, 3, 12), valor=Decimal('200.00'), tipo='credito',
+            descricao='PIX', despesa=None,
+        )
+        self.assertFalse(tx.despesa_criada_pela_conciliacao)
+
+
+class MigrationBackfillDespesaCriadaTest(TransactionTestCase):
+    """
+    Item 14: a migration 0007 preenche despesa_criada_pela_conciliacao=
+    False para TODOS os registros existentes — inclusive uma transação
+    ANTIGA que já tem despesa vinculada e seria "compatível" com os
+    critérios indiretos usados antes desta tarefa. Usa TransactionTestCase
+    porque o schema editor do SQLite (via MigrationExecutor) não pode rodar
+    dentro da transação do TestCase comum.
+    """
+
+    def test_migration_backfill_deixa_registros_antigos_como_false(self):
+        from django.db import connection
+        from django.db.migrations.executor import MigrationExecutor
+
+        executor = MigrationExecutor(connection)
+        app = 'conciliacao'
+        estado_anterior = [(app, '0006_transacaoextrato_extrato_protect')]
+        executor.migrate(estado_anterior)
+        executor.loader.build_graph()
+
+        apps_antigos = executor.loader.project_state(estado_anterior).apps
+        ContaBancariaHist = apps_antigos.get_model('conciliacao', 'ContaBancaria')
+        ExtratoImportadoHist = apps_antigos.get_model('conciliacao', 'ExtratoImportado')
+        TransacaoExtratoHist = apps_antigos.get_model('conciliacao', 'TransacaoExtrato')
+        DespesaHist = apps_antigos.get_model('financeiro', 'Despesa')
+
+        conta = ContaBancariaHist.objects.create(nome='Conta Legada Migration')
+        extrato = ExtratoImportadoHist.objects.create(conta=conta, hash_arquivo='hash-legado-migration')
+        despesa = DespesaHist.objects.create(
+            descricao='Despesa legada (pré-campo)', categoria='outro',
+            data_vencimento=date(2020, 1, 1), data_pagamento=date(2020, 1, 1),
+            valor=Decimal('321.00'), status='paga',
+        )
+        transacao_legada = TransacaoExtratoHist.objects.create(
+            extrato=extrato, conta=conta, fitid='legado-migration-1',
+            data=date(2020, 1, 1), valor=Decimal('-321.00'), tipo='debito',
+            descricao='Conta antiga', despesa=despesa, status='conciliada',
+        )
+        pk_transacao = transacao_legada.pk
+        pk_despesa = despesa.pk
+
+        # migra de volta até o estado mais recente (aplica a migration 0007
+        # e as seguintes, se houver)
+        executor.loader.build_graph()
+        alvo_final = executor.loader.graph.leaf_nodes(app)
+        executor.migrate(alvo_final)
+
+        from .models import TransacaoExtrato as TransacaoExtratoAtual
+        atualizada = TransacaoExtratoAtual.objects.get(pk=pk_transacao)
+        self.assertFalse(atualizada.despesa_criada_pela_conciliacao)
+        self.assertEqual(atualizada.despesa_id, pk_despesa)
+        self.assertEqual(atualizada.status, 'conciliada')
+
+
 # ─── FITID por assinatura + conferência rigorosa da conta (rodada 2) ──────────
 
 def _ofx_conta_bruta(corpo_transacoes, bankid='0341', acctid='12345-6', nome='bruto.ofx'):

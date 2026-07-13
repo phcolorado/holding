@@ -513,32 +513,23 @@ def conciliar_com_receitas(transacao, receitas, marcar_comissoes=False, usuario=
     return transacao
 
 
-def _despesa_e_origem_exclusiva_do_debito(despesa, transacao):
+def _despesa_pode_ser_excluida_ao_desfazer(despesa, transacao):
     """
-    Confirma, sob lock, que `despesa` foi criada EXCLUSIVAMENTE por
-    lancar_despesa() a partir de `transacao` e não tem nenhum outro vínculo
-    — única situação em que desfazer_conciliacao() pode excluí-la com
-    segurança, evitando que relançar depois do desfazer duplique a despesa.
-
-    Bloqueia a exclusão automática (retorna False) quando a despesa: foi
-    vinculada manualmente a uma receita; participa de um vínculo de
-    comissão (ConciliacaoComissao); está referenciada por outra transação
-    além desta; ou teve valor/status/data de pagamento divergentes do que
-    lancar_despesa() gravou (o que, com a despesa protegida por
-    despesa_tem_conciliacao_ativa() — item 2 —, só pode significar um
-    estado legado/inconsistente, nunca uma edição legítima).
+    A PROVA de origem é exclusivamente `transacao.despesa_criada_pela_
+    conciliacao` (verificado pelo chamador antes desta função) — nunca mais
+    coincidência de valor/data/status, que demonstra compatibilidade, não
+    comprova origem. Esta função cobre apenas a checagem COMPLEMENTAR:
+    mesmo com a origem confirmada, ainda bloqueia a exclusão automática se
+    a despesa acumulou vínculos financeiros adicionais depois de criada
+    (vinculada manualmente a uma receita, participando de uma comissão, ou
+    referenciada por outra transação) — nesses casos, excluí-la afetaria
+    algo além desta conciliação.
     """
-    if despesa.origem_automatica:
-        return False
     if despesa.receita_id is not None:
         return False
     if despesa.conciliacoes_comissao.exists():
         return False
     if despesa.transacoes_extrato.exclude(pk=transacao.pk).exists():
-        return False
-    if despesa.status != 'paga' or despesa.data_pagamento != transacao.data:
-        return False
-    if despesa.valor != transacao.valor_absoluto:
         return False
     return True
 
@@ -558,13 +549,14 @@ def desfazer_conciliacao(transacao):
     Débito: lancar_despesa() CRIA uma Despesa nova a cada lançamento — se o
     desfazer apenas desvinculasse essa despesa (deixando-a "paga" e
     existindo), o usuário poderia relançar o mesmo débito e duplicar a
-    despesa. Por isso, sob lock, confirma que a despesa foi criada
-    exclusivamente por esta transação (_despesa_e_origem_exclusiva_do_
-    debito) e a EXCLUI junto com o vínculo. Se a despesa foi vinculada
-    manualmente, tem outros vínculos, ou foi alterada de forma que quebre
-    essa garantia de origem, o desfazer automático é bloqueado com uma
-    mensagem clara — exige revisão manual (editar/excluir a despesa pelo
-    Admin antes de tentar novamente).
+    despesa. A PROVA de origem é exclusivamente o campo explícito
+    `despesa_criada_pela_conciliacao` (nunca mais inferida por valor, data,
+    descrição ou status, que só demonstram compatibilidade, não origem):
+    quando True, exclui a despesa junto com o vínculo (após confirmar que
+    não surgiram vínculos financeiros adicionais); quando False — despesa
+    vinculada manualmente ou registro legado anterior a este controle —
+    bloqueia o desfazer automático sem alterar nada, exigindo revisão
+    manual (editar/excluir a despesa pelo Admin antes de tentar novamente).
 
     Registrada no histórico da transação e, para débitos, também no
     histórico da despesa excluída (simple-history).
@@ -574,14 +566,20 @@ def desfazer_conciliacao(transacao):
         raise ConciliacaoInvalidaError('Só é possível desfazer transações conciliadas.')
 
     if transacao.despesa_id:
-        despesa = Despesa.objects.select_for_update().get(pk=transacao.despesa_id)
-        if not _despesa_e_origem_exclusiva_do_debito(despesa, transacao):
+        if not transacao.despesa_criada_pela_conciliacao:
             raise ConciliacaoInvalidaError(
-                'Não é possível confirmar com segurança que esta despesa foi criada '
-                'exclusivamente por este lançamento (ela pode ter sido vinculada '
-                'manualmente, ter outros vínculos financeiros, ou ter sido alterada) — '
-                'a exclusão automática foi bloqueada. Revisão manual necessária: trate a '
-                'despesa pelo Admin de Despesas antes de desfazer esta conciliação.'
+                'A origem desta despesa não está comprovada (ela pode ter sido vinculada '
+                'manualmente, ou é um registro anterior a este controle) — a exclusão '
+                'automática foi bloqueada. Revisão manual necessária: trate a despesa pelo '
+                'Admin de Despesas antes de desfazer esta conciliação.'
+            )
+        despesa = Despesa.objects.select_for_update().get(pk=transacao.despesa_id)
+        if not _despesa_pode_ser_excluida_ao_desfazer(despesa, transacao):
+            raise ConciliacaoInvalidaError(
+                'Esta despesa acumulou vínculo(s) financeiro(s) adicional(is) (receita ou '
+                'comissão vinculada, ou outra transação) que tornam a exclusão automática '
+                'insegura. Revisão manual necessária: trate a despesa pelo Admin de Despesas '
+                'antes de desfazer esta conciliação.'
             )
         # Desvincula ANTES de excluir: Despesa.delete() consulta
         # despesa_tem_conciliacao_ativa() (que olha transacoes_extrato com
@@ -589,7 +587,8 @@ def desfazer_conciliacao(transacao):
         # existisse no momento do delete() abaixo.
         transacao.despesa = None
         transacao.status = 'pendente'
-        transacao.save(update_fields=['despesa', 'status'])
+        transacao.despesa_criada_pela_conciliacao = False
+        transacao.save(update_fields=['despesa', 'status', 'despesa_criada_pela_conciliacao'])
         despesa.delete()
         return transacao
 
@@ -644,7 +643,18 @@ def desfazer_conciliacao(transacao):
 
 @transaction.atomic
 def lancar_despesa(transacao, categoria, descricao, fornecedor=None, imovel=None):
-    """Cria uma Despesa paga a partir de um débito do extrato e vincula à transação."""
+    """
+    Cria uma Despesa paga a partir de um débito do extrato e vincula à
+    transação — tudo dentro da mesma transação atômica: se algo falhar no
+    meio, nada fica parcialmente alterado (nem a despesa criada, nem o
+    vínculo, nem o status).
+
+    Marca despesa_criada_pela_conciliacao=True: única prova de origem
+    aceita por desfazer_conciliacao() para excluir automaticamente esta
+    despesa depois — setada via o sinalizador privado
+    _marcando_origem_despesa (TransacaoExtrato.save() rejeitaria a
+    transição False→True sem ele).
+    """
     transacao = TransacaoExtrato.objects.select_for_update().get(pk=transacao.pk)
     if transacao.status != 'pendente':
         raise ConciliacaoInvalidaError('Esta transação já foi tratada (não está pendente).')
@@ -665,7 +675,9 @@ def lancar_despesa(transacao, categoria, descricao, fornecedor=None, imovel=None
     )
     transacao.despesa = despesa
     transacao.status = 'conciliada'
-    transacao.save(update_fields=['despesa', 'status'])
+    transacao.despesa_criada_pela_conciliacao = True
+    transacao._marcando_origem_despesa = True
+    transacao.save(update_fields=['despesa', 'status', 'despesa_criada_pela_conciliacao'])
     return despesa
 
 
