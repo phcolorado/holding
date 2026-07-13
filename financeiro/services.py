@@ -25,6 +25,16 @@ def _registrar_recebimento_core(receita, valor, data_recebimento, usuario, orige
         transacao_extrato=transacao_extrato, origem=origem,
         observacoes=observacoes, criado_por=usuario,
     )
+    # Autoria explícita no histórico (django-simple-history): criado_por já
+    # registrava o autor como CAMPO do model, mas o autor do REGISTRO
+    # histórico (history_user) ficava None quando o service roda fora de uma
+    # requisição HTTP (script, shell, comando, conciliação chamada
+    # diretamente) — o middleware não tem request.user para capturar. Setar
+    # _history_user antes do save() (mesmo padrão de atualizar_recebimentos_
+    # da_receita) preenche o autor no histórico da CRIAÇÃO. Sem usuário,
+    # nada é setado (o middleware, quando houver, continua no controle).
+    if usuario is not None:
+        recebimento._history_user = usuario
     # full_clean() reaplica as regras do model (valor>0, valor<=saldo) sem
     # duplicá-las aqui — fonte única em RecebimentoReceita.clean().
     recebimento.full_clean()

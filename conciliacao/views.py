@@ -223,6 +223,7 @@ def conciliar_extrato(request, pk):
                         descricao=form.cleaned_data['descricao'],
                         fornecedor=form.cleaned_data['fornecedor'],
                         imovel=form.cleaned_data['imovel'],
+                        usuario=request.user,
                     )
                 except ConciliacaoInvalidaError as exc:
                     messages.error(request, str(exc))
@@ -234,7 +235,7 @@ def conciliar_extrato(request, pk):
 
         elif action == 'desfazer':
             try:
-                resultado = desfazer_conciliacao(transacao)
+                resultado = desfazer_conciliacao(transacao, usuario=request.user)
             except ConciliacaoInvalidaError as exc:
                 messages.error(request, str(exc))
             else:
@@ -250,12 +251,17 @@ def conciliar_extrato(request, pk):
                     )
 
         elif action == 'ignorar' and transacao.status == 'pendente':
+            # Ignorar/reabrir alteram a transação diretamente na view (não há
+            # service) — propaga o autor explicitamente ao histórico, sem
+            # depender só do HistoryRequestMiddleware.
             transacao.status = 'ignorada'
+            transacao._history_user = request.user
             transacao.save(update_fields=['status'])
             messages.info(request, 'Transação marcada como ignorada.')
 
         elif action == 'reabrir' and transacao.status == 'ignorada':
             transacao.status = 'pendente'
+            transacao._history_user = request.user
             transacao.save(update_fields=['status'])
             messages.info(request, 'Transação reaberta.')
 

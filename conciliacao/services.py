@@ -501,6 +501,14 @@ def conciliar_com_receitas(transacao, receitas, marcar_comissoes=False, usuario=
         for comissao in comissoes:
             comissao.status = 'paga'
             comissao.data_pagamento = transacao.data
+            # Autoria explícita no histórico (django-simple-history): quando
+            # o service é chamado fora de uma requisição HTTP (script, shell,
+            # comando, teste), o middleware não tem request.user para capturar
+            # — _history_user propaga o autor manualmente. Sem usuário, o
+            # fluxo segue normal (não inventa autor). ConciliacaoComissao não
+            # tem HistoricalRecords, então não recebe _history_user.
+            if usuario is not None:
+                comissao._history_user = usuario
             comissao.save(update_fields=['status', 'data_pagamento'])
             # Vínculo explícito: ao desfazer, SOMENTE estas despesas reabrem.
             ConciliacaoComissao.objects.create(
@@ -509,6 +517,8 @@ def conciliar_com_receitas(transacao, receitas, marcar_comissoes=False, usuario=
         transacao.comissoes_marcadas = True
 
     transacao.status = 'conciliada'
+    if usuario is not None:
+        transacao._history_user = usuario
     transacao.save(update_fields=['status', 'comissoes_marcadas'])
     return transacao
 
@@ -535,7 +545,7 @@ def _despesa_pode_ser_excluida_ao_desfazer(despesa, transacao):
 
 
 @transaction.atomic
-def desfazer_conciliacao(transacao):
+def desfazer_conciliacao(transacao, usuario=None):
     """
     Desfaz a conciliação de uma transação — crédito e débito NUNCA
     compartilham o mesmo tratamento: crédito desfaz VÍNCULOS (o dinheiro
@@ -559,7 +569,12 @@ def desfazer_conciliacao(transacao):
     manual (editar/excluir a despesa pelo Admin antes de tentar novamente).
 
     Registrada no histórico da transação e, para débitos, também no
-    histórico da despesa excluída (simple-history).
+    histórico da despesa excluída (simple-history). Quando `usuario` é
+    informado, ele é propagado como autor (_history_user) a cada save/delete
+    de model com HistoricalRecords tocado pela operação — necessário fora de
+    uma requisição HTTP (script, shell, comando, teste), onde o middleware
+    não tem request.user. Sem usuário, o fluxo segue normal (não inventa
+    autor).
     """
     transacao = TransacaoExtrato.objects.select_for_update().get(pk=transacao.pk)
     if transacao.status != 'conciliada':
@@ -594,10 +609,14 @@ def desfazer_conciliacao(transacao):
         transacao.status = 'pendente'
         transacao.despesa_criada_pela_conciliacao = False
         transacao._alterando_origem_despesa_via_service = True
+        if usuario is not None:
+            transacao._history_user = usuario
         try:
             transacao.save(update_fields=['despesa', 'status', 'despesa_criada_pela_conciliacao'])
         finally:
             del transacao._alterando_origem_despesa_via_service
+        if usuario is not None:
+            despesa._history_user = usuario
         despesa.delete()
         return transacao
 
@@ -616,6 +635,8 @@ def desfazer_conciliacao(transacao):
                 vinculo.delete()
                 despesa.status = 'prevista'
                 despesa.data_pagamento = None
+                if usuario is not None:
+                    despesa._history_user = usuario
                 despesa.save(update_fields=['status', 'data_pagamento'])
         else:
             # Conciliação antiga, anterior ao vínculo explícito: não é possível
@@ -641,17 +662,21 @@ def desfazer_conciliacao(transacao):
 
     # delete() individual para disparar o recálculo consolidado de cada receita
     for recebimento in list(RecebimentoReceita.objects.filter(transacao_extrato=transacao)):
+        if usuario is not None:
+            recebimento._history_user = usuario
         recebimento.delete()
 
     transacao.itens_receita.all().delete()
     transacao.comissoes_marcadas = False
     transacao.status = 'pendente'
+    if usuario is not None:
+        transacao._history_user = usuario
     transacao.save(update_fields=['status', 'comissoes_marcadas'])
     return transacao
 
 
 @transaction.atomic
-def lancar_despesa(transacao, categoria, descricao, fornecedor=None, imovel=None):
+def lancar_despesa(transacao, categoria, descricao, fornecedor=None, imovel=None, usuario=None):
     """
     Cria uma Despesa paga a partir de um débito do extrato e vincula à
     transação — tudo dentro da mesma transação atômica: se algo falhar no
@@ -663,6 +688,13 @@ def lancar_despesa(transacao, categoria, descricao, fornecedor=None, imovel=None
     despesa depois — setada via o sinalizador privado
     _marcando_origem_despesa (TransacaoExtrato.save() rejeitaria a
     transição False→True sem ele).
+
+    Quando `usuario` é informado, ele é propagado como autor (_history_user)
+    ao PRIMEIRO histórico da despesa (criação) e ao histórico da alteração
+    da transação — por isso a despesa é instanciada e salva explicitamente
+    (não por objects.create()), para setar _history_user antes do save que
+    gera o histórico. Fora de uma requisição HTTP o middleware não tem
+    request.user; sem usuário o fluxo segue normal (não inventa autor).
     """
     transacao = TransacaoExtrato.objects.select_for_update().get(pk=transacao.pk)
     if transacao.status != 'pendente':
@@ -670,7 +702,7 @@ def lancar_despesa(transacao, categoria, descricao, fornecedor=None, imovel=None
     if transacao.tipo != 'debito':
         raise ConciliacaoInvalidaError('Apenas débitos podem virar despesas.')
 
-    despesa = Despesa.objects.create(
+    despesa = Despesa(
         imovel=imovel,
         fornecedor=fornecedor,
         categoria=categoria,
@@ -682,10 +714,15 @@ def lancar_despesa(transacao, categoria, descricao, fornecedor=None, imovel=None
         valor=transacao.valor_absoluto,
         status='paga',
     )
+    if usuario is not None:
+        despesa._history_user = usuario
+    despesa.save()
     transacao.despesa = despesa
     transacao.status = 'conciliada'
     transacao.despesa_criada_pela_conciliacao = True
     transacao._marcando_origem_despesa = True
+    if usuario is not None:
+        transacao._history_user = usuario
     transacao.save(update_fields=['despesa', 'status', 'despesa_criada_pela_conciliacao'])
     return despesa
 

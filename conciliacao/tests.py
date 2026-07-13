@@ -3125,3 +3125,254 @@ class MatrizPermissoesTemplateTest(TestCase):
         # matriz de débito (change_transacaoextrato + delete_despesa) → botão
         html = self._get(self._cliente('mpt27b', 'change_transacaoextrato', 'delete_despesa')).content.decode()
         self.assertIn('value="desfazer"', html)
+
+
+# ─── Autoria explícita no histórico das operações de conciliação (esta tarefa) ──
+
+@override_settings(MEDIA_ROOT=MEDIA_TEMP)
+class AutoriaHistoricoConciliacaoTest(TestCase):
+    """
+    Os services de conciliação propagam `usuario` como autor (_history_user)
+    a todos os registros históricos (django-simple-history) que modificam —
+    funciona fora de uma requisição HTTP (aqui os services são chamados
+    diretamente). Verifica os registros históricos (history_type/history_user/
+    estado), não só o estado atual dos objetos.
+    """
+    def setUp(self):
+        self.conta = ContaBancaria.objects.create(nome='Conta AHC')
+        self.extrato = ExtratoImportado.objects.create(conta=self.conta, hash_arquivo='hahc')
+        self.imovel, self.locatario = _base()
+        self.contrato = _contrato(self.imovel, self.locatario)
+        self.user = User.objects.create_user('ahc_user', password='pass')
+
+    def _tx_credito(self, fitid='ahc-c', valor='2000.00'):
+        return TransacaoExtrato.objects.create(
+            extrato=self.extrato, conta=self.conta, fitid=fitid,
+            data=date(2026, 3, 12), valor=Decimal(valor), tipo='credito', descricao='PIX',
+        )
+
+    def _tx_debito(self, fitid='ahc-d', valor='-350.00'):
+        return TransacaoExtrato.objects.create(
+            extrato=self.extrato, conta=self.conta, fitid=fitid,
+            data=date(2026, 3, 12), valor=Decimal(valor), tipo='debito', descricao='CEMIG',
+        )
+
+    def _hist_tx_mudanca_para(self, tx_pk, status):
+        from .models import HistoricalTransacaoExtrato
+        return (
+            HistoricalTransacaoExtrato.objects
+            .filter(id=tx_pk, history_type='~', status=status)
+            .order_by('history_date').last()
+        )
+
+    # 1 + 2: lançar débito registra o usuário na criação da despesa e na alteração da transação
+    def test_lancar_despesa_registra_usuario_na_criacao_da_despesa(self):
+        from financeiro.models import HistoricalDespesa
+        from .services import lancar_despesa
+        tx = self._tx_debito('ahc-1')
+        despesa = lancar_despesa(tx, categoria='outro', descricao='Energia', usuario=self.user)
+        h = HistoricalDespesa.objects.get(id=despesa.pk, history_type='+')
+        self.assertEqual(h.history_user_id, self.user.pk)
+        self.assertEqual(h.status, 'paga')
+
+    def test_lancar_despesa_registra_usuario_na_alteracao_da_transacao(self):
+        from .services import lancar_despesa
+        tx = self._tx_debito('ahc-2')
+        lancar_despesa(tx, categoria='outro', descricao='Energia', usuario=self.user)
+        h = self._hist_tx_mudanca_para(tx.pk, 'conciliada')
+        self.assertIsNotNone(h)
+        self.assertEqual(h.history_user_id, self.user.pk)
+
+    # 3 + 4: desfazer débito registra o usuário na exclusão da despesa e na alteração da transação
+    def test_desfazer_debito_registra_usuario_na_exclusao_da_despesa(self):
+        from financeiro.models import HistoricalDespesa
+        from .services import lancar_despesa, desfazer_conciliacao
+        tx = self._tx_debito('ahc-3')
+        despesa = lancar_despesa(tx, categoria='outro', descricao='Energia')
+        desfazer_conciliacao(tx, usuario=self.user)
+        h = HistoricalDespesa.objects.get(id=despesa.pk, history_type='-')
+        self.assertEqual(h.history_user_id, self.user.pk)
+
+    def test_desfazer_debito_registra_usuario_na_alteracao_da_transacao(self):
+        from .services import lancar_despesa, desfazer_conciliacao
+        tx = self._tx_debito('ahc-4')
+        lancar_despesa(tx, categoria='outro', descricao='Energia')
+        desfazer_conciliacao(tx, usuario=self.user)
+        h = self._hist_tx_mudanca_para(tx.pk, 'pendente')
+        self.assertIsNotNone(h)
+        self.assertEqual(h.history_user_id, self.user.pk)
+
+    # 5 + 6: conciliar crédito registra o usuário na transação e no recebimento criado
+    def test_conciliar_credito_registra_usuario_na_transacao(self):
+        receita = _receita(self.contrato, date(2026, 3, 10), Decimal('2000.00'))
+        tx = self._tx_credito('ahc-5')
+        conciliar_com_receitas(tx, [receita], usuario=self.user)
+        h = self._hist_tx_mudanca_para(tx.pk, 'conciliada')
+        self.assertIsNotNone(h)
+        self.assertEqual(h.history_user_id, self.user.pk)
+
+    def test_conciliar_credito_registra_usuario_no_recebimento(self):
+        from financeiro.models import RecebimentoReceita, HistoricalRecebimentoReceita
+        receita = _receita(self.contrato, date(2026, 3, 10), Decimal('2000.00'))
+        tx = self._tx_credito('ahc-6')
+        conciliar_com_receitas(tx, [receita], usuario=self.user)
+        rec = RecebimentoReceita.objects.get(receita=receita, transacao_extrato=tx)
+        h = HistoricalRecebimentoReceita.objects.get(id=rec.pk, history_type='+')
+        self.assertEqual(h.history_user_id, self.user.pk)
+
+    # 7: conciliar com comissões registra o usuário na alteração da comissão para paga
+    def test_conciliar_com_comissoes_registra_usuario_na_comissao(self):
+        from financeiro.models import HistoricalDespesa
+        tx, receita, comissao = _gerar_repasse_liquido(
+            self.conta, self.extrato, self.locatario, 'ahc-7', 'Sala AHC7',
+        )
+        conciliar_com_receitas(tx, [receita], marcar_comissoes=True, usuario=self.user)
+        h = (
+            HistoricalDespesa.objects
+            .filter(id=comissao.pk, history_type='~', status='paga')
+            .order_by('history_date').last()
+        )
+        self.assertIsNotNone(h)
+        self.assertEqual(h.history_user_id, self.user.pk)
+
+    # 8: desfazer crédito registra o usuário na exclusão do recebimento
+    def test_desfazer_credito_registra_usuario_na_exclusao_do_recebimento(self):
+        from financeiro.models import RecebimentoReceita, HistoricalRecebimentoReceita
+        from .services import desfazer_conciliacao
+        receita = _receita(self.contrato, date(2026, 3, 10), Decimal('2000.00'))
+        tx = self._tx_credito('ahc-8')
+        conciliar_com_receitas(tx, [receita])
+        rec_pk = RecebimentoReceita.objects.get(receita=receita, transacao_extrato=tx).pk
+        desfazer_conciliacao(tx, usuario=self.user)
+        h = HistoricalRecebimentoReceita.objects.get(id=rec_pk, history_type='-')
+        self.assertEqual(h.history_user_id, self.user.pk)
+
+    # 9 + 10: desfazer crédito com comissões registra o usuário na comissão reaberta e na transação
+    def test_desfazer_credito_com_comissoes_registra_usuario_na_reabertura(self):
+        from financeiro.models import HistoricalDespesa
+        from .services import desfazer_conciliacao
+        tx, receita, comissao = _gerar_repasse_liquido(
+            self.conta, self.extrato, self.locatario, 'ahc-9', 'Sala AHC9',
+        )
+        conciliar_com_receitas(tx, [receita], marcar_comissoes=True)
+        desfazer_conciliacao(tx, usuario=self.user)
+        h = (
+            HistoricalDespesa.objects
+            .filter(id=comissao.pk, history_type='~', status='prevista')
+            .order_by('history_date').last()
+        )
+        self.assertIsNotNone(h)
+        self.assertEqual(h.history_user_id, self.user.pk)
+
+    def test_desfazer_credito_registra_usuario_na_transacao(self):
+        from .services import desfazer_conciliacao
+        receita = _receita(self.contrato, date(2026, 3, 10), Decimal('2000.00'))
+        tx = self._tx_credito('ahc-10')
+        conciliar_com_receitas(tx, [receita])
+        desfazer_conciliacao(tx, usuario=self.user)
+        h = self._hist_tx_mudanca_para(tx.pk, 'pendente')
+        self.assertIsNotNone(h)
+        self.assertEqual(h.history_user_id, self.user.pk)
+
+    # 15: services com usuario=None continuam funcionando e não atribuem autor incorreto
+    def test_services_com_usuario_none_nao_atribuem_autor(self):
+        from financeiro.models import HistoricalDespesa
+        from .services import lancar_despesa, desfazer_conciliacao
+        tx = self._tx_debito('ahc-15')
+        despesa = lancar_despesa(tx, categoria='outro', descricao='Energia')  # sem usuario
+        h_criacao = HistoricalDespesa.objects.get(id=despesa.pk, history_type='+')
+        self.assertIsNone(h_criacao.history_user_id)
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'conciliada')
+
+        despesa_pk = despesa.pk
+        desfazer_conciliacao(tx)  # sem usuario
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'pendente')
+        h_exclusao = HistoricalDespesa.objects.get(id=despesa_pk, history_type='-')
+        self.assertIsNone(h_exclusao.history_user_id)
+
+
+@override_settings(MEDIA_ROOT=MEDIA_TEMP)
+class AutoriaHistoricoConciliacaoPostTest(TestCase):
+    """
+    POSTs reais na tela de conciliação propagam request.user ao histórico
+    (via os services / _history_user direto na view), não dependendo só do
+    HistoryRequestMiddleware.
+    """
+    def setUp(self):
+        self.conta = ContaBancaria.objects.create(nome='Conta AHCP')
+        self.extrato = ExtratoImportado.objects.create(conta=self.conta, hash_arquivo='hahcp')
+        self.imovel, self.locatario = _base()
+        self.contrato = _contrato(self.imovel, self.locatario)
+        # usuário com a matriz completa das ações exercitadas
+        self.user = User.objects.create_user('ahcp_user', password='pass')
+        self.user.user_permissions.add(*Permission.objects.filter(codename__in=[
+            'view_extratoimportado', 'change_transacaoextrato',
+            'add_despesa', 'delete_despesa',
+        ]))
+        self.client = Client()
+        self.client.login(username='ahcp_user', password='pass')
+
+    def _post(self, transacao, action, **extra):
+        dados = {'transacao_id': transacao.pk, 'action': action}
+        dados.update(extra)
+        return self.client.post(reverse('conciliar_extrato', args=[self.extrato.pk]), dados)
+
+    def _tx_debito(self, fitid, valor='-350.00'):
+        return TransacaoExtrato.objects.create(
+            extrato=self.extrato, conta=self.conta, fitid=fitid,
+            data=date(2026, 3, 12), valor=Decimal(valor), tipo='debito', descricao='CEMIG',
+        )
+
+    def _hist_tx_mudanca_para(self, tx_pk, status):
+        from .models import HistoricalTransacaoExtrato
+        return (
+            HistoricalTransacaoExtrato.objects
+            .filter(id=tx_pk, history_type='~', status=status)
+            .order_by('history_date').last()
+        )
+
+    # 11: POST real de lançar despesa usa request.user
+    def test_post_lancar_despesa_usa_request_user(self):
+        from financeiro.models import Despesa, HistoricalDespesa
+        tx = self._tx_debito('ahcp-11')
+        resposta = self._post(tx, 'lancar_despesa', categoria='outro', descricao='Energia')
+        self.assertEqual(resposta.status_code, 302)
+        despesa = Despesa.objects.get()
+        h = HistoricalDespesa.objects.get(id=despesa.pk, history_type='+')
+        self.assertEqual(h.history_user_id, self.user.pk)
+
+    # 12: POST real de desfazer débito usa request.user
+    def test_post_desfazer_debito_usa_request_user(self):
+        from financeiro.models import HistoricalDespesa
+        from .services import lancar_despesa
+        tx = self._tx_debito('ahcp-12')
+        despesa = lancar_despesa(tx, categoria='outro', descricao='Energia')  # sem autor
+        resposta = self._post(tx, 'desfazer')
+        self.assertEqual(resposta.status_code, 302)
+        h_del = HistoricalDespesa.objects.get(id=despesa.pk, history_type='-')
+        self.assertEqual(h_del.history_user_id, self.user.pk)
+        h_tx = self._hist_tx_mudanca_para(tx.pk, 'pendente')
+        self.assertIsNotNone(h_tx)
+        self.assertEqual(h_tx.history_user_id, self.user.pk)
+
+    # 13: POST real de ignorar registra request.user
+    def test_post_ignorar_usa_request_user(self):
+        tx = self._tx_debito('ahcp-13', valor='-10.00')
+        resposta = self._post(tx, 'ignorar')
+        self.assertEqual(resposta.status_code, 302)
+        h = self._hist_tx_mudanca_para(tx.pk, 'ignorada')
+        self.assertIsNotNone(h)
+        self.assertEqual(h.history_user_id, self.user.pk)
+
+    # 14: POST real de reabrir registra request.user
+    def test_post_reabrir_usa_request_user(self):
+        tx = self._tx_debito('ahcp-14', valor='-10.00')
+        tx.status = 'ignorada'
+        tx.save(update_fields=['status'])
+        resposta = self._post(tx, 'reabrir')
+        self.assertEqual(resposta.status_code, 302)
+        h = self._hist_tx_mudanca_para(tx.pk, 'pendente')
+        self.assertIsNotNone(h)
+        self.assertEqual(h.history_user_id, self.user.pk)
