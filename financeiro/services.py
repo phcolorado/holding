@@ -33,8 +33,13 @@ def _registrar_recebimento_core(receita, valor, data_recebimento, usuario, orige
     # _history_user antes do save() (mesmo padrão de atualizar_recebimentos_
     # da_receita) preenche o autor no histórico da CRIAÇÃO. Sem usuário,
     # nada é setado (o middleware, quando houver, continua no controle).
+    #
+    # _receita_history_user propaga o mesmo autor à reconsolidação da
+    # ReceitaAluguel (e a um eventual recebimento legado materializado) que
+    # o save() abaixo dispara — ver RecebimentoReceita.save().
     if usuario is not None:
         recebimento._history_user = usuario
+        recebimento._receita_history_user = usuario
     # full_clean() reaplica as regras do model (valor>0, valor<=saldo) sem
     # duplicá-las aqui — fonte única em RecebimentoReceita.clean().
     recebimento.full_clean()

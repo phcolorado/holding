@@ -221,10 +221,15 @@ class ReceitaAluguel(models.Model):
             )
             legado._eh_legado = True
             if usuario is not None:
+                # _history_user: autor do histórico do PRÓPRIO recebimento
+                # legado materializado. _receita_history_user: autor do
+                # histórico da reconsolidação da receita que o save() deste
+                # legado dispara (ver RecebimentoReceita.save()).
                 legado._history_user = usuario
+                legado._receita_history_user = usuario
             legado.save()
 
-    def recalcular_recebimentos(self, preservar_legado=True):
+    def recalcular_recebimentos(self, preservar_legado=True, usuario=None):
         """
         Reconsolida valor_recebido/data_recebimento a partir dos
         RecebimentoReceita vinculados (fonte oficial dos pagamentos) —
@@ -246,6 +251,13 @@ class ReceitaAluguel(models.Model):
         consolidação já era derivada dos recebimentos e deve refletir a
         exclusão (zerar) — mesmo que a receita esteja cancelada, para nunca
         deixar um valor "fantasma" reaparecer ao reabrir.
+
+        `usuario`, quando informado, é registrado como autor (_history_user)
+        do histórico (django-simple-history) gerado por cada self.save()
+        deste método — necessário fora de uma requisição HTTP (script, shell,
+        conciliação chamada diretamente), onde o middleware não tem
+        request.user. Vale para TODOS os caminhos, inclusive receita
+        cancelada. Sem usuário, nenhum autor é atribuído artificialmente.
         """
         agregados = self.recebimentos.aggregate(
             total=models.Sum('valor'), ultima=models.Max('data_recebimento')
@@ -267,6 +279,8 @@ class ReceitaAluguel(models.Model):
 
         if self.status == 'cancelado':
             if campos:
+                if usuario is not None:
+                    self._history_user = usuario
                 self.save(update_fields=campos)
             return
 
@@ -276,6 +290,8 @@ class ReceitaAluguel(models.Model):
             self.status = 'parcial'
         else:
             self.status = 'atrasado' if self.data_vencimento < timezone.localdate() else 'previsto'
+        if usuario is not None:
+            self._history_user = usuario
         self.save(update_fields=campos + ['status'])
 
     def cancelar(self):
@@ -404,10 +420,15 @@ class RecebimentoReceita(models.Model):
                 })
 
     def save(self, *args, **kwargs):
+        # Autor a propagar para o histórico da ReceitaAluguel reconsolidada
+        # (e de eventual recebimento legado materializado) — atributo
+        # privado/temporário, nunca campo persistido. Setado pelos services
+        # (_registrar_recebimento_core) antes do save(); ausente = None.
+        usuario = getattr(self, '_receita_history_user', None)
         # Antes do primeiro recebimento novo, preserva o consolidado legado
         # (valor_recebido sem recebimentos) como recebimento histórico.
         if self._state.adding and self.receita_id and not getattr(self, '_eh_legado', False):
-            self.receita.garantir_recebimento_legado()
+            self.receita.garantir_recebimento_legado(usuario=usuario)
         super().save(*args, **kwargs)
         if getattr(self, '_pular_recalculo_receita', False):
             # Usado SOMENTE por financeiro.services.atualizar_recebimentos_da_
@@ -421,10 +442,11 @@ class RecebimentoReceita(models.Model):
         # por outro objeto Python apontando para a mesma linha dentro da
         # mesma requisição/transação) — o recálculo precisa sempre do status
         # e dos valores REALMENTE persistidos.
-        ReceitaAluguel.objects.get(pk=self.receita_id).recalcular_recebimentos()
+        ReceitaAluguel.objects.get(pk=self.receita_id).recalcular_recebimentos(usuario=usuario)
 
     def delete(self, *args, **kwargs):
         receita_id = self.receita_id
+        usuario = getattr(self, '_receita_history_user', None)
         pular_recalculo = getattr(self, '_pular_recalculo_receita', False)
         super().delete(*args, **kwargs)
         if pular_recalculo:
@@ -433,7 +455,9 @@ class RecebimentoReceita(models.Model):
         # consolidado deve zerar (a exclusão é uma decisão explícita), e não
         # ser confundido com um valor legado não materializado. Recarrega a
         # receita do banco pelo mesmo motivo do save() acima.
-        ReceitaAluguel.objects.get(pk=receita_id).recalcular_recebimentos(preservar_legado=False)
+        ReceitaAluguel.objects.get(pk=receita_id).recalcular_recebimentos(
+            preservar_legado=False, usuario=usuario,
+        )
 
 
 class ReceitaAluguelItem(models.Model):

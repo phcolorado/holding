@@ -663,7 +663,11 @@ def desfazer_conciliacao(transacao, usuario=None):
     # delete() individual para disparar o recálculo consolidado de cada receita
     for recebimento in list(RecebimentoReceita.objects.filter(transacao_extrato=transacao)):
         if usuario is not None:
+            # _history_user: autor da exclusão do recebimento.
+            # _receita_history_user: autor da reconsolidação da receita
+            # disparada por RecebimentoReceita.delete().
             recebimento._history_user = usuario
+            recebimento._receita_history_user = usuario
         recebimento.delete()
 
     transacao.itens_receita.all().delete()

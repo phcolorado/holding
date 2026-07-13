@@ -3376,3 +3376,166 @@ class AutoriaHistoricoConciliacaoPostTest(TestCase):
         h = self._hist_tx_mudanca_para(tx.pk, 'pendente')
         self.assertIsNotNone(h)
         self.assertEqual(h.history_user_id, self.user.pk)
+
+
+# ─── Autoria no histórico da ReceitaAluguel reconsolidada (esta tarefa) ────────
+
+@override_settings(MEDIA_ROOT=MEDIA_TEMP)
+class AutoriaHistoricoReceitaReconsolidadaTest(TestCase):
+    """
+    A reconsolidação de ReceitaAluguel (recalcular_recebimentos), disparada
+    ao criar/excluir RecebimentoReceita pela conciliação, propaga o `usuario`
+    da operação como autor (_history_user) do histórico da receita — e do
+    recebimento legado eventualmente materializado. Fora de HTTP (services
+    chamados diretamente), o middleware não teria request.user.
+    """
+    def setUp(self):
+        self.conta = ContaBancaria.objects.create(nome='Conta ARR')
+        self.extrato = ExtratoImportado.objects.create(conta=self.conta, hash_arquivo='harr')
+        self.imovel, self.locatario = _base()
+        self.contrato = _contrato(self.imovel, self.locatario)
+        self.user = User.objects.create_user('arr_user', password='pass')
+
+    def _tx_credito(self, fitid='arr-c', valor='2000.00'):
+        return TransacaoExtrato.objects.create(
+            extrato=self.extrato, conta=self.conta, fitid=fitid,
+            data=date(2026, 3, 12), valor=Decimal(valor), tipo='credito', descricao='PIX',
+        )
+
+    def _hist_receita(self, receita_pk, **filtros):
+        from financeiro.models import HistoricalReceitaAluguel
+        return (
+            HistoricalReceitaAluguel.objects
+            .filter(id=receita_pk, history_type='~', **filtros)
+            .order_by('history_date').last()
+        )
+
+    # 1: conciliar crédito registra o usuário no histórico da receita (→recebida)
+    def test_conciliar_credito_registra_usuario_no_historico_da_receita(self):
+        receita = _receita(self.contrato, date(2026, 3, 10), Decimal('2000.00'))
+        tx = self._tx_credito('arr-1')
+        conciliar_com_receitas(tx, [receita], usuario=self.user)
+        h = self._hist_receita(receita.pk, status='recebido', valor_recebido=Decimal('2000.00'))
+        self.assertIsNotNone(h)
+        self.assertEqual(h.history_user_id, self.user.pk)
+
+    # 2: desfazer crédito registra o usuário no histórico da receita (→prevista/atrasada)
+    def test_desfazer_credito_registra_usuario_no_historico_da_receita(self):
+        from .services import desfazer_conciliacao
+        receita = _receita(self.contrato, date(2026, 3, 10), Decimal('2000.00'))
+        tx = self._tx_credito('arr-2')
+        conciliar_com_receitas(tx, [receita])
+        desfazer_conciliacao(tx, usuario=self.user)
+        h = self._hist_receita(receita.pk, valor_recebido__isnull=True)
+        self.assertIsNotNone(h)
+        self.assertIn(h.status, ('previsto', 'atrasado'))
+        self.assertEqual(h.history_user_id, self.user.pk)
+
+    # 3 + 4: criação e exclusão do recebimento continuam com o mesmo usuário
+    def test_criacao_e_exclusao_do_recebimento_mantem_usuario(self):
+        from financeiro.models import RecebimentoReceita, HistoricalRecebimentoReceita
+        from .services import desfazer_conciliacao
+        receita = _receita(self.contrato, date(2026, 3, 10), Decimal('2000.00'))
+        tx = self._tx_credito('arr-34')
+        conciliar_com_receitas(tx, [receita], usuario=self.user)
+        rec_pk = RecebimentoReceita.objects.get(receita=receita, transacao_extrato=tx).pk
+        h_criacao = HistoricalRecebimentoReceita.objects.get(id=rec_pk, history_type='+')
+        self.assertEqual(h_criacao.history_user_id, self.user.pk)
+
+        desfazer_conciliacao(tx, usuario=self.user)
+        h_exclusao = HistoricalRecebimentoReceita.objects.get(id=rec_pk, history_type='-')
+        self.assertEqual(h_exclusao.history_user_id, self.user.pk)
+
+    # 5 + 6: materialização de recebimento legado durante um novo recebimento
+    def test_materializacao_legada_e_reconsolidacao_registram_usuario(self):
+        from financeiro.models import RecebimentoReceita, HistoricalRecebimentoReceita
+        # Receita com valor_recebido consolidado LEGADO (500) e SEM
+        # recebimentos: o primeiro recebimento novo (conciliação de 1500)
+        # dispara garantir_recebimento_legado(), materializando os 500.
+        receita = ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=3, competencia_ano=2026, data_vencimento=date(2026, 3, 10),
+            valor_previsto=Decimal('2000.00'), valor_recebido=Decimal('500.00'), status='parcial',
+        )
+        self.assertFalse(receita.recebimentos.exists())
+        tx = self._tx_credito('arr-56', valor='1500.00')
+        conciliar_com_receitas(tx, [receita], usuario=self.user)
+
+        # 5: histórico de CRIAÇÃO do recebimento legado (origem migracao) tem o autor
+        legado = RecebimentoReceita.objects.get(receita=receita, origem='migracao')
+        h_legado = HistoricalRecebimentoReceita.objects.get(id=legado.pk, history_type='+')
+        self.assertEqual(h_legado.valor, Decimal('500.00'))
+        self.assertEqual(h_legado.history_user_id, self.user.pk)
+
+        # 6: a reconsolidação resultante registra o autor na receita
+        h_receita = self._hist_receita(receita.pk, status='recebido', valor_recebido=Decimal('2000.00'))
+        self.assertIsNotNone(h_receita)
+        self.assertEqual(h_receita.history_user_id, self.user.pk)
+
+    # 7: usuario=None funciona e deixa history_user=None na receita
+    def test_usuario_none_deixa_history_user_none_na_receita(self):
+        receita = _receita(self.contrato, date(2026, 3, 10), Decimal('2000.00'))
+        tx = self._tx_credito('arr-7')
+        conciliar_com_receitas(tx, [receita])  # sem usuario
+        receita.refresh_from_db()
+        self.assertEqual(receita.status, 'recebido')
+        h = self._hist_receita(receita.pk, status='recebido', valor_recebido=Decimal('2000.00'))
+        self.assertIsNotNone(h)
+        self.assertIsNone(h.history_user_id)
+
+
+@override_settings(MEDIA_ROOT=MEDIA_TEMP)
+class AutoriaHistoricoReceitaReconsolidadaPostTest(TestCase):
+    """POSTs reais registram request.user no histórico da receita reconsolidada."""
+    def setUp(self):
+        self.conta = ContaBancaria.objects.create(nome='Conta ARRP')
+        self.extrato = ExtratoImportado.objects.create(conta=self.conta, hash_arquivo='harrp')
+        self.imovel, self.locatario = _base()
+        self.contrato = _contrato(self.imovel, self.locatario)
+        self.user = User.objects.create_user('arrp_user', password='pass')
+        self.user.user_permissions.add(*Permission.objects.filter(codename__in=[
+            'view_extratoimportado', 'change_transacaoextrato', 'change_receitaaluguel',
+        ]))
+        self.client = Client()
+        self.client.login(username='arrp_user', password='pass')
+
+    def _post(self, transacao, action, **extra):
+        dados = {'transacao_id': transacao.pk, 'action': action}
+        dados.update(extra)
+        return self.client.post(reverse('conciliar_extrato', args=[self.extrato.pk]), dados)
+
+    def _tx_credito(self, fitid, valor='2000.00'):
+        return TransacaoExtrato.objects.create(
+            extrato=self.extrato, conta=self.conta, fitid=fitid,
+            data=date(2026, 3, 12), valor=Decimal(valor), tipo='credito', descricao='PIX',
+        )
+
+    def _hist_receita(self, receita_pk, **filtros):
+        from financeiro.models import HistoricalReceitaAluguel
+        return (
+            HistoricalReceitaAluguel.objects
+            .filter(id=receita_pk, history_type='~', **filtros)
+            .order_by('history_date').last()
+        )
+
+    # 8: POST real de conciliar crédito registra request.user no histórico da receita
+    def test_post_conciliar_credito_registra_request_user_na_receita(self):
+        receita = _receita(self.contrato, date(2026, 3, 10), Decimal('2000.00'))
+        tx = self._tx_credito('arrp-8')
+        resposta = self._post(tx, 'conciliar', receita_ids=[receita.pk])
+        self.assertEqual(resposta.status_code, 302)
+        h = self._hist_receita(receita.pk, status='recebido', valor_recebido=Decimal('2000.00'))
+        self.assertIsNotNone(h)
+        self.assertEqual(h.history_user_id, self.user.pk)
+
+    # 9: POST real de desfazer crédito registra request.user no histórico da receita
+    def test_post_desfazer_credito_registra_request_user_na_receita(self):
+        receita = _receita(self.contrato, date(2026, 3, 10), Decimal('2000.00'))
+        tx = self._tx_credito('arrp-9')
+        conciliar_com_receitas(tx, [receita])  # setup sem autor
+        resposta = self._post(tx, 'desfazer')
+        self.assertEqual(resposta.status_code, 302)
+        h = self._hist_receita(receita.pk, valor_recebido__isnull=True)
+        self.assertIsNotNone(h)
+        self.assertIn(h.status, ('previsto', 'atrasado'))
+        self.assertEqual(h.history_user_id, self.user.pk)
