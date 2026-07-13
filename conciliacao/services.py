@@ -584,11 +584,20 @@ def desfazer_conciliacao(transacao):
         # Desvincula ANTES de excluir: Despesa.delete() consulta
         # despesa_tem_conciliacao_ativa() (que olha transacoes_extrato com
         # status='conciliada') e rejeitaria a exclusão se o vínculo ainda
-        # existisse no momento do delete() abaixo.
+        # existisse no momento do delete() abaixo. O sinalizador privado
+        # _alterando_origem_despesa_via_service autoriza este save() a
+        # limpar o par despesa/despesa_criada_pela_conciliacao —
+        # TransacaoExtrato.save() rejeita essa limpeza por qualquer outro
+        # caminho. Setado imediatamente antes do save() e removido logo
+        # depois: existe só na instância, durante esta operação.
         transacao.despesa = None
         transacao.status = 'pendente'
         transacao.despesa_criada_pela_conciliacao = False
-        transacao.save(update_fields=['despesa', 'status', 'despesa_criada_pela_conciliacao'])
+        transacao._alterando_origem_despesa_via_service = True
+        try:
+            transacao.save(update_fields=['despesa', 'status', 'despesa_criada_pela_conciliacao'])
+        finally:
+            del transacao._alterando_origem_despesa_via_service
         despesa.delete()
         return transacao
 

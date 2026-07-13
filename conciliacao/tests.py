@@ -1588,17 +1588,32 @@ class OrigemExplicitaDespesaDebitoTest(TestCase):
         tx.refresh_from_db()
         self.assertFalse(tx.despesa_criada_pela_conciliacao)
 
+    def _insert_bruto(self, fitid, valor, tipo, despesa_id, origem):
+        """
+        INSERT via SQL bruto — bulk_create() agora rejeita origem=True na
+        camada de aplicação ANTES de chegar ao banco, então só uma inserção
+        direta consegue exercitar a CheckConstraint em si.
+        """
+        from django.db import connection
+        from django.utils import timezone as tz
+        agora = tz.now()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                'INSERT INTO conciliacao_transacaoextrato '
+                '(extrato_id, conta_id, fitid, data, valor, tipo, descricao, memo, status, '
+                'comissoes_marcadas, despesa_id, despesa_criada_pela_conciliacao, observacoes, '
+                'criado_em, atualizado_em) '
+                'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)',
+                [self.extrato.pk, self.conta.pk, fitid, date(2026, 3, 12), valor, tipo,
+                 'X', '', 'pendente', False, despesa_id, origem, '', agora, agora],
+            )
+
     # 12-13: a CheckConstraint garante coerência no banco
     def test_constraint_rejeita_true_sem_despesa(self):
         from django.db import IntegrityError, transaction as db_transaction
-        tx = TransacaoExtrato(
-            extrato=self.extrato, conta=self.conta, fitid='oed-9',
-            data=date(2026, 3, 12), valor=Decimal('-200.00'), tipo='debito',
-            descricao='CONTA', despesa=None, despesa_criada_pela_conciliacao=True,
-        )
         with self.assertRaises(IntegrityError):
             with db_transaction.atomic():
-                TransacaoExtrato.objects.bulk_create([tx])
+                self._insert_bruto('oed-9', Decimal('-200.00'), 'debito', None, True)
 
     def test_constraint_rejeita_true_em_transacao_de_credito(self):
         from django.db import IntegrityError, transaction as db_transaction
@@ -1607,14 +1622,9 @@ class OrigemExplicitaDespesaDebitoTest(TestCase):
             data_vencimento=date(2026, 3, 12), data_pagamento=date(2026, 3, 12),
             valor=Decimal('200.00'), status='paga',
         )
-        tx = TransacaoExtrato(
-            extrato=self.extrato, conta=self.conta, fitid='oed-10',
-            data=date(2026, 3, 12), valor=Decimal('200.00'), tipo='credito',
-            descricao='PIX', despesa=despesa, despesa_criada_pela_conciliacao=True,
-        )
         with self.assertRaises(IntegrityError):
             with db_transaction.atomic():
-                TransacaoExtrato.objects.bulk_create([tx])
+                self._insert_bruto('oed-10', Decimal('200.00'), 'credito', despesa.pk, True)
 
     def test_constraint_aceita_false_em_qualquer_situacao(self):
         """Sanidade: despesa_criada_pela_conciliacao=False nunca viola a
@@ -1625,6 +1635,240 @@ class OrigemExplicitaDespesaDebitoTest(TestCase):
             data=date(2026, 3, 12), valor=Decimal('200.00'), tipo='credito',
             descricao='PIX', despesa=None,
         )
+        self.assertFalse(tx.despesa_criada_pela_conciliacao)
+
+
+class IntegridadeParDespesaOrigemTest(TestCase):
+    """
+    Integridade do PAR despesa × despesa_criada_pela_conciliacao: depois
+    que o estado persistido está marcado (True), nenhuma operação comum
+    pode trocar/limpar o vínculo nem apagar a prova de origem — só
+    desfazer_conciliacao() (via sinalizador privado). Sem isso, trocar a
+    despesa mantendo o booleano True faria o desfazer excluir uma despesa
+    manual que lancar_despesa() nunca criou.
+    """
+    def setUp(self):
+        self.conta = ContaBancaria.objects.create(nome='Conta IPD')
+        self.extrato = ExtratoImportado.objects.create(conta=self.conta, hash_arquivo='hipd')
+        self.imovel, self.locatario = _base()
+
+    def _tx(self, valor, fitid, descricao='CONTA'):
+        return TransacaoExtrato.objects.create(
+            extrato=self.extrato, conta=self.conta, fitid=fitid,
+            data=date(2026, 3, 12), valor=Decimal(valor), tipo='debito', descricao=descricao,
+        )
+
+    def _despesa_manual(self, descricao='Despesa manual'):
+        return Despesa.objects.create(
+            imovel=self.imovel, categoria='outro', descricao=descricao,
+            data_vencimento=date(2026, 3, 12), data_pagamento=date(2026, 3, 12),
+            valor=Decimal('500.00'), status='paga',
+        )
+
+    # 1: o teste crítico — trocar a despesa com origem True é rejeitado
+    def test_save_nao_pode_trocar_despesa_quando_origem_true(self):
+        from .services import lancar_despesa
+        tx = self._tx('-500.00', 'ipd-1')
+        despesa_original = lancar_despesa(tx, categoria='outro', descricao='Reparo')
+        despesa_manual = self._despesa_manual()
+
+        tx.refresh_from_db()
+        tx.despesa = despesa_manual
+        with self.assertRaises(ValidationError):
+            tx.save(update_fields=['despesa'])
+
+        tx.refresh_from_db()
+        self.assertEqual(tx.despesa_id, despesa_original.pk)
+        self.assertTrue(tx.despesa_criada_pela_conciliacao)
+        self.assertTrue(Despesa.objects.filter(pk=despesa_manual.pk).exists())
+
+    # 2: limpar a despesa com origem True é rejeitado
+    def test_save_nao_pode_limpar_despesa_quando_origem_true(self):
+        from .services import lancar_despesa
+        tx = self._tx('-500.00', 'ipd-2')
+        despesa_original = lancar_despesa(tx, categoria='outro', descricao='Reparo')
+
+        tx.refresh_from_db()
+        tx.despesa = None
+        with self.assertRaises(ValidationError):
+            tx.save(update_fields=['despesa'])
+
+        tx.refresh_from_db()
+        self.assertEqual(tx.despesa_id, despesa_original.pk)
+        self.assertTrue(tx.despesa_criada_pela_conciliacao)
+
+    # 3: apagar a prova de origem (True→False) é rejeitado
+    def test_save_nao_pode_limpar_origem(self):
+        from .services import lancar_despesa
+        tx = self._tx('-500.00', 'ipd-3')
+        despesa_original = lancar_despesa(tx, categoria='outro', descricao='Reparo')
+
+        tx.refresh_from_db()
+        tx.despesa_criada_pela_conciliacao = False
+        with self.assertRaises(ValidationError):
+            tx.save(update_fields=['despesa_criada_pela_conciliacao'])
+
+        tx.refresh_from_db()
+        self.assertTrue(tx.despesa_criada_pela_conciliacao)
+        self.assertEqual(tx.despesa_id, despesa_original.pk)
+
+    # 4: resalvar sem tocar no par continua permitido
+    def test_save_continua_permitindo_alterar_apenas_observacoes(self):
+        from .services import lancar_despesa
+        tx = self._tx('-500.00', 'ipd-4')
+        lancar_despesa(tx, categoria='outro', descricao='Reparo')
+
+        tx.refresh_from_db()
+        tx.observacoes = 'Nota administrativa'
+        tx.save(update_fields=['observacoes'])  # não deve levantar
+
+        tx.refresh_from_db()
+        self.assertEqual(tx.observacoes, 'Nota administrativa')
+        self.assertTrue(tx.despesa_criada_pela_conciliacao)
+
+    # 5-6-7: QuerySet.update() com qualquer campo do par é rejeitado
+    def test_queryset_update_nao_pode_trocar_despesa(self):
+        from .services import lancar_despesa
+        tx = self._tx('-500.00', 'ipd-5')
+        despesa_original = lancar_despesa(tx, categoria='outro', descricao='Reparo')
+        despesa_manual = self._despesa_manual()
+
+        with self.assertRaises(ValidationError):
+            TransacaoExtrato.objects.filter(pk=tx.pk).update(despesa=despesa_manual)
+
+        tx.refresh_from_db()
+        self.assertEqual(tx.despesa_id, despesa_original.pk)
+
+    def test_queryset_update_nao_pode_trocar_despesa_id(self):
+        from .services import lancar_despesa
+        tx = self._tx('-500.00', 'ipd-6')
+        despesa_original = lancar_despesa(tx, categoria='outro', descricao='Reparo')
+        despesa_manual = self._despesa_manual()
+
+        with self.assertRaises(ValidationError):
+            TransacaoExtrato.objects.filter(pk=tx.pk).update(despesa_id=despesa_manual.pk)
+
+        tx.refresh_from_db()
+        self.assertEqual(tx.despesa_id, despesa_original.pk)
+
+    def test_queryset_update_nao_pode_limpar_origem(self):
+        from .services import lancar_despesa
+        tx = self._tx('-500.00', 'ipd-7')
+        lancar_despesa(tx, categoria='outro', descricao='Reparo')
+
+        with self.assertRaises(ValidationError):
+            TransacaoExtrato.objects.filter(pk=tx.pk).update(despesa_criada_pela_conciliacao=False)
+
+        tx.refresh_from_db()
+        self.assertTrue(tx.despesa_criada_pela_conciliacao)
+
+    # 8: bulk_update() dos campos do par é rejeitado
+    def test_bulk_update_dos_campos_do_par_e_rejeitado(self):
+        from .services import lancar_despesa
+        tx = self._tx('-500.00', 'ipd-8')
+        lancar_despesa(tx, categoria='outro', descricao='Reparo')
+        tx.refresh_from_db()
+
+        with self.assertRaises(ValidationError):
+            TransacaoExtrato.objects.bulk_update([tx], ['despesa'])
+        with self.assertRaises(ValidationError):
+            TransacaoExtrato.objects.bulk_update([tx], ['despesa_id'])
+        with self.assertRaises(ValidationError):
+            TransacaoExtrato.objects.bulk_update([tx], ['despesa_criada_pela_conciliacao'])
+        # campo comum junto com um protegido também bloqueia (conjunto todo)
+        with self.assertRaises(ValidationError):
+            TransacaoExtrato.objects.bulk_update([tx], ['observacoes', 'despesa'])
+
+        tx.refresh_from_db()
+        self.assertTrue(tx.despesa_criada_pela_conciliacao)
+
+    # 9: bulk_create() não pode declarar origem — mesmo estruturalmente válido
+    def test_bulk_create_nao_pode_declarar_origem(self):
+        despesa = self._despesa_manual('Despesa para bulk_create')
+        tx = TransacaoExtrato(
+            extrato=self.extrato, conta=self.conta, fitid='ipd-9',
+            data=date(2026, 3, 12), valor=Decimal('-500.00'), tipo='debito',
+            descricao='CONTA', despesa=despesa, despesa_criada_pela_conciliacao=True,
+        )
+        with self.assertRaises(ValidationError):
+            TransacaoExtrato.objects.bulk_create([tx])
+        self.assertFalse(TransacaoExtrato.objects.filter(fitid='ipd-9').exists())
+
+    # 10: bulk_create() normal (origem False) continua funcionando
+    def test_bulk_create_com_origem_false_continua_funcionando(self):
+        txs = [
+            TransacaoExtrato(
+                extrato=self.extrato, conta=self.conta, fitid=f'ipd-10-{i}',
+                data=date(2026, 3, 12), valor=Decimal('-100.00'), tipo='debito',
+                descricao='CONTA',
+            )
+            for i in range(2)
+        ]
+        criadas = TransacaoExtrato.objects.bulk_create(txs)
+        self.assertEqual(len(criadas), 2)
+        self.assertEqual(
+            TransacaoExtrato.objects.filter(fitid__startswith='ipd-10-').count(), 2,
+        )
+
+    # 11: o service continua conseguindo limpar o par legitimamente
+    def test_desfazer_service_limpa_origem_e_despesa(self):
+        from .services import desfazer_conciliacao, lancar_despesa
+        tx = self._tx('-500.00', 'ipd-11')
+        despesa = lancar_despesa(tx, categoria='outro', descricao='Reparo')
+        pk_despesa = despesa.pk
+
+        resultado = desfazer_conciliacao(tx)
+
+        tx.refresh_from_db()
+        self.assertIsNone(tx.despesa_id)
+        self.assertFalse(tx.despesa_criada_pela_conciliacao)
+        self.assertEqual(tx.status, 'pendente')
+        self.assertFalse(Despesa.objects.filter(pk=pk_despesa).exists())
+        # o sinalizador privado não permanece na instância usada pelo
+        # service depois da operação (é setado antes do save() e removido
+        # logo em seguida)
+        self.assertFalse(hasattr(resultado, '_alterando_origem_despesa_via_service'))
+
+    # 12: falha DEPOIS da limpeza reverte tudo (o par volta ao estado marcado)
+    def test_falha_apos_limpeza_causa_rollback_completo(self):
+        from unittest.mock import patch
+        from .services import desfazer_conciliacao, lancar_despesa
+        from financeiro.models import Despesa as DespesaModel
+
+        tx = self._tx('-500.00', 'ipd-12')
+        despesa = lancar_despesa(tx, categoria='outro', descricao='Reparo')
+
+        with patch.object(DespesaModel, 'delete', side_effect=RuntimeError('falha simulada')):
+            with self.assertRaises(RuntimeError):
+                desfazer_conciliacao(tx)
+
+        tx.refresh_from_db()
+        despesa.refresh_from_db()
+        self.assertEqual(tx.status, 'conciliada')
+        self.assertEqual(tx.despesa_id, despesa.pk)
+        self.assertTrue(tx.despesa_criada_pela_conciliacao)
+        self.assertEqual(despesa.status, 'paga')
+
+    # 13: após tentativa (rejeitada) de troca, o desfazer exclui SÓ a original
+    def test_desfazer_apos_tentativa_de_troca_exclui_somente_a_despesa_original(self):
+        from .services import desfazer_conciliacao, lancar_despesa
+        tx = self._tx('-500.00', 'ipd-13')
+        despesa_original = lancar_despesa(tx, categoria='outro', descricao='Reparo')
+        despesa_manual = self._despesa_manual()
+
+        tx.refresh_from_db()
+        tx.despesa = despesa_manual
+        with self.assertRaises(ValidationError):
+            tx.save(update_fields=['despesa'])
+        tx.refresh_from_db()
+
+        desfazer_conciliacao(tx)
+
+        self.assertFalse(Despesa.objects.filter(pk=despesa_original.pk).exists())
+        self.assertTrue(Despesa.objects.filter(pk=despesa_manual.pk).exists())
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'pendente')
+        self.assertIsNone(tx.despesa_id)
         self.assertFalse(tx.despesa_criada_pela_conciliacao)
 
 

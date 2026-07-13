@@ -126,17 +126,60 @@ class TransacaoExtratoQuerySet(models.QuerySet):
             'de Conciliação Bancária.'
         )
 
+    # O PAR despesa × despesa_criada_pela_conciliacao é a prova de origem
+    # da despesa de um débito — controlado exclusivamente por
+    # lancar_despesa() (marca) e desfazer_conciliacao() (limpa). Nenhuma
+    # operação em massa pode tocá-lo: trocar a despesa mantendo o booleano
+    # True falsificaria a prova (a nova despesa NÃO foi criada pelo
+    # service) e o desfazer excluiria uma despesa manual indevidamente.
+    # Bloqueio incondicional por NOME de campo — nunca por exists() sobre o
+    # estado do conjunto, que criaria janela de corrida entre a checagem e
+    # a escrita.
+    CAMPOS_PROTEGIDOS_ORIGEM_DESPESA = frozenset({
+        'despesa', 'despesa_id', 'despesa_criada_pela_conciliacao',
+    })
+
     def update(self, **kwargs):
-        # despesa_criada_pela_conciliacao é a prova de origem da despesa de
-        # um débito — só pode ser definido por lancar_despesa() (True) ou
-        # desfazer_conciliacao() (False), nunca por uma alteração em massa
-        # que contorne o sinalizador privado de TransacaoExtrato.save().
-        if 'despesa_criada_pela_conciliacao' in kwargs:
+        protegidos = self.CAMPOS_PROTEGIDOS_ORIGEM_DESPESA & set(kwargs)
+        if protegidos:
             raise ValidationError(
-                'QuerySet.update() não pode alterar despesa_criada_pela_conciliacao — este '
-                'campo é controlado exclusivamente por lancar_despesa()/desfazer_conciliacao().'
+                f'QuerySet.update() não pode alterar {sorted(protegidos)} — o par '
+                'despesa/despesa_criada_pela_conciliacao é controlado exclusivamente por '
+                'lancar_despesa()/desfazer_conciliacao().'
             )
         return super().update(**kwargs)
+
+    def bulk_update(self, objs, fields, **kwargs):
+        # Mesmo que a implementação atual do Django execute bulk_update via
+        # update() (que já bloquearia), a proteção é declarada aqui
+        # explicitamente — não depende de detalhe interno de versão.
+        protegidos = self.CAMPOS_PROTEGIDOS_ORIGEM_DESPESA & set(fields)
+        if protegidos:
+            raise ValidationError(
+                f'QuerySet.bulk_update() não pode alterar {sorted(protegidos)} — o par '
+                'despesa/despesa_criada_pela_conciliacao é controlado exclusivamente por '
+                'lancar_despesa()/desfazer_conciliacao().'
+            )
+        return super().bulk_update(objs, fields, **kwargs)
+
+    def bulk_create(self, objs, **kwargs):
+        # bulk_create() não passa por Model.save() — sem esta checagem, uma
+        # criação em lote poderia declarar despesa_criada_pela_conciliacao=
+        # True para uma despesa que lancar_despesa() nunca criou. A
+        # CheckConstraint do banco verifica só coerência ESTRUTURAL
+        # (débito + despesa preenchida), não consegue comprovar a origem —
+        # por isso True em criação em lote é rejeitado mesmo quando a
+        # estrutura estaria válida. Importação normal (campo False, o
+        # default) continua funcionando.
+        objs = list(objs)
+        if any(getattr(obj, 'despesa_criada_pela_conciliacao', False) for obj in objs):
+            raise ValidationError(
+                'bulk_create() não pode criar TransacaoExtrato com '
+                'despesa_criada_pela_conciliacao=True — essa marcação declara que '
+                'lancar_despesa() criou a despesa vinculada, o que só o próprio service '
+                'pode afirmar.'
+            )
+        return super().bulk_create(objs, **kwargs)
 
 
 class TransacaoExtrato(models.Model):
@@ -235,20 +278,52 @@ class TransacaoExtrato(models.Model):
         return abs(self.valor)
 
     def save(self, *args, **kwargs):
-        # A transição de False para True só pode ocorrer dentro de
-        # lancar_despesa(), que seta o sinalizador privado
-        # _marcando_origem_despesa nesta instância antes de save() — nunca
-        # disponível como argumento público de save(). Reconsulta o estado
-        # persistido (nunca confia em self) para decidir se é de fato uma
-        # transição ou apenas um resave de um valor já True.
-        if self.despesa_criada_pela_conciliacao:
-            persistido = (
-                TransacaoExtrato.objects.filter(pk=self.pk)
-                .values_list('despesa_criada_pela_conciliacao', flat=True)
-                .first()
-                if self.pk else None
-            )
-            if not persistido and not getattr(self, '_marcando_origem_despesa', False):
+        # Integridade do PAR despesa × despesa_criada_pela_conciliacao —
+        # decidida sempre pelo estado PERSISTIDO no banco (nunca pelos
+        # valores em memória de self, que podem estar desatualizados ou
+        # adulterados):
+        #
+        # 1) Banco com o par MARCADO (True): trocar despesa_id, limpar
+        #    despesa_id ou voltar o booleano para False falsificaria a
+        #    prova de origem (o booleano passaria a "atestar" uma despesa
+        #    que lancar_despesa() nunca criou, ou apagaria a prova) — só
+        #    desfazer_conciliacao() pode fazer isso, via o sinalizador
+        #    privado _alterando_origem_despesa_via_service. Resalvar sem
+        #    tocar no par (ex.: só observações) continua permitido.
+        #
+        # 2) Banco com o par NÃO marcado (False, ou criação): a transição
+        #    para True é exclusiva de lancar_despesa(), via o sinalizador
+        #    privado _marcando_origem_despesa.
+        #
+        # Nenhum dos sinalizadores é argumento de save() — existem apenas
+        # na instância, setados imediatamente antes do save() legítimo
+        # dentro do respectivo service.
+        persistido = (
+            TransacaoExtrato.objects.filter(pk=self.pk)
+            .values('despesa_id', 'despesa_criada_pela_conciliacao')
+            .first()
+            if self.pk else None
+        )
+        if persistido and persistido['despesa_criada_pela_conciliacao']:
+            if not getattr(self, '_alterando_origem_despesa_via_service', False):
+                if self.despesa_id != persistido['despesa_id']:
+                    raise ValidationError({
+                        'despesa': (
+                            'Esta transação tem a despesa marcada como criada pela '
+                            'conciliação — o vínculo não pode ser trocado nem limpo por uma '
+                            'alteração comum. Use desfazer_conciliacao().'
+                        )
+                    })
+                if not self.despesa_criada_pela_conciliacao:
+                    raise ValidationError({
+                        'despesa_criada_pela_conciliacao': (
+                            'A prova de origem da despesa não pode ser apagada por uma '
+                            'alteração comum — só desfazer_conciliacao() limpa este campo '
+                            '(junto com o vínculo e o status, atomicamente).'
+                        )
+                    })
+        elif self.despesa_criada_pela_conciliacao:
+            if not getattr(self, '_marcando_origem_despesa', False):
                 raise ValidationError({
                     'despesa_criada_pela_conciliacao': (
                         'Este campo só pode ser definido como True pelo service '
