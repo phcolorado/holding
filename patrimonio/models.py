@@ -696,6 +696,24 @@ class ReajusteContrato(models.Model):
             raise ValidationError(erros)
 
     def save(self, *args, **kwargs):
+        # A TRANSIÇÃO para aplicado_em preenchido (a "primeira aplicação")
+        # só pode ocorrer através de aplicar(), que seta o sinalizador
+        # privado _aplicacao_via_metodo nesta instância antes de chamar
+        # save() — nunca disponível como argumento público de save(). Um
+        # save() direto tentando imitar aplicar() (aplicado=True +
+        # aplicado_em=<data>, sem passar por aplicar()) é sempre rejeitado,
+        # mesmo que os dois campos já estejam mutuamente coerentes entre si
+        # (o que as checagens abaixo, sozinhas, aceitariam).
+        if self.aplicado_em is not None and not getattr(self, '_aplicacao_via_metodo', False):
+            persistido_em = (
+                ReajusteContrato.objects.filter(pk=self.pk).values_list('aplicado_em', flat=True).first()
+                if self.pk else None
+            )
+            if persistido_em is None:
+                raise ValidationError({
+                    'aplicado_em': 'A aplicação de um reajuste (preencher "aplicado em") só '
+                    'pode ocorrer através do método aplicar() — não por save() direto.'
+                })
         # Proteção em duas camadas: clean() cobre o fluxo de formulários/Admin
         # (chamado por full_clean() na validação), mas um save() direto via
         # ORM (script, shell, código) nunca passa por clean() — por isso a
@@ -815,6 +833,9 @@ class ReajusteContrato(models.Model):
 
             atual.aplicado = True
             atual.aplicado_em = timezone.now()
+            # Sinalizador privado: só este método pode fazer a transição
+            # para aplicado_em preenchido — ver checagem em save().
+            atual._aplicacao_via_metodo = True
             atual.save(update_fields=['aplicado', 'aplicado_em'])
         self.refresh_from_db()
         return True

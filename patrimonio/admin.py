@@ -6,6 +6,7 @@ from django.forms.models import BaseInlineFormSet
 from django.utils import timezone
 from simple_history.admin import SimpleHistoryAdmin
 
+from .forms import ReajusteContratoInlineForm
 from .models import (
     Imovel, Pessoa, Contrato, Manutencao,
     ContratoParte, EncargoContrato, ReajusteContrato,
@@ -100,7 +101,7 @@ class ReajusteContratoInlineFormSet(BaseInlineFormSet):
     já aplicados — disabled=True no form é reforço no SERVIDOR (dados
     submetidos para um campo disabled são ignorados em favor do initial),
     não apenas uma dica visual no navegador. Reajustes pendentes continuam
-    totalmente editáveis.
+    totalmente editáveis, inclusive o comando "Aplicar agora".
     """
     def add_fields(self, form, index):
         super().add_fields(form, index)
@@ -112,19 +113,29 @@ class ReajusteContratoInlineFormSet(BaseInlineFormSet):
                 nome = campo[:-3] if campo.endswith('_id') else campo
                 if nome in form.fields:
                     form.fields[nome].disabled = True
-            if 'aplicado' in form.fields:
-                form.fields['aplicado'].disabled = True
+            # Já aplicado: "Aplicar agora" não é uma opção editável — o
+            # próprio save_formset() também ignora este campo para linhas
+            # já aplicadas (defesa em profundidade, não depende só do
+            # disabled do form).
+            if 'aplicar_agora' in form.fields:
+                form.fields['aplicar_agora'].disabled = True
+                form.fields['aplicar_agora'].initial = False
 
 
 class ReajusteContratoInline(admin.TabularInline):
     model = ReajusteContrato
+    form = ReajusteContratoInlineForm
     formset = ReajusteContratoInlineFormSet
     extra = 0
     fields = (
         'data_reajuste', 'indice', 'percentual_aplicado', 'valor_anterior',
-        'valor_novo', 'periodo_indice', 'aplicado', 'aplicado_em', 'observacoes',
+        'valor_novo', 'periodo_indice', 'aplicar_agora', 'aplicado', 'aplicado_em', 'observacoes',
     )
-    readonly_fields = ('aplicado_em',)
+    # `aplicado` não é mais um campo de comando editável pelo usuário — fica
+    # somente-leitura (exibição do estado real); `aplicar_agora` (definido
+    # em ReajusteContratoInlineForm) é o único comando de interface para
+    # aplicar um reajuste novo/pendente.
+    readonly_fields = ('aplicado', 'aplicado_em')
 
 
 class DocumentoContratoInline(admin.TabularInline):
@@ -365,18 +376,32 @@ class ContratoAdmin(SimpleHistoryAdmin):
 
     def save_formset(self, request, form, formset, change):
         if formset.model is ReajusteContrato:
+            # "Aplicar agora" (ReajusteContratoInlineForm) é um campo de
+            # FORMULÁRIO, não persistido no model — o campo `aplicado` do
+            # model nunca é tocado pelo form (está em readonly_fields), então
+            # a instância chega em formset.save(commit=False) sempre com
+            # aplicado=False/aplicado_em=None para linhas novas/pendentes,
+            # sem precisar zerar `obj.aplicado` manualmente. Mapeia a
+            # intenção de aplicar por identidade da instância ANTES de
+            # formset.save() persistir, pois cleaned_data só existe no form.
+            aplicar_por_instancia = {}
+            for linha in formset.forms:
+                dados = getattr(linha, 'cleaned_data', None)
+                if not dados or dados.get('DELETE'):
+                    continue
+                aplicar_por_instancia[id(linha.instance)] = dados.get('aplicar_agora', False)
+
             instances = formset.save(commit=False)
             for obj in instances:
                 if obj.aplicado_em is not None:
-                    # Já aplicado: o model força aplicado=True e clean() bloqueia
-                    # alteração dos campos financeiros; nunca reaplicamos.
+                    # Já aplicado: clean()/save() bloqueiam alteração dos
+                    # campos financeiros; "aplicar agora" é ignorado aqui
+                    # independente do form (defesa em profundidade — o form
+                    # já vem com o campo disabled para linhas aplicadas).
                     obj.save()
                     continue
-                marcado_para_aplicar = obj.aplicado
-                # aplicado só é efetivado por aplicar() — evita marcar sem aplicar
-                obj.aplicado = False
                 obj.save()
-                if marcado_para_aplicar:
+                if aplicar_por_instancia.get(id(obj)):
                     # aplicar() é idempotente (guard por aplicado_em) e atômico
                     obj.aplicar()
             for obj in formset.deleted_objects:

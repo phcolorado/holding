@@ -751,11 +751,30 @@ class GarantirEncargoAluguelSaveRelatedTest(TestCase):
 
 # ─── ContratoAdmin.save_formset: transição de aplicado em ReajusteContrato ────
 
+class _FakeReajusteForm:
+    """
+    Simula um form do formset (só o suficiente para exercitar a lógica de
+    ContratoAdmin.save_formset(): `.instance` e `.cleaned_data['aplicar_agora'
+    /'DELETE']`) — NÃO substitui o teste de integração real com client.post()
+    abaixo, serve só para testar unitariamente a lógica de save_formset()
+    sem depender do ciclo completo do Admin (validação de form, formsets
+    management etc.), que é coberto pelos testes com client.post().
+    """
+    def __init__(self, instance, aplicar_agora=False, delete=False):
+        self.instance = instance
+        self.cleaned_data = {'aplicar_agora': aplicar_agora, 'DELETE': delete}
+
+
 class _FakeReajusteFormSet:
-    def __init__(self, instances):
+    def __init__(self, instances, aplicar_agora_por_instancia=None):
         self.model = ReajusteContrato
         self._instances = instances
         self.deleted_objects = []
+        aplicar_map = aplicar_agora_por_instancia or {}
+        self.forms = [
+            _FakeReajusteForm(obj, aplicar_agora=aplicar_map.get(id(obj), False))
+            for obj in instances
+        ]
 
     def save(self, commit=False):
         return self._instances
@@ -765,7 +784,14 @@ class _FakeReajusteFormSet:
 
 
 class ReajusteAdminTransicaoTest(TestCase):
-    """Testa ContratoAdmin.save_formset para ReajusteContrato via formset simplificado."""
+    """
+    Testa unitariamente a lógica de ContratoAdmin.save_formset() para
+    ReajusteContrato via formset simplificado (_FakeReajusteFormSet) — mais
+    rápido que um POST real e útil para isolar a lógica de aplicar_agora/
+    deleted_objects. A PROVA de que uma submissão real ao Admin funciona
+    (formulário validado pelo Django, aplicar_agora chegando via POST) está
+    em ReajusteAdminPostRealTest, que usa client.post() de ponta a ponta.
+    """
 
     def setUp(self):
         self.imovel = _criar_imovel()
@@ -777,31 +803,30 @@ class ReajusteAdminTransicaoTest(TestCase):
         )
         EncargoContrato.objects.create(contrato=self.contrato, tipo='aluguel', valor=Decimal('2000.00'))
 
-    def _save_formset(self, reajuste):
+    def _save_formset(self, reajuste, aplicar_agora=False):
         from django.contrib import admin as django_admin
         from patrimonio.admin import ContratoAdmin
 
         admin_instance = ContratoAdmin(Contrato, django_admin.site)
-        formset = _FakeReajusteFormSet([reajuste])
+        formset = _FakeReajusteFormSet([reajuste], {id(reajuste): aplicar_agora})
         form = DocumentoContratoInlineTest._FakeForm(self.contrato)
         admin_instance.save_formset(request=None, form=form, formset=formset, change=True)
 
-    def test_reajuste_novo_aplicado_true_aplica(self):
+    def test_reajuste_novo_aplicar_agora_aplica(self):
         reajuste = ReajusteContrato(
             contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
-            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'), aplicado=True,
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'),
         )
-        self._save_formset(reajuste)
+        self._save_formset(reajuste, aplicar_agora=True)
         self.contrato.refresh_from_db()
         self.assertEqual(self.contrato.valor_aluguel, Decimal('2150.00'))
 
-    def test_reajuste_existente_de_false_para_true_aplica(self):
+    def test_reajuste_existente_pendente_com_aplicar_agora_aplica(self):
         reajuste = ReajusteContrato.objects.create(
             contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
-            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'), aplicado=False,
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'),
         )
-        reajuste.aplicado = True  # simula edição no admin, ainda não salva
-        self._save_formset(reajuste)
+        self._save_formset(reajuste, aplicar_agora=True)
 
         self.contrato.refresh_from_db()
         self.assertEqual(self.contrato.valor_aluguel, Decimal('2150.00'))
@@ -821,22 +846,27 @@ class ReajusteAdminTransicaoTest(TestCase):
         self.assertEqual(self.contrato.valor_aluguel, Decimal('2150.00'))
 
         # Um segundo reajuste é registrado; ao salvar o formset novamente, o
-        # primeiro reajuste (já aplicado=True antes e depois) não deve reaplicar.
+        # primeiro reajuste (já aplicado antes e depois) não deve reaplicar,
+        # mesmo que "aplicar_agora" venha marcado por engano no form (linha
+        # já aplicada — save_formset() ignora aplicar_agora nesse caso).
         reajuste.observacoes = 'apenas edição de observação'
-        self._save_formset(reajuste)
+        self._save_formset(reajuste, aplicar_agora=True)
 
         self.contrato.refresh_from_db()
         self.assertEqual(self.contrato.valor_aluguel, Decimal('2150.00'))
         self.assertEqual(self.contrato.data_proximo_reajuste, date(2026, 1, 1))
 
-    def test_reajuste_novo_aplicado_false_nao_aplica(self):
+    def test_reajuste_novo_sem_aplicar_agora_nao_aplica(self):
         reajuste = ReajusteContrato(
             contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
-            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'), aplicado=False,
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'),
         )
-        self._save_formset(reajuste)
+        self._save_formset(reajuste, aplicar_agora=False)
         self.contrato.refresh_from_db()
         self.assertEqual(self.contrato.valor_aluguel, Decimal('2000.00'))
+        reajuste.refresh_from_db()
+        self.assertFalse(reajuste.aplicado)
+        self.assertIsNone(reajuste.aplicado_em)
 
     def test_tentativa_de_exclusao_via_inline_e_bloqueada_e_avisada(self):
         """Item 10: exclusão de reajuste aplicado pelo inline não derruba a página, apenas avisa."""
@@ -865,6 +895,185 @@ class ReajusteAdminTransicaoTest(TestCase):
         self.assertTrue(ReajusteContrato.objects.filter(pk=reajuste.pk).exists())
         mensagens = [str(m) for m in request._messages]
         self.assertTrue(any('já foi aplicado' in m for m in mensagens))
+
+
+class ReajusteAdminPostRealTest(TestCase):
+    """
+    Critério de aceitação principal: uma submissão HTTP REAL ao Django
+    Admin (client.post() em admin:patrimonio_contrato_change), passando
+    pelo ciclo completo de validação do ModelForm/formset — não um formset
+    falso, não RequestFactory chamando só save_formset(), não uma chamada
+    direta a reajuste.aplicar(). É este teste que demonstra que marcar
+    "Aplicar agora" num reajuste novo NÃO é mais rejeitado pela validação
+    do form antes de ContratoAdmin.save_formset() rodar.
+    """
+
+    def setUp(self):
+        self.imovel = _criar_imovel('Imóvel Admin POST')
+        self.locatario = _criar_pessoa('Locatário Admin POST')
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, date(2024, 1, 1), date(2025, 12, 31),
+            valor_aluguel=Decimal('2000.00'), indice_reajuste='ipca',
+            data_proximo_reajuste=date(2025, 1, 1),
+        )
+        self.encargo_aluguel = EncargoContrato.objects.create(
+            contrato=self.contrato, tipo='aluguel', valor=Decimal('2000.00'),
+        )
+        self.superuser = User.objects.create_superuser('admin_reaj_post', 'a@a.com', 'pass')
+        self.client = Client()
+        self.client.force_login(self.superuser)
+        self.url = reverse('admin:patrimonio_contrato_change', args=[self.contrato.pk])
+
+    def _dados_contrato(self, **overrides):
+        """Payload completo do form principal + management forms de TODOS os
+        inlines presentes em ContratoAdmin (partes/encargos/reajustes/documentos),
+        zerados por padrão — cada teste adiciona apenas os campos do reajuste."""
+        dados = {
+            'imovel': self.imovel.pk,
+            'locatario': self.locatario.pk,
+            'fiador': '',
+            'imobiliaria': '',
+            'data_inicio': '2024-01-01',
+            'data_fim': '2025-12-31',
+            'data_encerramento_real': '',
+            'valor_aluguel': '2000.00',
+            'dia_vencimento': '10',
+            'indice_reajuste': 'ipca',
+            'data_proximo_reajuste': '2025-01-01',
+            'tipo_garantia': 'sem_garantia',
+            'comissao_imobiliaria_percentual': '',
+            'multa_atraso_percentual': '0',
+            'juros_mora_percentual_mes': '0',
+            'dias_carencia_multa': '0',
+            'status': 'ativo',
+            'observacoes': '',
+            'partes-TOTAL_FORMS': '0', 'partes-INITIAL_FORMS': '0',
+            'partes-MIN_NUM_FORMS': '0', 'partes-MAX_NUM_FORMS': '1000',
+            'encargos-TOTAL_FORMS': '0', 'encargos-INITIAL_FORMS': '0',
+            'encargos-MIN_NUM_FORMS': '0', 'encargos-MAX_NUM_FORMS': '1000',
+            'documento_set-TOTAL_FORMS': '0', 'documento_set-INITIAL_FORMS': '0',
+            'documento_set-MIN_NUM_FORMS': '0', 'documento_set-MAX_NUM_FORMS': '1000',
+            'reajustes-TOTAL_FORMS': '0', 'reajustes-INITIAL_FORMS': '0',
+            'reajustes-MIN_NUM_FORMS': '0', 'reajustes-MAX_NUM_FORMS': '1000',
+        }
+        dados.update(overrides)
+        return dados
+
+    def _dados_reajuste_novo(self, aplicar_agora, **overrides):
+        campos = {
+            'reajustes-TOTAL_FORMS': '1',
+            'reajustes-0-id': '',
+            'reajustes-0-contrato': str(self.contrato.pk),
+            'reajustes-0-data_reajuste': '2025-01-01',
+            'reajustes-0-indice': 'ipca',
+            'reajustes-0-percentual_aplicado': '7.5',
+            'reajustes-0-valor_anterior': '2000.00',
+            'reajustes-0-valor_novo': '2150.00',
+            'reajustes-0-periodo_indice': '',
+            'reajustes-0-observacoes': '',
+        }
+        if aplicar_agora:
+            campos['reajustes-0-aplicar_agora'] = 'on'
+        campos.update(overrides)
+        return self._dados_contrato(**campos)
+
+    def test_post_real_aplica_reajuste_novo_com_aplicar_agora(self):
+        dados = self._dados_reajuste_novo(aplicar_agora=True)
+        resposta = self.client.post(self.url, dados, follow=True)
+
+        self.assertEqual(resposta.status_code, 200)
+        conteudo = resposta.content.decode()
+        # sem erro de validação: o Admin redireciona para a changelist (não
+        # re-renderiza o changeform com erros)
+        self.assertNotIn('errorlist', conteudo)
+        self.assertNotIn('Corrija o erro abaixo', conteudo)
+        self.assertNotIn('Corrija os erros abaixo', conteudo)
+
+        self.contrato.refresh_from_db()
+        self.assertEqual(self.contrato.valor_aluguel, Decimal('2150.00'))
+        self.assertEqual(self.contrato.data_proximo_reajuste, date(2026, 1, 1))
+
+        self.encargo_aluguel.refresh_from_db()
+        self.assertEqual(self.encargo_aluguel.valor, Decimal('2150.00'))
+
+        reajuste = ReajusteContrato.objects.get(contrato=self.contrato)
+        self.assertTrue(reajuste.aplicado)
+        self.assertIsNotNone(reajuste.aplicado_em)
+
+    def test_post_real_sem_aplicar_agora_salva_pendente(self):
+        dados = self._dados_reajuste_novo(aplicar_agora=False)
+        resposta = self.client.post(self.url, dados, follow=True)
+
+        self.assertEqual(resposta.status_code, 200)
+        self.assertNotIn('errorlist', resposta.content.decode())
+
+        self.contrato.refresh_from_db()
+        self.assertEqual(self.contrato.valor_aluguel, Decimal('2000.00'))
+
+        reajuste = ReajusteContrato.objects.get(contrato=self.contrato)
+        self.assertFalse(reajuste.aplicado)
+        self.assertIsNone(reajuste.aplicado_em)
+
+    def test_post_real_editar_observacoes_de_aplicado_nao_reaplica(self):
+        reajuste = ReajusteContrato.objects.create(
+            contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'),
+        )
+        reajuste.aplicar()
+        aplicado_em_original = ReajusteContrato.objects.get(pk=reajuste.pk).aplicado_em
+
+        # O contrato já reflete o reajuste aplicado (valor_aluguel=2150) —
+        # o payload principal precisa refletir isso, como aconteceria numa
+        # página recarregada de verdade após a aplicação (o form principal
+        # não reenvia um valor_aluguel desatualizado).
+        dados = self._dados_contrato(**{
+            'valor_aluguel': '2150.00',
+            'reajustes-TOTAL_FORMS': '1',
+            'reajustes-INITIAL_FORMS': '1',
+            'reajustes-0-id': str(reajuste.pk),
+            'reajustes-0-contrato': str(self.contrato.pk),
+            'reajustes-0-data_reajuste': '2025-01-01',
+            'reajustes-0-indice': 'ipca',
+            'reajustes-0-percentual_aplicado': '7.5',
+            'reajustes-0-valor_anterior': '2000.00',
+            'reajustes-0-valor_novo': '2150.00',
+            'reajustes-0-periodo_indice': '',
+            'reajustes-0-observacoes': 'observação editada via POST real',
+        })
+        resposta = self.client.post(self.url, dados, follow=True)
+
+        self.assertEqual(resposta.status_code, 200)
+        self.assertNotIn('errorlist', resposta.content.decode())
+
+        reajuste.refresh_from_db()
+        self.assertEqual(reajuste.observacoes, 'observação editada via POST real')
+        self.assertEqual(reajuste.aplicado_em, aplicado_em_original)
+
+        self.contrato.refresh_from_db()
+        self.assertEqual(self.contrato.valor_aluguel, Decimal('2150.00'))
+
+    def test_post_real_salvar_contrato_novamente_nao_altera_aplicado_em(self):
+        reajuste = ReajusteContrato.objects.create(
+            contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'),
+        )
+        reajuste.aplicar()
+        aplicado_em_original = ReajusteContrato.objects.get(pk=reajuste.pk).aplicado_em
+
+        dados = self._dados_contrato(
+            valor_aluguel='2150.00',  # reflete o valor já aplicado, como numa página recarregada
+            observacoes='contrato salvo de novo, sem tocar no reajuste',
+        )
+        resposta = self.client.post(self.url, dados, follow=True)
+
+        self.assertEqual(resposta.status_code, 200)
+        self.assertNotIn('errorlist', resposta.content.decode())
+
+        reajuste.refresh_from_db()
+        self.assertEqual(reajuste.aplicado_em, aplicado_em_original)
+        self.assertTrue(reajuste.aplicado)
+        self.contrato.refresh_from_db()
+        self.assertEqual(self.contrato.valor_aluguel, Decimal('2150.00'))
 
 
 # ─── Consistência aplicado × aplicado_em (item 5, rodada de fechamento estrutural) ──
@@ -919,6 +1128,44 @@ class ReajusteConsistenciaAplicadoTest(TestCase):
         self.assertTrue(reajuste.aplicado)
         self.assertIsNotNone(reajuste.aplicado_em)
 
+    def test_save_direto_imitando_aplicar_em_reajuste_pendente_e_rejeitado(self):
+        """
+        Tarefa "corrigir fluxo de aplicação do Admin": a transição para
+        aplicado_em preenchido só pode ocorrer por aplicar() — um save()
+        direto que imite aplicar() (aplicado=True + aplicado_em=<data>
+        setados juntos, coerentes entre si) numa instância PENDENTE também
+        é rejeitado, mesmo sem violar a CheckConstraint nem as checagens de
+        coerência de clean()/save() já existentes.
+        """
+        reajuste = ReajusteContrato.objects.create(
+            contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'),
+        )
+        reajuste.aplicado = True
+        reajuste.aplicado_em = timezone.now()
+        with self.assertRaises(ValidationError):
+            reajuste.save()
+
+        persistido = ReajusteContrato.objects.get(pk=reajuste.pk)
+        self.assertFalse(persistido.aplicado)
+        self.assertIsNone(persistido.aplicado_em)
+        self.contrato.refresh_from_db()
+        self.assertEqual(self.contrato.valor_aluguel, Decimal('2000.00'))
+
+    def test_criacao_direta_aplicado_true_aplicado_em_preenchido_e_rejeitada(self):
+        """
+        Mesmo cenário do test acima, mas em CRIAÇÃO (sem self.pk ainda) —
+        ReajusteContrato.objects.create(aplicado=True, aplicado_em=<data>)
+        também precisa passar por aplicar(), nunca por criação direta.
+        """
+        with self.assertRaises(ValidationError):
+            ReajusteContrato.objects.create(
+                contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
+                valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'),
+                aplicado=True, aplicado_em=timezone.now(),
+            )
+        self.assertFalse(ReajusteContrato.objects.filter(contrato=self.contrato).exists())
+
     def test_admin_continua_aplicando_corretamente(self):
         """Fluxo do ContratoAdmin.save_formset (força aplicado=False antes de
         salvar, depois chama aplicar() separadamente) continua funcionando
@@ -929,10 +1176,10 @@ class ReajusteConsistenciaAplicadoTest(TestCase):
         EncargoContrato.objects.create(contrato=self.contrato, tipo='aluguel', valor=Decimal('2000.00'))
         reajuste = ReajusteContrato(
             contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
-            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'), aplicado=True,
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'),
         )
         admin_instance = ContratoAdmin(Contrato, django_admin.site)
-        formset = _FakeReajusteFormSet([reajuste])
+        formset = _FakeReajusteFormSet([reajuste], {id(reajuste): True})
         form = DocumentoContratoInlineTest._FakeForm(self.contrato)
         admin_instance.save_formset(request=None, form=form, formset=formset, change=True)
 
