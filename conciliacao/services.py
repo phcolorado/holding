@@ -513,34 +513,84 @@ def conciliar_com_receitas(transacao, receitas, marcar_comissoes=False, usuario=
     return transacao
 
 
+def _despesa_e_origem_exclusiva_do_debito(despesa, transacao):
+    """
+    Confirma, sob lock, que `despesa` foi criada EXCLUSIVAMENTE por
+    lancar_despesa() a partir de `transacao` e não tem nenhum outro vínculo
+    — única situação em que desfazer_conciliacao() pode excluí-la com
+    segurança, evitando que relançar depois do desfazer duplique a despesa.
+
+    Bloqueia a exclusão automática (retorna False) quando a despesa: foi
+    vinculada manualmente a uma receita; participa de um vínculo de
+    comissão (ConciliacaoComissao); está referenciada por outra transação
+    além desta; ou teve valor/status/data de pagamento divergentes do que
+    lancar_despesa() gravou (o que, com a despesa protegida por
+    despesa_tem_conciliacao_ativa() — item 2 —, só pode significar um
+    estado legado/inconsistente, nunca uma edição legítima).
+    """
+    if despesa.origem_automatica:
+        return False
+    if despesa.receita_id is not None:
+        return False
+    if despesa.conciliacoes_comissao.exists():
+        return False
+    if despesa.transacoes_extrato.exclude(pk=transacao.pk).exists():
+        return False
+    if despesa.status != 'paga' or despesa.data_pagamento != transacao.data:
+        return False
+    if despesa.valor != transacao.valor_absoluto:
+        return False
+    return True
+
+
 @transaction.atomic
 def desfazer_conciliacao(transacao):
     """
-    Desfaz a conciliação de uma transação — trata créditos (recebimentos +
-    comissões de repasse) e débitos (despesa lançada) igualmente: NUNCA
-    apaga o dinheiro que de fato entrou/saiu, apenas desfaz os VÍNCULOS de
-    conciliação e devolve a transação para 'pendente'.
+    Desfaz a conciliação de uma transação — crédito e débito NUNCA
+    compartilham o mesmo tratamento: crédito desfaz VÍNCULOS (o dinheiro
+    recebido nunca é apagado); débito remove a DESPESA que a própria
+    conciliação criou, para impedir duplicidade se o usuário relançar.
 
     Crédito: remove os recebimentos criados por ela (recalculando saldo/
     status das receitas) e reabre as comissões que a conciliação marcou
-    como pagas.
+    como pagas. Vínculos, nunca dinheiro, são desfeitos.
 
-    Débito: desvincula a despesa lançada (transacao.despesa = None) sem
-    excluí-la — a despesa representa um pagamento que de fato ocorreu;
-    Despesa.delete() é bloqueado enquanto ela estiver vinculada a uma
-    transação conciliada (item 4), então a única forma de "desfazer" um
-    débito é por aqui, nunca excluindo a despesa direto pelo Admin.
+    Débito: lancar_despesa() CRIA uma Despesa nova a cada lançamento — se o
+    desfazer apenas desvinculasse essa despesa (deixando-a "paga" e
+    existindo), o usuário poderia relançar o mesmo débito e duplicar a
+    despesa. Por isso, sob lock, confirma que a despesa foi criada
+    exclusivamente por esta transação (_despesa_e_origem_exclusiva_do_
+    debito) e a EXCLUI junto com o vínculo. Se a despesa foi vinculada
+    manualmente, tem outros vínculos, ou foi alterada de forma que quebre
+    essa garantia de origem, o desfazer automático é bloqueado com uma
+    mensagem clara — exige revisão manual (editar/excluir a despesa pelo
+    Admin antes de tentar novamente).
 
-    Registrada no histórico da transação (simple-history).
+    Registrada no histórico da transação e, para débitos, também no
+    histórico da despesa excluída (simple-history).
     """
     transacao = TransacaoExtrato.objects.select_for_update().get(pk=transacao.pk)
     if transacao.status != 'conciliada':
         raise ConciliacaoInvalidaError('Só é possível desfazer transações conciliadas.')
 
     if transacao.despesa_id:
+        despesa = Despesa.objects.select_for_update().get(pk=transacao.despesa_id)
+        if not _despesa_e_origem_exclusiva_do_debito(despesa, transacao):
+            raise ConciliacaoInvalidaError(
+                'Não é possível confirmar com segurança que esta despesa foi criada '
+                'exclusivamente por este lançamento (ela pode ter sido vinculada '
+                'manualmente, ter outros vínculos financeiros, ou ter sido alterada) — '
+                'a exclusão automática foi bloqueada. Revisão manual necessária: trate a '
+                'despesa pelo Admin de Despesas antes de desfazer esta conciliação.'
+            )
+        # Desvincula ANTES de excluir: Despesa.delete() consulta
+        # despesa_tem_conciliacao_ativa() (que olha transacoes_extrato com
+        # status='conciliada') e rejeitaria a exclusão se o vínculo ainda
+        # existisse no momento do delete() abaixo.
         transacao.despesa = None
         transacao.status = 'pendente'
         transacao.save(update_fields=['despesa', 'status'])
+        despesa.delete()
         return transacao
 
     if transacao.comissoes_marcadas:
@@ -663,11 +713,13 @@ def excluir_extrato_sem_movimentacoes(extrato_id, usuario=None):
 
     TransacaoExtrato.extrato é PROTECT (não CASCADE) — por isso as
     transações pendentes são excluídas EXPLICITAMENTE aqui, uma a uma, antes
-    do extrato (cada .delete() individual passa pela proteção de instância
-    de TransacaoExtrato, que só permite isso por já estarem pendentes e sem
-    vínculo — confirmado por extrato_pode_ser_excluido() acima). O arquivo
-    físico só é removido do storage DEPOIS do commit (transaction.on_commit)
-    — se a transação reverter por qualquer motivo, o arquivo nunca é tocado.
+    do extrato. TransacaoExtrato.delete() bloqueia qualquer exclusão direta
+    (item 4) — só passa quando este service seta o sinalizador privado
+    _exclusao_via_service_seguro em cada transação, depois de confirmar via
+    extrato_pode_ser_excluido() que todas estão pendentes e sem vínculo. O
+    arquivo físico só é removido do storage DEPOIS do commit
+    (transaction.on_commit) — se a transação reverter por qualquer motivo,
+    o arquivo nunca é tocado.
 
     `usuario`, quando informado, é registrado como autor da exclusão no
     histórico (django-simple-history) via _history_user — funciona mesmo
@@ -690,6 +742,10 @@ def excluir_extrato_sem_movimentacoes(extrato_id, usuario=None):
     for transacao in transacoes:
         if usuario is not None:
             transacao._history_user = usuario
+        # Sinalizador privado (item 4, rodada de fechamento estrutural): só
+        # este service pode setá-lo — TransacaoExtrato.delete() rejeita
+        # qualquer exclusão direta que não venha por aqui.
+        transacao._exclusao_via_service_seguro = True
         transacao.delete()
 
     arquivo = extrato.arquivo

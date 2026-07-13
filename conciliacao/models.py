@@ -2,7 +2,6 @@ from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.core.validators import FileExtensionValidator
 from django.db import models
-from django.db.models import Q
 from simple_history.models import HistoricalRecords
 
 from financeiro.models import ReceitaAluguel, Despesa
@@ -108,22 +107,23 @@ class ExtratoImportado(models.Model):
 
 class TransacaoExtratoQuerySet(models.QuerySet):
     """
-    QuerySet.delete() em massa nunca pode contornar as regras de instância —
-    bloqueia se o conjunto incluir QUALQUER transação tratada (não pendente)
-    ou com vínculo financeiro (recebimento, despesa, conciliações).
+    Exclusão em massa de TransacaoExtrato NUNCA é permitida (item 4, rodada
+    de fechamento estrutural) — nem mesmo quando todas as transações do
+    conjunto estão pendentes e sem vínculo algum. Excluir uma transação
+    importada, isoladamente, deixaria os metadados do extrato (contadores
+    de novas/duplicadas, período detectado) divergentes do arquivo OFX
+    original. A única exclusão possível é a do extrato inteiro (quando
+    totalmente pendente), que exclui cada transação INDIVIDUALMENTE via
+    TransacaoExtrato.delete() dentro de excluir_extrato_sem_movimentacoes()
+    — nunca por QuerySet.delete().
     """
     def delete(self):
-        bloqueadas = self.exclude(status='pendente').exists() or self.filter(
-            Q(recebimentos__isnull=False) | Q(despesa__isnull=False)
-            | Q(itens_receita__isnull=False) | Q(itens_comissao__isnull=False)
-        ).distinct().exists()
-        if bloqueadas:
-            raise ValidationError(
-                'Este conjunto inclui transação(ões) tratada(s) ou com vínculo financeiro — '
-                'exclusão em massa (QuerySet.delete()) só é permitida para transações '
-                'totalmente pendentes e sem vínculo.'
-            )
-        return super().delete()
+        raise ValidationError(
+            'Exclusão em massa (QuerySet.delete()) de TransacaoExtrato não é permitida — '
+            'nenhuma transação importada pode ser excluída isoladamente, nem mesmo pendente '
+            'e sem vínculo. Exclua o extrato inteiro (quando totalmente pendente) pela tela '
+            'de Conciliação Bancária.'
+        )
 
 
 class TransacaoExtrato(models.Model):
@@ -200,24 +200,19 @@ class TransacaoExtrato(models.Model):
         return abs(self.valor)
 
     def delete(self, *args, **kwargs):
-        # Reconsulta o estado REAL (nunca confia em self, que pode estar
-        # desatualizada) antes de decidir — mesmo padrão de ReajusteContrato.
-        # Só permite excluir transação realmente pendente e sem NENHUM
-        # vínculo financeiro (defesa em profundidade: por construção,
-        # status='conciliada'/'ignorada' já implica algum vínculo, mas um
-        # estado legado/inconsistente não deve escapar por aqui).
-        persistida = TransacaoExtrato.objects.filter(pk=self.pk).first()
-        alvo = persistida or self
-        if alvo.status != 'pendente':
+        # Bloqueado, salvo quando chamado pelo service seguro (que já
+        # validou extrato_pode_ser_excluido() e bloqueou/reconfirmou cada
+        # transação antes de chegar aqui) — sinalizador privado, setado
+        # exclusivamente por excluir_extrato_sem_movimentacoes() (item 4,
+        # rodada de fechamento estrutural). Nenhuma transação importada pode
+        # ser excluída isoladamente, nem mesmo pendente e sem vínculo — isso
+        # deixaria os metadados do extrato divergentes do arquivo OFX
+        # original. Mesmo padrão de ExtratoImportado.delete().
+        if not getattr(self, '_exclusao_via_service_seguro', False):
             raise ValidationError(
-                'Transação tratada (conciliada/ignorada) não pode ser excluída diretamente.'
-            )
-        if (
-            alvo.recebimentos.exists() or alvo.despesa_id
-            or alvo.itens_receita.exists() or alvo.itens_comissao.exists()
-        ):
-            raise ValidationError(
-                'Transação com vínculo financeiro não pode ser excluída diretamente.'
+                'Transação importada não pode ser excluída diretamente — a única forma de '
+                'remover transações é excluir o extrato inteiro (quando totalmente pendente) '
+                'pela tela de Conciliação Bancária.'
             )
         super().delete(*args, **kwargs)
 

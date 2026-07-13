@@ -52,8 +52,12 @@ def dashboard(request):
 
     if ve_receitas:
         receitas_mes = ReceitaAluguel.objects.filter(competencia_mes=mes_atual, competencia_ano=ano_atual)
-        # Valor EXIGÍVEL do mês (item 8): exclui canceladas — a cobrança
-        # delas foi encerrada, não é mais "receita prevista" a cobrar.
+        # "Receita Prevista" do mês: soma SÓ valor_previsto (não é o valor
+        # exigível, que também somaria multa+juros−desconto — ver
+        # valor_total_devido_expr()) — coerente para planejamento, não
+        # renomear nem documentar como "Exigível" (item 8, rodada de
+        # fechamento estrutural). Exclui canceladas — a cobrança delas foi
+        # encerrada, não é mais "receita prevista" a cobrar.
         receitas_previstas = receitas_mes.exclude(status='cancelado').aggregate(
             total=Sum('valor_previsto')
         )['total'] or 0

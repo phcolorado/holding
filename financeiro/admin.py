@@ -16,6 +16,7 @@ from .services import (
 
 CAMPOS_DESPESA_PROTEGIDOS_ADMIN = (
     'valor', 'status', 'data_pagamento', 'categoria', 'fornecedor', 'imovel', 'contrato', 'receita',
+    'descricao', 'competencia_mes', 'competencia_ano', 'data_vencimento', 'origem_automatica',
 )
 
 

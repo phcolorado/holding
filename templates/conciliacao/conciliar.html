@@ -225,12 +225,20 @@
                     <td class="small">
                         {% if t.status == 'ignorada' %}
                         <span class="badge bg-secondary">Ignorada</span>
-                        {% elif t.despesa %}
-                        Despesa: {{ t.despesa.descricao|truncatechars:35 }}
+                        {% elif t.tipo == 'debito' %}
+                            {% if pode_ver_detalhes_despesas %}
+                            Despesa: {{ t.despesa.descricao|truncatechars:35 }}
+                            {% else %}
+                            Débito conciliado
+                            {% endif %}
                         {% else %}
-                        {% for item in t.itens_receita.all %}
-                        {{ item.receita.imovel.nome }} (R$ {{ item.valor_atribuido|floatformat:2 }}){% if not forloop.last %}, {% endif %}
-                        {% endfor %}
+                            {% if pode_ver_detalhes_receitas %}
+                            {% for item in t.itens_receita.all %}
+                            {{ item.receita.imovel.nome }} (R$ {{ item.valor_atribuido|floatformat:2 }}){% if not forloop.last %}, {% endif %}
+                            {% endfor %}
+                            {% else %}
+                            Crédito conciliado
+                            {% endif %}
                         {% endif %}
                     </td>
                     <td class="text-end">
@@ -248,7 +256,7 @@
                             <input type="hidden" name="transacao_id" value="{{ t.pk }}">
                             <input type="hidden" name="action" value="desfazer">
                             <button type="submit" class="btn btn-sm btn-outline-danger py-0"
-                                    onclick="return confirm('Desfazer esta conciliação? Os recebimentos criados por ela serão removidos e as receitas/comissões voltarão ao estado anterior.')">
+                                    onclick="return confirm('{% if t.tipo == "debito" %}Desfazer esta conciliação? A despesa lançada por ela será excluída (se criada exclusivamente por este lançamento).{% else %}Desfazer esta conciliação? Os recebimentos criados por ela serão removidos e as receitas/comissões voltarão ao estado anterior.{% endif %}')">
                                 Desfazer
                             </button>
                         </form>

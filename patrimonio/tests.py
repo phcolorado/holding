@@ -355,7 +355,7 @@ class ReajusteContratoTest(TestCase):
     def test_aplicar_atualiza_valor_vigente_do_contrato(self):
         reajuste = ReajusteContrato.objects.create(
             contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
-            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'), aplicado=True,
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'),
         )
         reajuste.aplicar()
         self.contrato.refresh_from_db()
@@ -364,7 +364,7 @@ class ReajusteContratoTest(TestCase):
     def test_aplicar_atualiza_encargo_aluguel(self):
         reajuste = ReajusteContrato.objects.create(
             contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
-            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'), aplicado=True,
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'),
         )
         reajuste.aplicar()
         self.encargo_aluguel.refresh_from_db()
@@ -373,7 +373,7 @@ class ReajusteContratoTest(TestCase):
     def test_aplicar_avanca_data_proximo_reajuste_12_meses(self):
         reajuste = ReajusteContrato.objects.create(
             contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
-            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'), aplicado=True,
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'),
         )
         reajuste.aplicar()
         self.contrato.refresh_from_db()
@@ -384,7 +384,7 @@ class ReajusteContratoTest(TestCase):
         self.contrato.save()
         reajuste = ReajusteContrato.objects.create(
             contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='fixo',
-            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2100.00'), aplicado=True,
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2100.00'),
         )
         reajuste.aplicar()
         self.contrato.refresh_from_db()
@@ -393,7 +393,7 @@ class ReajusteContratoTest(TestCase):
     def test_aplicar_cria_historico(self):
         ReajusteContrato.objects.create(
             contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
-            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'), aplicado=True,
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'),
         )
         self.assertEqual(ReajusteContrato.objects.filter(contrato=self.contrato).count(), 1)
 
@@ -408,7 +408,7 @@ class ReajusteContratoTest(TestCase):
         )
         reajuste = ReajusteContrato.objects.create(
             contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
-            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'), aplicado=True,
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'),
         )
         reajuste.aplicar()
         receita.refresh_from_db()
@@ -813,7 +813,7 @@ class ReajusteAdminTransicaoTest(TestCase):
     def test_reajuste_ja_aplicado_nao_reaplica(self):
         reajuste = ReajusteContrato.objects.create(
             contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
-            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'), aplicado=True,
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'),
         )
         # Primeira aplicação real (fora do save_formset, simulando estado já processado)
         reajuste.aplicar()
@@ -847,7 +847,7 @@ class ReajusteAdminTransicaoTest(TestCase):
 
         reajuste = ReajusteContrato.objects.create(
             contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
-            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'), aplicado=True,
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'),
         )
         reajuste.aplicar()
 
@@ -865,6 +865,98 @@ class ReajusteAdminTransicaoTest(TestCase):
         self.assertTrue(ReajusteContrato.objects.filter(pk=reajuste.pk).exists())
         mensagens = [str(m) for m in request._messages]
         self.assertTrue(any('já foi aplicado' in m for m in mensagens))
+
+
+# ─── Consistência aplicado × aplicado_em (item 5, rodada de fechamento estrutural) ──
+
+class ReajusteConsistenciaAplicadoTest(TestCase):
+    """
+    Únicos estados válidos: (aplicado=False, aplicado_em=None) ou
+    (aplicado=True, aplicado_em preenchido) — nunca uma combinação
+    intermediária, mesmo em criação direta via ORM.
+    """
+
+    def setUp(self):
+        self.imovel = _criar_imovel('Imóvel Consistência')
+        self.locatario = _criar_pessoa('Locatário Consistência')
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, date(2024, 1, 1), date(2026, 12, 31),
+            valor_aluguel=Decimal('2000.00'), indice_reajuste='ipca',
+        )
+
+    def test_criacao_aplicado_true_sem_data_e_rejeitada(self):
+        with self.assertRaises(ValidationError):
+            ReajusteContrato.objects.create(
+                contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
+                valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'), aplicado=True,
+            )
+        self.assertFalse(ReajusteContrato.objects.filter(contrato=self.contrato).exists())
+
+    def test_criacao_aplicado_false_com_data_e_rejeitada(self):
+        with self.assertRaises(ValidationError):
+            ReajusteContrato.objects.create(
+                contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
+                valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'),
+                aplicado=False, aplicado_em=timezone.now(),
+            )
+        self.assertFalse(ReajusteContrato.objects.filter(contrato=self.contrato).exists())
+
+    def test_criacao_pendente_valida(self):
+        reajuste = ReajusteContrato.objects.create(
+            contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'),
+        )
+        self.assertFalse(reajuste.aplicado)
+        self.assertIsNone(reajuste.aplicado_em)
+
+    def test_aplicado_pelo_metodo_aplicar_e_valido(self):
+        reajuste = ReajusteContrato.objects.create(
+            contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'),
+        )
+        reajuste.aplicar()
+        reajuste.refresh_from_db()
+        self.assertTrue(reajuste.aplicado)
+        self.assertIsNotNone(reajuste.aplicado_em)
+
+    def test_admin_continua_aplicando_corretamente(self):
+        """Fluxo do ContratoAdmin.save_formset (força aplicado=False antes de
+        salvar, depois chama aplicar() separadamente) continua funcionando
+        com a nova constraint/validação."""
+        from django.contrib import admin as django_admin
+        from patrimonio.admin import ContratoAdmin
+
+        EncargoContrato.objects.create(contrato=self.contrato, tipo='aluguel', valor=Decimal('2000.00'))
+        reajuste = ReajusteContrato(
+            contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'), aplicado=True,
+        )
+        admin_instance = ContratoAdmin(Contrato, django_admin.site)
+        formset = _FakeReajusteFormSet([reajuste])
+        form = DocumentoContratoInlineTest._FakeForm(self.contrato)
+        admin_instance.save_formset(request=None, form=form, formset=formset, change=True)
+
+        self.contrato.refresh_from_db()
+        self.assertEqual(self.contrato.valor_aluguel, Decimal('2150.00'))
+        reajuste.refresh_from_db()
+        self.assertTrue(reajuste.aplicado)
+        self.assertIsNotNone(reajuste.aplicado_em)
+
+    def test_constraint_atua_em_criacao_direta_via_orm_ignorando_save(self):
+        """
+        Mesmo contornando Model.save() (bulk_create não chama save()/clean()),
+        a CheckConstraint do banco rejeita o estado inconsistente.
+        """
+        from django.db import IntegrityError, transaction
+
+        inconsistente = ReajusteContrato(
+            contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'), aplicado=True,
+        )
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                ReajusteContrato.objects.bulk_create([inconsistente])
+
 
 
 # ─── Dashboard: contratos vencendo respeita prazo indeterminado ───────────────
@@ -1531,11 +1623,13 @@ class ReajusteProtegidoTest(TestCase):
         self.assertFalse(ReajusteContrato.objects.filter(pk=pendente.pk).exists())
 
     def test_pendencia_e_definida_por_aplicado_em(self):
-        # flag aplicado=True marcada manualmente sem aplicar (dado antigo):
-        # continua PENDENTE pela regra oficial (aplicado_em IS NULL)
+        # Pendente (aplicado=False, aplicado_em=None) aparece na consulta de
+        # pendências oficial; aplicado=True SEM aplicado_em não pode mais ser
+        # criado (item 5, rodada de fechamento estrutural) — ver
+        # ReajusteConsistenciaAplicadoTest.test_criacao_aplicado_true_sem_data_e_rejeitada.
         avulso = ReajusteContrato.objects.create(
             contrato=self.contrato, data_reajuste=date(2025, 6, 1), indice='ipca',
-            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2100.00'), aplicado=True,
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2100.00'), aplicado=False,
         )
         pendentes = self.contrato.reajustes.filter(aplicado_em__isnull=True)
         self.assertIn(avulso, pendentes)
@@ -1687,6 +1781,92 @@ class ReajusteProtegidoTest(TestCase):
         self.assertTrue(Contrato.objects.filter(pk=self.contrato.pk).exists())
 
 
+# ─── Bloqueio completo de QuerySet.delete() (item 6, rodada de fechamento estrutural) ──
+
+class ReajusteQuerySetDeleteBloqueadoTest(TestCase):
+    """
+    ReajusteContratoQuerySet.delete() nunca é permitido — nem mesmo quando
+    TODO o conjunto é pendente (elimina a janela de corrida entre exists() e
+    delete() da versão anterior). Exclusão de pendentes é sempre individual.
+    """
+
+    def setUp(self):
+        self.imovel = _criar_imovel('Imóvel QSDel')
+        self.locatario = _criar_pessoa('Locatário QSDel')
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, date(2024, 1, 1), date(2026, 12, 31),
+            valor_aluguel=Decimal('2000.00'), indice_reajuste='ipca',
+        )
+
+    def test_queryset_de_pendentes_nao_pode_ser_excluido_em_massa(self):
+        ReajusteContrato.objects.create(
+            contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2100.00'),
+        )
+        ReajusteContrato.objects.create(
+            contrato=self.contrato, data_reajuste=date(2025, 6, 1), indice='ipca',
+            valor_anterior=Decimal('2100.00'), valor_novo=Decimal('2200.00'),
+        )
+        with self.assertRaises(ValidationError):
+            ReajusteContrato.objects.filter(contrato=self.contrato).delete()
+        self.assertEqual(ReajusteContrato.objects.filter(contrato=self.contrato).count(), 2)
+
+    def test_queryset_misto_nao_pode_ser_excluido_em_massa(self):
+        aplicado = ReajusteContrato.objects.create(
+            contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2100.00'),
+        )
+        aplicado.aplicar()
+        ReajusteContrato.objects.create(
+            contrato=self.contrato, data_reajuste=date(2025, 6, 1), indice='ipca',
+            valor_anterior=Decimal('2100.00'), valor_novo=Decimal('2200.00'),
+        )
+        with self.assertRaises(ValidationError):
+            ReajusteContrato.objects.filter(contrato=self.contrato).delete()
+        self.assertEqual(ReajusteContrato.objects.filter(contrato=self.contrato).count(), 2)
+
+    def test_exclusao_individual_de_pendente_funciona(self):
+        pendente = ReajusteContrato.objects.create(
+            contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2100.00'),
+        )
+        pendente.delete()
+        self.assertFalse(ReajusteContrato.objects.filter(pk=pendente.pk).exists())
+
+    def test_exclusao_individual_de_aplicado_falha(self):
+        aplicado = ReajusteContrato.objects.create(
+            contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2100.00'),
+        )
+        aplicado.aplicar()
+        with self.assertRaises(ValidationError):
+            aplicado.delete()
+        self.assertTrue(ReajusteContrato.objects.filter(pk=aplicado.pk).exists())
+
+    def test_instancia_desatualizada_nao_exclui_registro_aplicado_por_outro_processo(self):
+        pendente = ReajusteContrato.objects.create(
+            contrato=self.contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2100.00'),
+        )
+        desatualizada = ReajusteContrato.objects.get(pk=pendente.pk)
+        via_outro_processo = ReajusteContrato.objects.get(pk=pendente.pk)
+        via_outro_processo.aplicar()
+
+        with self.assertRaises(ValidationError):
+            desatualizada.delete()
+        self.assertTrue(ReajusteContrato.objects.filter(pk=pendente.pk).exists())
+
+    def test_admin_nao_tem_registro_proprio_nem_acao_de_exclusao_em_massa(self):
+        """
+        ReajusteContrato não tem @admin.register próprio (só o inline em
+        ContratoAdmin, cuja exclusão é sempre por objeto individual via
+        formset.deleted_objects) — não existe changelist, logo não existe a
+        ação padrão "Excluir selecionados" para reajustes.
+        """
+        from django.contrib import admin as django_admin
+        self.assertNotIn(ReajusteContrato, django_admin.site._registry)
+
+
 # ─── Rodada 2: unicidade de CPF/CNPJ no banco ─────────────────────────────────
 
 class CpfCnpjUnicidadeTest(TestCase):
@@ -1754,6 +1934,92 @@ class CpfCnpjMigrationCheckTest(TransactionTestCase):
             Pessoa.objects.filter(nome__in=['Dup A', 'Dup B']).delete()
             with connection.schema_editor() as editor:
                 editor.add_constraint(Pessoa, constraint)
+
+
+class ReajusteMigrationCheckTest(TestCase):
+    """
+    Testa a FUNÇÃO de pré-condição da migration 0011 (item 5, rodada de
+    fechamento estrutural) isoladamente, com um `apps` simulado (mock) —
+    diferente de CpfCnpjMigrationCheckTest (UniqueConstraint, implementada
+    como índice no SQLite e por isso removível/recriável em tempo de teste),
+    a CheckConstraint de ReajusteContrato fica embutida na definição da
+    tabela no SQLite: remover e recriar a constraint via schema_editor fora
+    do fluxo real de uma migration reconstruiria a tabela a partir do
+    MODELO PYTHON ATUAL (que ainda declara a constraint), então não haveria
+    como inserir de fato um registro inconsistente na tabela real para
+    testar. Simular `apps.get_model(...)` evita essa limitação e testa a
+    função exatamente como a migration a executa.
+    """
+
+    def test_migration_detecta_registros_antigos_inconsistentes(self):
+        import importlib
+        from unittest.mock import MagicMock
+
+        _0011 = importlib.import_module(
+            'patrimonio.migrations.0011_reajuste_aplicado_aplicado_em_coerentes'
+        )
+
+        def filtro_simulado(**kwargs):
+            queryset = MagicMock()
+            if kwargs == {'aplicado': True, 'aplicado_em__isnull': True}:
+                queryset.values_list.return_value = [(101, 55)]
+            elif kwargs == {'aplicado': False, 'aplicado_em__isnull': False}:
+                queryset.values_list.return_value = [(202, 77, 'DATA-TESTE')]
+            else:
+                queryset.values_list.return_value = []
+            return queryset
+
+        modelo_falso = MagicMock()
+        modelo_falso.objects.filter.side_effect = filtro_simulado
+        apps_falso = MagicMock()
+        apps_falso.get_model.return_value = modelo_falso
+
+        with self.assertRaises(RuntimeError) as ctx:
+            _0011.verificar_dados_invalidos(apps_falso, None)
+        mensagem = str(ctx.exception)
+        self.assertIn('#101', mensagem)
+        self.assertIn('55', mensagem)
+        self.assertIn('#202', mensagem)
+        self.assertIn('77', mensagem)
+        apps_falso.get_model.assert_called_with('patrimonio', 'ReajusteContrato')
+
+    def test_migration_nao_interrompe_quando_dados_consistentes(self):
+        import importlib
+        from unittest.mock import MagicMock
+
+        _0011 = importlib.import_module(
+            'patrimonio.migrations.0011_reajuste_aplicado_aplicado_em_coerentes'
+        )
+        modelo_falso = MagicMock()
+        modelo_falso.objects.filter.return_value.values_list.return_value = []
+        apps_falso = MagicMock()
+        apps_falso.get_model.return_value = modelo_falso
+
+        _0011.verificar_dados_invalidos(apps_falso, None)  # não deve levantar
+
+    def test_migration_ja_aplicada_sobre_dados_reais_consistentes(self):
+        """
+        Sobre o banco de teste real (já migrado até a constraint), qualquer
+        ReajusteContrato existente é sempre consistente — a própria função
+        de pré-checagem, chamada com o `apps` real, não encontra conflitos.
+        """
+        import importlib
+        from django.apps import apps as django_apps
+
+        _0011 = importlib.import_module(
+            'patrimonio.migrations.0011_reajuste_aplicado_aplicado_em_coerentes'
+        )
+        imovel = _criar_imovel('Imóvel Migration Check Real')
+        locatario = _criar_pessoa('Locatário Migration Check Real')
+        contrato = _criar_contrato(
+            imovel, locatario, date(2024, 1, 1), date(2026, 12, 31),
+            valor_aluguel=Decimal('2000.00'), indice_reajuste='ipca',
+        )
+        ReajusteContrato.objects.create(
+            contrato=contrato, data_reajuste=date(2025, 1, 1), indice='ipca',
+            valor_anterior=Decimal('2000.00'), valor_novo=Decimal('2150.00'),
+        )
+        _0011.verificar_dados_invalidos(django_apps, None)  # não deve levantar
 
 
 # ─── Rodada 2: combinações de permissão no detalhe do imóvel ──────────────────

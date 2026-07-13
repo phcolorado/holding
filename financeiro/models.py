@@ -200,11 +200,16 @@ class ReceitaAluguel(models.Model):
             self.status = 'atrasado'
             self.save(update_fields=['status'])
 
-    def garantir_recebimento_legado(self):
+    def garantir_recebimento_legado(self, usuario=None):
         """
         Materializa como RecebimentoReceita um valor_recebido consolidado que
         exista sem recebimentos (dado legado ou editado diretamente) — evita
         que o recálculo apague o histórico ao registrar um novo recebimento.
+
+        `usuario`, quando informado (operação disparada por um usuário fora
+        de uma requisição HTTP), é registrado como autor desta materialização
+        no histórico (django-simple-history) via _history_user — mesmo
+        padrão de excluir_extrato_sem_movimentacoes().
         """
         if (self.valor_recebido or Decimal('0')) > 0 and not self.recebimentos.exists():
             legado = RecebimentoReceita(
@@ -215,6 +220,8 @@ class ReceitaAluguel(models.Model):
                 observacoes='Recebimento consolidado preexistente, materializado automaticamente.',
             )
             legado._eh_legado = True
+            if usuario is not None:
+                legado._history_user = usuario
             legado.save()
 
     def recalcular_recebimentos(self, preservar_legado=True):
@@ -521,10 +528,15 @@ class Despesa(models.Model):
 
     # Campos que ficam somente-leitura enquanto despesa_tem_conciliacao_
     # ativa() for True — cobre valor/status/data_pagamento/categoria/
-    # fornecedor/vínculos financeiros; observações continuam editáveis.
+    # fornecedor/vínculos financeiros e também descrição/competência/
+    # vencimento/origem automática (item 2, rodada de fechamento
+    # estrutural): a despesa fica INTEIRAMENTE imutável, exceto
+    # observações, enquanto a conciliação estiver ativa.
     CAMPOS_PROTEGIDOS_COM_CONCILIACAO_ATIVA = (
         'valor', 'status', 'data_pagamento', 'categoria',
         'fornecedor_id', 'imovel_id', 'contrato_id', 'receita_id',
+        'descricao', 'competencia_mes', 'competencia_ano',
+        'data_vencimento', 'origem_automatica',
     )
 
     MESES = MESES

@@ -166,6 +166,16 @@ def atualizar_recebimentos_da_receita(receita_id, novos=None, alterados=None, ex
     final — cada gravação individual usa o flag _pular_recalculo_receita
     (RecebimentoReceita.save()/delete() continuam disparando os sinais do
     django-simple-history normalmente, só pulam a reconsolidação por linha).
+
+    `usuario`, quando informado, é registrado como autor de CADA operação
+    (criação, alteração, exclusão e eventual materialização de legado) no
+    histórico (django-simple-history) via _history_user — necessário porque
+    esta função roda tanto dentro de uma requisição HTTP (onde o middleware
+    de histórico já capturaria request.user automaticamente) quanto fora
+    dela (scripts, comandos, chamadas diretas), caso em que o middleware não
+    tem como capturar o usuário via thread-local. Chamadas sem usuário
+    (migrations, processos internos) continuam aceitas normalmente — nesse
+    caso o histórico simplesmente não tem history_user, como sempre.
     """
     novos = novos or []
     alterados = alterados or []
@@ -183,7 +193,7 @@ def atualizar_recebimentos_da_receita(receita_id, novos=None, alterados=None, ex
         # Idempotente: só materializa se houver valor_recebido legado sem
         # recebimentos — evita perder um consolidado preexistente ao somar
         # o primeiro recebimento novo do lote.
-        receita.garantir_recebimento_legado()
+        receita.garantir_recebimento_legado(usuario=usuario)
 
     existentes = {r.pk: r for r in receita.recebimentos.all()}
     excluidos_set = set(excluidos)
@@ -203,6 +213,8 @@ def atualizar_recebimentos_da_receita(receita_id, novos=None, alterados=None, ex
     for pk in excluidos_set:
         rec = existentes[pk]
         rec._pular_recalculo_receita = True
+        if usuario is not None:
+            rec._history_user = usuario
         rec.delete()
     for dados in alterados:
         rec = existentes[dados['pk']]
@@ -210,6 +222,8 @@ def atualizar_recebimentos_da_receita(receita_id, novos=None, alterados=None, ex
         rec.valor = dados['valor']
         rec.observacoes = dados.get('observacoes', '')
         rec._pular_recalculo_receita = True
+        if usuario is not None:
+            rec._history_user = usuario
         rec.save(update_fields=['data_recebimento', 'valor', 'observacoes'])
     for dados in novos:
         novo = RecebimentoReceita(
@@ -221,6 +235,8 @@ def atualizar_recebimentos_da_receita(receita_id, novos=None, alterados=None, ex
             criado_por=usuario,
         )
         novo._pular_recalculo_receita = True
+        if usuario is not None:
+            novo._history_user = usuario
         novo.save()
 
     receita.recalcular_recebimentos()

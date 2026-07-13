@@ -559,9 +559,13 @@ class ReajusteContratoQuerySet(models.QuerySet):
     auto_now) podem ser alterados em massa — para o restante, use
     instance.save() (reforça a imutabilidade) ou o método aplicar().
 
-    delete(): continua bloqueando pelo ESTADO do conjunto (não há como
-    "delete parcial por campo") — qualquer reajuste aplicado no conjunto
-    bloqueia a exclusão em massa inteira.
+    delete(): BLOQUEADO COMPLETAMENTE (item 6, rodada de fechamento
+    estrutural) — nunca permite exclusão em massa, mesmo quando TODO o
+    conjunto é pendente. A checagem anterior (exists() de aplicados, seguida
+    de super().delete()) tinha uma janela de corrida entre as duas operações
+    — um reajuste podia ser aplicado por outro processo exatamente nesse
+    intervalo. Exclusão de reajustes pendentes é sempre INDIVIDUAL, via
+    reajuste.delete() (que reconsulta o estado persistido antes de excluir).
     """
     CAMPOS_SEGUROS_PARA_UPDATE_EM_MASSA = frozenset({'observacoes', 'atualizado_em'})
 
@@ -580,12 +584,11 @@ class ReajusteContratoQuerySet(models.QuerySet):
         return super().update(**kwargs)
 
     def delete(self):
-        if self.filter(aplicado_em__isnull=False).exists():
-            raise ValidationError(
-                'Este conjunto inclui reajuste(s) já aplicado(s) — exclusão em massa '
-                '(QuerySet.delete()) não é permitida sobre reajustes aplicados.'
-            )
-        return super().delete()
+        raise ValidationError(
+            'Exclusão em massa (QuerySet.delete()) de ReajusteContrato não é permitida — '
+            'exclua reajustes pendentes individualmente (reajuste.delete()). Reajustes '
+            'já aplicados nunca podem ser excluídos, mesmo individualmente.'
+        )
 
 
 class ReajusteContrato(models.Model):
@@ -628,6 +631,19 @@ class ReajusteContrato(models.Model):
         verbose_name = 'Reajuste de Contrato'
         verbose_name_plural = 'Reajustes de Contrato'
         ordering = ['-data_reajuste']
+        constraints = [
+            # Únicos estados válidos: (aplicado=False, aplicado_em=NULL) ou
+            # (aplicado=True, aplicado_em preenchido) — nunca uma combinação
+            # intermediária, mesmo em criação direta via ORM que contorne
+            # clean()/save() (item 5, rodada de fechamento estrutural).
+            models.CheckConstraint(
+                check=(
+                    Q(aplicado=False, aplicado_em__isnull=True)
+                    | Q(aplicado=True, aplicado_em__isnull=False)
+                ),
+                name='reajustecontrato_aplicado_aplicado_em_coerentes',
+            ),
+        ]
 
     def __str__(self):
         return f'Reajuste {self.contrato} em {self.data_reajuste:%d/%m/%Y}'
@@ -644,6 +660,22 @@ class ReajusteContrato(models.Model):
             erros['valor_novo'] = 'O valor novo deve ser maior que zero.'
         if self.valor_anterior is not None and self.valor_anterior <= 0:
             erros['valor_anterior'] = 'O valor anterior deve ser maior que zero.'
+
+        # Item 5 (rodada de fechamento estrutural): únicos estados válidos
+        # são (aplicado=False, aplicado_em=None) ou (aplicado=True,
+        # aplicado_em preenchido) — nunca uma combinação intermediária,
+        # mesmo em criação. A aplicação inicial só pode ocorrer por
+        # aplicar(); nenhuma data é preenchida automaticamente aqui.
+        if self.aplicado and self.aplicado_em is None:
+            erros['aplicado_em'] = (
+                'Reajuste marcado como aplicado exige "aplicado em" preenchido — use o '
+                'método aplicar() para aplicar um reajuste.'
+            )
+        if not self.aplicado and self.aplicado_em is not None:
+            erros['aplicado'] = (
+                'Reajuste com "aplicado em" preenchido deve estar marcado como aplicado '
+                '— estado inconsistente.'
+            )
 
         if self.pk:
             persistido = ReajusteContrato.objects.filter(pk=self.pk).first()
@@ -699,15 +731,27 @@ class ReajusteContrato(models.Model):
                             'imutáveis (mesmo por save() direto). Apenas as observações '
                             'podem ser alteradas. Para corrigir, registre um novo reajuste.'
                         )
-        # Um reajuste com aplicado_em preenchido é, por definição, aplicado —
-        # nunca pode voltar a aplicado=False (mesmo por saves diretos via ORM).
-        # Cobre também a PRIMEIRA aplicação (self.pk ainda sem persistido, ou
-        # aplicar() setando os dois campos juntos antes deste save()).
-        if self.aplicado_em is not None and not self.aplicado:
-            self.aplicado = True
-            update_fields = kwargs.get('update_fields')
-            if update_fields is not None and 'aplicado' not in update_fields:
-                kwargs['update_fields'] = list(update_fields) + ['aplicado']
+        # Estados válidos de aplicado × aplicado_em (item 5, rodada de
+        # fechamento estrutural): (False, None) ou (True, <data>) — nunca uma
+        # combinação intermediária, mesmo por save() direto via ORM que
+        # contorne clean(). Diferente de uma versão anterior desta proteção,
+        # que CORRIGIA silenciosamente aplicado=False→True quando aplicado_em
+        # vinha preenchido: agora REJEITA — preencher aplicado_em sem marcar
+        # aplicado=True é sempre um estado inválido a ser corrigido pelo
+        # chamador, nunca "consertado" nos bastidores. A aplicação inicial
+        # legítima (aplicar()) já define os dois campos juntos ANTES deste
+        # save(), então nunca cai nestas duas checagens.
+        if self.aplicado and self.aplicado_em is None:
+            raise ValidationError({
+                'aplicado_em': 'Reajuste marcado como aplicado exige "aplicado em" '
+                'preenchido — use o método aplicar() para aplicar um reajuste (mesmo '
+                'por save() direto).'
+            })
+        if not self.aplicado and self.aplicado_em is not None:
+            raise ValidationError({
+                'aplicado': 'Reajuste com "aplicado em" preenchido deve estar marcado '
+                'como aplicado — estado inconsistente (mesmo por save() direto).'
+            })
         super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):

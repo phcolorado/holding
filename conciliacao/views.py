@@ -146,6 +146,15 @@ def conciliar_extrato(request, pk):
     pode_conciliar_receitas = request.user.has_perm('financeiro.change_receitaaluguel')
     pode_lancar_despesa = request.user.has_perm('financeiro.add_despesa')
     pode_alterar_transacao = request.user.has_perm('conciliacao.change_transacaoextrato')
+    # Item 3 (rodada de fechamento estrutural): ver a lista de extratos NÃO
+    # concede acesso aos detalhes internos das transações já TRATADAS —
+    # descrição/categoria/fornecedor/imóvel de uma despesa e imóvel/
+    # locatário/valores de receitas vinculadas só aparecem para quem também
+    # tem a permissão de VER aquela área (nunca a de escrita, que é outra
+    # coisa). Nomes de imóvel dependem também de patrimonio.view_imovel.
+    ve_imoveis = request.user.has_perm('patrimonio.view_imovel')
+    pode_ver_detalhes_despesas = request.user.has_perm('financeiro.view_despesa') and ve_imoveis
+    pode_ver_detalhes_receitas = request.user.has_perm('financeiro.view_receitaaluguel') and ve_imoveis
 
     if request.method == 'POST':
         transacao = get_object_or_404(
@@ -192,14 +201,20 @@ def conciliar_extrato(request, pk):
         elif action == 'desfazer':
             _exigir_permissao(request, 'conciliacao.change_transacaoextrato')
             try:
-                desfazer_conciliacao(transacao)
+                resultado = desfazer_conciliacao(transacao)
             except ConciliacaoInvalidaError as exc:
                 messages.error(request, str(exc))
             else:
-                messages.success(
-                    request,
-                    'Conciliação desfeita: recebimentos removidos, receitas e comissões restauradas.',
-                )
+                if resultado.tipo == 'debito':
+                    messages.success(
+                        request,
+                        'Conciliação do débito desfeita e despesa vinculada removida.',
+                    )
+                else:
+                    messages.success(
+                        request,
+                        'Conciliação desfeita: recebimentos removidos, receitas e comissões restauradas.',
+                    )
 
         elif action == 'ignorar' and transacao.status == 'pendente':
             _exigir_permissao(request, 'conciliacao.change_transacaoextrato')
@@ -215,12 +230,16 @@ def conciliar_extrato(request, pk):
 
         return HttpResponseRedirect(reverse('conciliar_extrato', args=[extrato.pk]))
 
-    transacoes = (
-        extrato.transacoes
-        .select_related('despesa', 'despesa__imovel')
-        .prefetch_related('itens_receita__receita__imovel')
-        .order_by('data', 'id')
-    )
+    transacoes_qs = extrato.transacoes.order_by('data', 'id')
+    # Item 3: só faz select_related/prefetch_related dos objetos protegidos
+    # quando o usuário efetivamente pode vê-los — nunca materializa despesa/
+    # receita vinculadas no contexto sem a permissão correspondente.
+    if pode_ver_detalhes_despesas:
+        transacoes_qs = transacoes_qs.select_related('despesa', 'despesa__imovel')
+    if pode_ver_detalhes_receitas:
+        transacoes_qs = transacoes_qs.prefetch_related('itens_receita__receita__imovel')
+    transacoes = list(transacoes_qs)
+
     pendentes = [
         _contexto_transacao(t, pode_conciliar_receitas, pode_lancar_despesa)
         for t in transacoes if t.status == 'pendente'
@@ -239,5 +258,7 @@ def conciliar_extrato(request, pk):
         'pode_conciliar_receitas': pode_conciliar_receitas,
         'pode_lancar_despesa': pode_lancar_despesa,
         'pode_alterar_transacao': pode_alterar_transacao,
+        'pode_ver_detalhes_despesas': pode_ver_detalhes_despesas,
+        'pode_ver_detalhes_receitas': pode_ver_detalhes_receitas,
     }
     return render(request, 'conciliacao/conciliar.html', context)

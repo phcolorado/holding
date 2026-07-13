@@ -3484,6 +3484,109 @@ class HistoricoRecebimentosEmLoteTest(TestCase):
         self.assertEqual(self.receita.valor_recebido, Decimal('600.00'))
 
 
+class HistoricoUsuarioRecebimentosTest(TestCase):
+    """
+    Item 7 (rodada de fechamento estrutural): quando `usuario` é informado a
+    atualizar_recebimentos_da_receita(), o histórico (django-simple-history)
+    de CADA operação (criação, alteração, exclusão) registra esse usuário
+    via _history_user — inclusive fora de uma requisição HTTP, onde o
+    middleware de histórico não tem request.user para capturar
+    automaticamente via thread-local. Todos os testes abaixo chamam o
+    service diretamente (sem Client/requisição), simulando um script/
+    processo interno operando em nome de um usuário específico.
+    """
+    def setUp(self):
+        from financeiro.models import HistoricalRecebimentoReceita
+        self.HistoricalRecebimentoReceita = HistoricalRecebimentoReceita
+        self.usuario = User.objects.create_user('hist_usuario', password='pass')
+        self.imovel, self.locatario = _criar_base()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, data_inicio=date(2020, 1, 1), data_fim=date(2030, 12, 31),
+        )
+        self.receita = ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=3, competencia_ano=2030,
+            data_vencimento=date(2030, 3, 10), valor_previsto=Decimal('1000.00'), status='previsto',
+        )
+
+    def test_criacao_com_usuario_registra_history_user(self):
+        from financeiro.services import atualizar_recebimentos_da_receita
+        novos = [{'data_recebimento': date(2030, 3, 12), 'valor': Decimal('300.00'), 'observacoes': ''}]
+        atualizar_recebimentos_da_receita(self.receita.pk, novos=novos, usuario=self.usuario)
+        rec = self.receita.recebimentos.get()
+        historico = self.HistoricalRecebimentoReceita.objects.get(id=rec.pk, history_type='+')
+        self.assertEqual(historico.history_user_id, self.usuario.pk)
+
+    def test_alteracao_com_usuario_registra_history_user(self):
+        from financeiro.services import atualizar_recebimentos_da_receita
+        r1 = RecebimentoReceita.objects.create(
+            receita=self.receita, data_recebimento=date(2030, 3, 5), valor=Decimal('300.00'), origem='manual',
+        )
+        alterados = [{'pk': r1.pk, 'data_recebimento': r1.data_recebimento, 'valor': Decimal('350.00'), 'observacoes': ''}]
+        atualizar_recebimentos_da_receita(self.receita.pk, alterados=alterados, usuario=self.usuario)
+        historico = self.HistoricalRecebimentoReceita.objects.get(id=r1.pk, history_type='~')
+        self.assertEqual(historico.history_user_id, self.usuario.pk)
+
+    def test_exclusao_com_usuario_registra_history_user(self):
+        from financeiro.services import atualizar_recebimentos_da_receita
+        r1 = RecebimentoReceita.objects.create(
+            receita=self.receita, data_recebimento=date(2030, 3, 5), valor=Decimal('300.00'), origem='manual',
+        )
+        pk = r1.pk
+        atualizar_recebimentos_da_receita(self.receita.pk, excluidos=[pk], usuario=self.usuario)
+        historico = self.HistoricalRecebimentoReceita.objects.get(id=pk, history_type='-')
+        self.assertEqual(historico.history_user_id, self.usuario.pk)
+
+    def test_lote_com_dois_recebimentos_registra_usuario_em_ambos(self):
+        from financeiro.services import atualizar_recebimentos_da_receita
+        novos = [
+            {'data_recebimento': date(2030, 3, 12), 'valor': Decimal('300.00'), 'observacoes': ''},
+            {'data_recebimento': date(2030, 3, 13), 'valor': Decimal('300.00'), 'observacoes': ''},
+        ]
+        atualizar_recebimentos_da_receita(self.receita.pk, novos=novos, usuario=self.usuario)
+        pks = list(self.receita.recebimentos.values_list('pk', flat=True))
+        self.assertEqual(len(pks), 2)
+        for pk in pks:
+            historico = self.HistoricalRecebimentoReceita.objects.get(id=pk, history_type='+')
+            self.assertEqual(historico.history_user_id, self.usuario.pk)
+
+    def test_erro_e_rollback_nao_deixa_historico_com_usuario_orfao(self):
+        from unittest.mock import patch
+        from financeiro.services import atualizar_recebimentos_da_receita
+
+        original_save = RecebimentoReceita.save
+        chamadas = {'n': 0}
+
+        def save_com_falha_na_segunda(self, *args, **kwargs):
+            chamadas['n'] += 1
+            if chamadas['n'] == 2:
+                raise RuntimeError('falha simulada no meio do lote')
+            return original_save(self, *args, **kwargs)
+
+        novos = [
+            {'data_recebimento': date(2030, 3, 12), 'valor': Decimal('300.00'), 'observacoes': ''},
+            {'data_recebimento': date(2030, 3, 13), 'valor': Decimal('300.00'), 'observacoes': ''},
+        ]
+        with patch.object(RecebimentoReceita, 'save', save_com_falha_na_segunda):
+            with self.assertRaises(RuntimeError):
+                atualizar_recebimentos_da_receita(self.receita.pk, novos=novos, usuario=self.usuario)
+
+        self.assertEqual(RecebimentoReceita.objects.filter(receita=self.receita).count(), 0)
+        self.assertEqual(
+            self.HistoricalRecebimentoReceita.objects.filter(receita_id=self.receita.pk).count(), 0,
+        )
+
+    def test_chamada_sem_usuario_continua_aceita(self):
+        """Migrations/processos internos continuam podendo chamar sem usuário —
+        o histórico simplesmente não tem history_user, como sempre."""
+        from financeiro.services import atualizar_recebimentos_da_receita
+        novos = [{'data_recebimento': date(2030, 3, 12), 'valor': Decimal('300.00'), 'observacoes': ''}]
+        atualizar_recebimentos_da_receita(self.receita.pk, novos=novos)
+        rec = self.receita.recebimentos.get()
+        historico = self.HistoricalRecebimentoReceita.objects.get(id=rec.pk, history_type='+')
+        self.assertIsNone(historico.history_user_id)
+
+
 class RegistrarRecebimentoConcorrenciaTest(TransactionTestCase):
     """
     Concorrência real (select_for_update bloqueando de fato) só é garantida

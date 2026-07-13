@@ -1,5 +1,5 @@
 import tempfile
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from django.contrib.auth.models import User, Permission
@@ -1060,6 +1060,71 @@ class DespesaConciliacaoAtivaTest(TestCase):
         comissao.refresh_from_db()
         self.assertEqual(comissao.valor, valor_original)
 
+    def test_comissao_conciliada_nao_pode_ter_categoria_alterada(self):
+        imob = Pessoa.objects.create(nome='Imob DCA3b', tipo='imobiliaria')
+        receita, comissao = self._receita_com_comissao(imob)
+        conciliar_com_receitas(self._tx('1800.00', 'dca-3b'), [receita], marcar_comissoes=True)
+        comissao.refresh_from_db()
+        comissao.categoria = 'iptu'
+        with self.assertRaises(ValidationError):
+            comissao.save()
+        comissao.refresh_from_db()
+        self.assertEqual(comissao.categoria, 'comissao_imobiliaria')
+
+    def test_despesa_de_debito_conciliado_nao_pode_ter_descricao_alterada(self):
+        tx = self._tx('-350.00', 'dca-3c', tipo='debito', descricao='CONTA')
+        despesa = lancar_despesa(tx, categoria='outro', descricao='Descrição original')
+        despesa.refresh_from_db()
+        despesa.descricao = 'Descrição alterada'
+        with self.assertRaises(ValidationError):
+            despesa.save()
+        despesa.refresh_from_db()
+        self.assertEqual(despesa.descricao, 'Descrição original')
+
+    def test_despesa_de_debito_conciliado_nao_pode_ter_competencia_mes_alterada(self):
+        tx = self._tx('-350.00', 'dca-3d', tipo='debito', descricao='CONTA')
+        despesa = lancar_despesa(tx, categoria='outro', descricao='Conta')
+        despesa.refresh_from_db()
+        mes_original = despesa.competencia_mes
+        despesa.competencia_mes = (mes_original % 12) + 1
+        with self.assertRaises(ValidationError):
+            despesa.save()
+        despesa.refresh_from_db()
+        self.assertEqual(despesa.competencia_mes, mes_original)
+
+    def test_despesa_de_debito_conciliado_nao_pode_ter_competencia_ano_alterada(self):
+        tx = self._tx('-350.00', 'dca-3e', tipo='debito', descricao='CONTA')
+        despesa = lancar_despesa(tx, categoria='outro', descricao='Conta')
+        despesa.refresh_from_db()
+        ano_original = despesa.competencia_ano
+        despesa.competencia_ano = ano_original + 1
+        with self.assertRaises(ValidationError):
+            despesa.save()
+        despesa.refresh_from_db()
+        self.assertEqual(despesa.competencia_ano, ano_original)
+
+    def test_despesa_de_debito_conciliado_nao_pode_ter_vencimento_alterado(self):
+        tx = self._tx('-350.00', 'dca-3f', tipo='debito', descricao='CONTA')
+        despesa = lancar_despesa(tx, categoria='outro', descricao='Conta')
+        despesa.refresh_from_db()
+        vencimento_original = despesa.data_vencimento
+        despesa.data_vencimento = vencimento_original + timedelta(days=5)
+        with self.assertRaises(ValidationError):
+            despesa.save()
+        despesa.refresh_from_db()
+        self.assertEqual(despesa.data_vencimento, vencimento_original)
+
+    def test_despesa_de_debito_conciliado_nao_pode_ter_origem_automatica_alterada(self):
+        tx = self._tx('-350.00', 'dca-3g', tipo='debito', descricao='CONTA')
+        despesa = lancar_despesa(tx, categoria='outro', descricao='Conta')
+        despesa.refresh_from_db()
+        self.assertFalse(despesa.origem_automatica)
+        despesa.origem_automatica = True
+        with self.assertRaises(ValidationError):
+            despesa.save()
+        despesa.refresh_from_db()
+        self.assertFalse(despesa.origem_automatica)
+
     def test_observacao_pode_ser_alterada_com_conciliacao_ativa(self):
         imob = Pessoa.objects.create(nome='Imob DCA4', tipo='imobiliaria')
         receita, comissao = self._receita_com_comissao(imob)
@@ -1094,21 +1159,23 @@ class DespesaConciliacaoAtivaTest(TestCase):
         self.assertEqual(tx.status, 'conciliada')
         self.assertEqual(tx.despesa_id, despesa.pk)
 
-    def test_desfazer_conciliacao_de_debito_desvincula_sem_apagar_despesa(self):
+    def test_desfazer_conciliacao_de_debito_exclui_despesa_criada_exclusivamente_por_ele(self):
+        """
+        Item 1 (rodada de fechamento estrutural): desfazer_conciliacao() de
+        um débito agora EXCLUI a despesa que ele mesmo criou (não apenas
+        desvincula) — lancar_despesa() cria uma despesa NOVA a cada
+        lançamento; manter a despesa "paga" existindo permitiria relançar o
+        mesmo débito e duplicar a despesa.
+        """
         from .services import desfazer_conciliacao
         tx = self._tx('-150.00', 'dca-7', tipo='debito', descricao='INTERNET')
         despesa = lancar_despesa(tx, categoria='outro', descricao='Internet')
+        pk_despesa = despesa.pk
         desfazer_conciliacao(tx)
         tx.refresh_from_db()
-        despesa.refresh_from_db()
         self.assertIsNone(tx.despesa_id)
         self.assertEqual(tx.status, 'pendente')
-        self.assertTrue(Despesa.objects.filter(pk=despesa.pk).exists())
-        # despesa volta a ser editável/excluível normalmente
-        despesa.observacoes = 'ok'
-        despesa.save()
-        despesa.delete()
-        self.assertFalse(Despesa.objects.filter(pk=despesa.pk).exists())
+        self.assertFalse(Despesa.objects.filter(pk=pk_despesa).exists())
 
     def test_acoes_em_massa_nao_alteram_parcialmente_o_conjunto(self):
         """
@@ -1167,6 +1234,176 @@ class DespesaConciliacaoAtivaTest(TestCase):
         resposta_delete = client.get(url_delete)
         self.assertEqual(resposta_delete.status_code, 403)
         self.assertTrue(Despesa.objects.filter(pk=comissao.pk).exists())
+
+
+# ─── Desfazer conciliação de débito exclui a despesa criada (item 1, rodada de fechamento estrutural) ──
+
+class DesfazerConciliacaoDebitoTest(TestCase):
+    def setUp(self):
+        self.conta = ContaBancaria.objects.create(nome='Conta DCD')
+        self.extrato = ExtratoImportado.objects.create(conta=self.conta, hash_arquivo='hdcd')
+        self.imovel, self.locatario = _base()
+
+    def _tx(self, valor, fitid, descricao='CONTA'):
+        return TransacaoExtrato.objects.create(
+            extrato=self.extrato, conta=self.conta, fitid=fitid,
+            data=date(2026, 3, 12), valor=Decimal(valor), tipo='debito', descricao=descricao,
+        )
+
+    def test_lancar_debito_cria_despesa(self):
+        from .services import lancar_despesa
+        tx = self._tx('-500.00', 'dcd-1')
+        despesa = lancar_despesa(tx, categoria='outro', descricao='Reparo')
+        self.assertTrue(Despesa.objects.filter(pk=despesa.pk, status='paga').exists())
+        tx.refresh_from_db()
+        self.assertEqual(tx.despesa_id, despesa.pk)
+        self.assertEqual(tx.status, 'conciliada')
+
+    def test_desfazer_remove_despesa_criada_exclusivamente_por_ele(self):
+        from .services import desfazer_conciliacao, lancar_despesa
+        tx = self._tx('-500.00', 'dcd-2')
+        despesa = lancar_despesa(tx, categoria='outro', descricao='Reparo')
+        desfazer_conciliacao(tx)
+        self.assertFalse(Despesa.objects.filter(pk=despesa.pk).exists())
+
+    def test_transacao_volta_a_pendente_apos_desfazer(self):
+        from .services import desfazer_conciliacao, lancar_despesa
+        tx = self._tx('-500.00', 'dcd-3')
+        lancar_despesa(tx, categoria='outro', descricao='Reparo')
+        desfazer_conciliacao(tx)
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'pendente')
+        self.assertIsNone(tx.despesa_id)
+
+    def test_relancar_apos_desfazer_resulta_em_apenas_uma_despesa(self):
+        from .services import desfazer_conciliacao, lancar_despesa
+        tx = self._tx('-500.00', 'dcd-4')
+        primeira = lancar_despesa(tx, categoria='outro', descricao='Reparo')
+        desfazer_conciliacao(tx)
+        tx.refresh_from_db()
+        segunda = lancar_despesa(tx, categoria='outro', descricao='Reparo (relançado)')
+        self.assertNotEqual(primeira.pk, segunda.pk)
+        self.assertEqual(Despesa.objects.filter(descricao__startswith='Reparo').count(), 1)
+        self.assertEqual(Despesa.objects.count(), 1)
+
+    def test_nenhum_registro_de_caixa_duplicado_apos_relancar(self):
+        """
+        O caixa (soma de despesas pagas) não duplica: desfazer removeu a
+        primeira despesa antes do relançamento criar a segunda.
+        """
+        from django.db.models import Sum
+        from .services import desfazer_conciliacao, lancar_despesa
+        tx = self._tx('-500.00', 'dcd-5')
+        lancar_despesa(tx, categoria='outro', descricao='Reparo')
+        desfazer_conciliacao(tx)
+        tx.refresh_from_db()
+        lancar_despesa(tx, categoria='outro', descricao='Reparo (relançado)')
+        total_pago = Despesa.objects.filter(status='paga').aggregate(total=Sum('valor'))['total']
+        self.assertEqual(total_pago, Decimal('500.00'))
+
+    def test_despesa_com_outros_vinculos_bloqueia_exclusao_automatica(self):
+        """
+        Uma despesa lançada pelo extrato que DEPOIS ganhou outro vínculo
+        financeiro (aqui simulado vinculando-a a uma receita, algo que
+        lancar_despesa() nunca faz sozinho) não pode ser excluída
+        automaticamente pelo desfazer — exige revisão manual.
+        """
+        from django.db import connection
+        from .services import desfazer_conciliacao, lancar_despesa, ConciliacaoInvalidaError
+        contrato = _contrato(self.imovel, self.locatario)
+        receita = _receita(contrato, date(2026, 3, 10), Decimal('100.00'))
+        tx = self._tx('-500.00', 'dcd-6')
+        despesa = lancar_despesa(tx, categoria='outro', descricao='Reparo')
+        # Simula um estado legado/inconsistente (a despesa ganhou um vínculo
+        # de receita por fora do fluxo normal) via SQL bruto — item 2 já
+        # bloqueia esse vínculo por QUALQUER caminho sancionado (save() e
+        # QuerySet.update() rejeitam alterar campos protegidos com
+        # conciliação ativa), então só uma alteração direta no banco
+        # reproduz o cenário que a checagem de origem precisa cobrir.
+        with connection.cursor() as cursor:
+            cursor.execute(
+                'UPDATE financeiro_despesa SET receita_id = %s WHERE id = %s',
+                [receita.pk, despesa.pk],
+            )
+        with self.assertRaises(ConciliacaoInvalidaError) as ctx:
+            desfazer_conciliacao(tx)
+        self.assertIn('Revisão manual', str(ctx.exception))
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'conciliada')
+        self.assertTrue(Despesa.objects.filter(pk=despesa.pk).exists())
+
+    def test_erro_intermediario_causa_rollback_completo(self):
+        from unittest.mock import patch
+        from .services import desfazer_conciliacao, lancar_despesa
+        from financeiro.models import Despesa as DespesaModel
+        tx = self._tx('-500.00', 'dcd-7')
+        despesa = lancar_despesa(tx, categoria='outro', descricao='Reparo')
+
+        with patch.object(DespesaModel, 'delete', side_effect=RuntimeError('falha simulada')):
+            with self.assertRaises(RuntimeError):
+                desfazer_conciliacao(tx)
+
+        tx.refresh_from_db()
+        despesa.refresh_from_db()
+        self.assertEqual(tx.status, 'conciliada')
+        self.assertEqual(tx.despesa_id, despesa.pk)
+        self.assertEqual(despesa.status, 'paga')
+
+    def test_mensagens_de_credito_e_debito_diferentes(self):
+        from .services import conciliar_com_receitas, lancar_despesa
+        contrato = _contrato(self.imovel, self.locatario)
+        receita = _receita(contrato, date(2026, 3, 10), Decimal('2000.00'))
+        tx_credito = TransacaoExtrato.objects.create(
+            extrato=self.extrato, conta=self.conta, fitid='dcd-8c',
+            data=date(2026, 3, 12), valor=Decimal('2000.00'), tipo='credito', descricao='PIX',
+        )
+        conciliar_com_receitas(tx_credito, [receita])
+        tx_debito = self._tx('-500.00', 'dcd-8d')
+        lancar_despesa(tx_debito, categoria='outro', descricao='Reparo')
+
+        user = User.objects.create_user('dcd_msg', password='pass')
+        user.user_permissions.add(*Permission.objects.filter(codename__in=[
+            'view_extratoimportado', 'change_transacaoextrato',
+        ]))
+        client = Client()
+        client.login(username='dcd_msg', password='pass')
+
+        resposta_credito = client.post(
+            reverse('conciliar_extrato', args=[self.extrato.pk]),
+            {'transacao_id': tx_credito.pk, 'action': 'desfazer'}, follow=True,
+        )
+        mensagens_credito = [str(m) for m in resposta_credito.context['messages']]
+        self.assertTrue(any('recebimentos removidos' in m for m in mensagens_credito))
+        self.assertFalse(any('despesa vinculada removida' in m for m in mensagens_credito))
+
+        resposta_debito = client.post(
+            reverse('conciliar_extrato', args=[self.extrato.pk]),
+            {'transacao_id': tx_debito.pk, 'action': 'desfazer'}, follow=True,
+        )
+        mensagens_debito = [str(m) for m in resposta_debito.context['messages']]
+        self.assertTrue(any('despesa vinculada removida' in m for m in mensagens_debito))
+        self.assertFalse(any('recebimentos removidos' in m for m in mensagens_debito))
+
+    def test_historico_registra_lancamento_e_desfazer(self):
+        from .models import HistoricalTransacaoExtrato
+        from .services import desfazer_conciliacao, lancar_despesa
+        tx = self._tx('-500.00', 'dcd-9')
+        lancar_despesa(tx, categoria='outro', descricao='Reparo')
+        desfazer_conciliacao(tx)
+        historico = HistoricalTransacaoExtrato.objects.filter(id=tx.pk).order_by('history_date')
+        status_historicos = list(historico.values_list('status', flat=True))
+        self.assertIn('conciliada', status_historicos)
+        self.assertEqual(status_historicos[-1], 'pendente')
+
+    def test_desfazer_repetido_e_rejeitado_claramente(self):
+        from .services import desfazer_conciliacao, lancar_despesa, ConciliacaoInvalidaError
+        tx = self._tx('-500.00', 'dcd-10')
+        lancar_despesa(tx, categoria='outro', descricao='Reparo')
+        desfazer_conciliacao(tx)
+        tx.refresh_from_db()
+        with self.assertRaises(ConciliacaoInvalidaError) as ctx:
+            desfazer_conciliacao(tx)
+        self.assertIn('Só é possível desfazer transações conciliadas', str(ctx.exception))
 
 
 # ─── FITID por assinatura + conferência rigorosa da conta (rodada 2) ──────────
@@ -1522,13 +1759,20 @@ class ExclusaoEstruturalTest(TestCase):
             t.delete()
         self.assertTrue(TransacaoExtrato.objects.filter(pk=t.pk).exists())
 
-    def test_transacao_pendente_sem_vinculo_pode_ser_excluida_pelo_fluxo_permitido(self):
-        """delete() de instância é o "fluxo permitido" para uma transação
-        realmente pendente e sem nenhum vínculo financeiro."""
+    def test_transacao_pendente_sem_vinculo_tambem_e_rejeitada_diretamente(self):
+        """
+        Item 4 (rodada de fechamento estrutural): a partir desta rodada,
+        NENHUMA transação importada pode ser excluída isoladamente — nem
+        mesmo pendente e sem vínculo. Só o service seguro
+        (excluir_extrato_sem_movimentacoes, testado em
+        ExclusaoDeExtratoTest) pode excluir transações, como parte da
+        exclusão integral de um extrato totalmente pendente.
+        """
         extrato = self._importar([('ee5', '20260310', '100.00', 'PIX')])
         t = extrato.transacoes.get()
-        t.delete()
-        self.assertFalse(TransacaoExtrato.objects.filter(pk=t.pk).exists())
+        with self.assertRaises(ValidationError):
+            t.delete()
+        self.assertTrue(TransacaoExtrato.objects.filter(pk=t.pk).exists())
 
     def test_queryset_delete_de_transacao_tratada_e_rejeitado(self):
         receita = _receita(self.contrato, date(2026, 3, 10), Decimal('100.00'))
@@ -1538,6 +1782,37 @@ class ExclusaoEstruturalTest(TestCase):
         with self.assertRaises(ValidationError):
             TransacaoExtrato.objects.filter(pk=t.pk).delete()
         self.assertTrue(TransacaoExtrato.objects.filter(pk=t.pk).exists())
+
+    def test_queryset_delete_de_transacao_pendente_tambem_e_rejeitado(self):
+        """Item 4: QuerySet.delete() é bloqueado incondicionalmente — mesmo
+        um conjunto TODO pendente e sem vínculo nunca pode ser excluído em
+        massa."""
+        extrato = self._importar([
+            ('ee9', '20260310', '100.00', 'PIX'), ('ee10', '20260311', '50.00', 'PIX'),
+        ])
+        with self.assertRaises(ValidationError):
+            TransacaoExtrato.objects.filter(extrato=extrato).delete()
+        self.assertEqual(TransacaoExtrato.objects.filter(extrato=extrato).count(), 2)
+
+    def test_exclusao_parcial_direta_nunca_diverge_metadados_do_extrato(self):
+        """
+        Item 4: uma tentativa (rejeitada) de excluir isoladamente UMA das
+        transações de um extrato com várias nunca altera as demais nem os
+        contadores do extrato — a única forma de "perder" uma transação é
+        excluir o extrato inteiro pelo fluxo seguro.
+        """
+        extrato = self._importar([
+            ('ee11', '20260310', '100.00', 'PIX'), ('ee12', '20260311', '50.00', 'PIX'),
+        ])
+        novas_antes = extrato.transacoes_novas
+        t1, t2 = list(extrato.transacoes.order_by('fitid'))
+        with self.assertRaises(ValidationError):
+            t1.delete()
+        extrato.refresh_from_db()
+        self.assertEqual(extrato.transacoes_novas, novas_antes)
+        self.assertEqual(TransacaoExtrato.objects.filter(extrato=extrato).count(), 2)
+        self.assertTrue(TransacaoExtrato.objects.filter(pk=t1.pk).exists())
+        self.assertTrue(TransacaoExtrato.objects.filter(pk=t2.pk).exists())
 
     def test_admin_nao_oferece_exclusao_insegura_de_extrato(self):
         superuser = User.objects.create_superuser('admin_estrut', 'a@a.com', 'pass')
@@ -1731,3 +2006,131 @@ class PermissoesResiduaisTest(TestCase):
         self.client.login(username='pr_com_contrato', password='pass')
         resposta = self.client.get(reverse('relatorios'))
         self.assertEqual(len(resposta.context['imobiliarias']), 1)
+
+
+@override_settings(MEDIA_ROOT=MEDIA_TEMP)
+class PermissoesDetalhesTransacoesTratadasTest(TestCase):
+    """
+    Item 3 (rodada de fechamento estrutural): ver a lista de extratos
+    (conciliacao.view_extratoimportado) não concede acesso aos detalhes
+    internos das transações TRATADAS — descrição/categoria/fornecedor/imóvel
+    de uma despesa, e imóvel/locatário/valores de receitas vinculadas, só
+    aparecem para quem também tem a permissão de VER aquela área (e
+    patrimonio.view_imovel, já que ambas expõem nome de imóvel).
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.conta = ContaBancaria.objects.create(nome='Conta PDT')
+        self.imovel, self.locatario = _base()
+        self.contrato = _contrato(self.imovel, self.locatario)
+        self.extrato = ExtratoImportado.objects.create(conta=self.conta, hash_arquivo='hpdt')
+
+        receita = _receita(self.contrato, date(2026, 3, 10), Decimal('2000.00'))
+        tx_credito = TransacaoExtrato.objects.create(
+            extrato=self.extrato, conta=self.conta, fitid='pdt-c',
+            data=date(2026, 3, 12), valor=Decimal('2000.00'), tipo='credito', descricao='PIX',
+        )
+        conciliar_com_receitas(tx_credito, [receita])
+
+        tx_debito = TransacaoExtrato.objects.create(
+            extrato=self.extrato, conta=self.conta, fitid='pdt-d',
+            data=date(2026, 3, 12), valor=Decimal('-350.00'), tipo='debito', descricao='CEMIG',
+        )
+        lancar_despesa(tx_debito, categoria='outro', descricao='Energia elétrica')
+
+    def _usuario(self, nome, *codenames):
+        user = User.objects.create_user(nome, password='pass')
+        user.user_permissions.add(*Permission.objects.filter(codename__in=codenames))
+        self.client.login(username=nome, password='pass')
+        return user
+
+    def test_somente_view_extrato_nao_ve_detalhes_e_nao_consulta_dados_protegidos(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        self._usuario('pdt_so_extrato', 'view_extratoimportado')
+
+        with CaptureQueriesContext(connection) as ctx:
+            resposta = self.client.get(reverse('conciliar_extrato', args=[self.extrato.pk]))
+        self.assertEqual(resposta.status_code, 200)
+        self.assertFalse(resposta.context['pode_ver_detalhes_despesas'])
+        self.assertFalse(resposta.context['pode_ver_detalhes_receitas'])
+
+        conteudo = resposta.content.decode()
+        self.assertIn('Débito conciliado', conteudo)
+        self.assertIn('Crédito conciliado', conteudo)
+        self.assertNotIn('Energia elétrica', conteudo)
+        self.assertNotIn(self.imovel.nome, conteudo)
+
+        sql_junto = ' '.join(q['sql'] for q in ctx.captured_queries).lower()
+        self.assertNotIn('financeiro_despesa', sql_junto)
+        self.assertNotIn('conciliacao_conciliacaoreceita', sql_junto)
+
+    def test_extrato_mais_view_despesa_e_view_imovel_mostra_apenas_despesa(self):
+        self._usuario(
+            'pdt_com_despesa', 'view_extratoimportado', 'view_despesa', 'view_imovel',
+        )
+        resposta = self.client.get(reverse('conciliar_extrato', args=[self.extrato.pk]))
+        self.assertTrue(resposta.context['pode_ver_detalhes_despesas'])
+        self.assertFalse(resposta.context['pode_ver_detalhes_receitas'])
+
+        conteudo = resposta.content.decode()
+        self.assertIn('Energia elétrica', conteudo)
+        self.assertIn('Crédito conciliado', conteudo)
+
+    def test_extrato_mais_view_receita_e_view_imovel_mostra_apenas_receita(self):
+        self._usuario(
+            'pdt_com_receita', 'view_extratoimportado', 'view_receitaaluguel', 'view_imovel',
+        )
+        resposta = self.client.get(reverse('conciliar_extrato', args=[self.extrato.pk]))
+        self.assertFalse(resposta.context['pode_ver_detalhes_despesas'])
+        self.assertTrue(resposta.context['pode_ver_detalhes_receitas'])
+
+        conteudo = resposta.content.decode()
+        self.assertIn('Débito conciliado', conteudo)
+        self.assertIn(self.imovel.nome, conteudo)
+
+    def test_todas_as_permissoes_mostra_ambos(self):
+        self._usuario(
+            'pdt_tudo', 'view_extratoimportado', 'view_despesa', 'view_receitaaluguel', 'view_imovel',
+        )
+        resposta = self.client.get(reverse('conciliar_extrato', args=[self.extrato.pk]))
+        self.assertTrue(resposta.context['pode_ver_detalhes_despesas'])
+        self.assertTrue(resposta.context['pode_ver_detalhes_receitas'])
+
+        conteudo = resposta.content.decode()
+        self.assertIn('Energia elétrica', conteudo)
+        self.assertIn(self.imovel.nome, conteudo)
+
+    def test_sem_permissao_de_patrimonio_esconde_ambos_mesmo_com_financeiro(self):
+        """Sem patrimonio.view_imovel, nem despesa nem receita aparecem
+        detalhadas — a apresentação evita expor nome de imóvel sem essa
+        permissão, mesmo que financeiro.view_despesa/view_receitaaluguel
+        estejam presentes."""
+        self._usuario(
+            'pdt_sem_patrimonio', 'view_extratoimportado', 'view_despesa', 'view_receitaaluguel',
+        )
+        resposta = self.client.get(reverse('conciliar_extrato', args=[self.extrato.pk]))
+        self.assertFalse(resposta.context['pode_ver_detalhes_despesas'])
+        self.assertFalse(resposta.context['pode_ver_detalhes_receitas'])
+
+        conteudo = resposta.content.decode()
+        self.assertIn('Débito conciliado', conteudo)
+        self.assertIn('Crédito conciliado', conteudo)
+        self.assertNotIn('Energia elétrica', conteudo)
+        self.assertNotIn(self.imovel.nome, conteudo)
+
+    def test_acoes_continuam_protegidas_no_servidor_independente_de_ver_detalhes(self):
+        """Ver detalhes (view_despesa/view_receitaaluguel) é diferente de
+        poder AGIR (add_despesa/change_receitaaluguel) — um usuário com
+        visão completa mas sem permissão de escrita continua barrado no
+        POST, servidor confirma independentemente do que o template mostra."""
+        self._usuario(
+            'pdt_ve_mas_nao_altera', 'view_extratoimportado', 'view_despesa',
+            'view_receitaaluguel', 'view_imovel',
+        )
+        tx_debito = TransacaoExtrato.objects.get(fitid='pdt-d')
+        resposta = self.client.post(reverse('conciliar_extrato', args=[self.extrato.pk]), {
+            'transacao_id': tx_debito.pk, 'action': 'desfazer',
+        })
+        self.assertEqual(resposta.status_code, 403)
