@@ -1361,9 +1361,14 @@ class DesfazerConciliacaoDebitoTest(TestCase):
         tx_debito = self._tx('-500.00', 'dcd-8d')
         lancar_despesa(tx_debito, categoria='outro', descricao='Reparo')
 
+        # Matriz completa de desfazer: crédito sem comissões exige
+        # change_receitaaluguel; débito exige delete_despesa (exclui a
+        # despesa criada pela conciliação). Este teste verifica a MENSAGEM
+        # por tipo, então concede as duas para exercitar ambos os fluxos.
         user = User.objects.create_user('dcd_msg', password='pass')
         user.user_permissions.add(*Permission.objects.filter(codename__in=[
             'view_extratoimportado', 'change_transacaoextrato',
+            'change_receitaaluguel', 'delete_despesa',
         ]))
         client = Client()
         client.login(username='dcd_msg', password='pass')
@@ -2654,3 +2659,469 @@ class PermissoesDetalhesTransacoesTratadasTest(TestCase):
             'transacao_id': tx_debito.pk, 'action': 'desfazer',
         })
         self.assertEqual(resposta.status_code, 403)
+
+
+# ─── Matriz de permissões das ações da conciliação (esta tarefa) ──────────────
+
+def _gerar_repasse_liquido(conta, extrato, locatario, fitid, nome_imovel):
+    """
+    Monta um crédito de repasse líquido conciliável: contrato com
+    imobiliária + 10% de comissão, receita de R$2000 e comissão automática
+    de R$200 (líquido = R$1800). Retorna (tx_credito, receita, comissao).
+    """
+    from financeiro.services import gerar_receitas_para_contrato
+    imob = Pessoa.objects.create(nome=f'Imob {fitid}', tipo='imobiliaria')
+    imovel = Imovel.objects.create(nome=nome_imovel, endereco='X', cidade='BH', estado='MG')
+    contrato = _contrato(
+        imovel, locatario, valor_aluguel=Decimal('2000.00'), imobiliaria=imob,
+        comissao_imobiliaria_percentual=Decimal('10.00'),
+        data_inicio=date(2026, 1, 1), data_fim=date(2026, 12, 31),
+    )
+    gerar_receitas_para_contrato(contrato, data_inicio=date(2026, 3, 1), data_fim=date(2026, 3, 31))
+    receita = ReceitaAluguel.objects.get(contrato=contrato)
+    comissao = Despesa.objects.filter(contrato=contrato, origem_automatica=True).first()
+    tx = TransacaoExtrato.objects.create(
+        extrato=extrato, conta=conta, fitid=fitid,
+        data=date(2026, 3, 12), valor=Decimal('1800.00'), tipo='credito', descricao='REPASSE',
+    )
+    return tx, receita, comissao
+
+
+@override_settings(MEDIA_ROOT=MEDIA_TEMP)
+class MatrizPermissoesAcoesTest(TestCase):
+    """
+    Cada POST da tela de conciliação exige TODAS as permissões dos efeitos
+    da operação (transação + receitas/despesas). Falta de qualquer uma →
+    403, verificado no servidor ANTES de qualquer service, sem efeito
+    colateral no banco.
+    """
+    def setUp(self):
+        self.conta = ContaBancaria.objects.create(nome='Conta MPA')
+        self.extrato = ExtratoImportado.objects.create(conta=self.conta, hash_arquivo='hmpa')
+        self.imovel, self.locatario = _base()
+        self.contrato = _contrato(self.imovel, self.locatario)
+
+    def _cliente(self, nome, *codenames):
+        user = User.objects.create_user(nome, password='pass')
+        user.user_permissions.add(*Permission.objects.filter(
+            codename__in=('view_extratoimportado',) + codenames
+        ))
+        client = Client()
+        client.login(username=nome, password='pass')
+        return client
+
+    def _post(self, client, transacao, action, **extra):
+        dados = {'transacao_id': transacao.pk, 'action': action}
+        dados.update(extra)
+        return client.post(reverse('conciliar_extrato', args=[self.extrato.pk]), dados)
+
+    def _tx_credito(self, fitid='mpa-c', valor='2000.00'):
+        return TransacaoExtrato.objects.create(
+            extrato=self.extrato, conta=self.conta, fitid=fitid,
+            data=date(2026, 3, 12), valor=Decimal(valor), tipo='credito', descricao='PIX',
+        )
+
+    def _tx_debito(self, fitid='mpa-d', valor='-350.00'):
+        return TransacaoExtrato.objects.create(
+            extrato=self.extrato, conta=self.conta, fitid=fitid,
+            data=date(2026, 3, 12), valor=Decimal(valor), tipo='debito', descricao='CEMIG',
+        )
+
+    # ── Conciliar crédito (1-5) ──────────────────────────────────────────
+    def test_conciliar_somente_change_receitaaluguel_403(self):
+        receita = _receita(self.contrato, date(2026, 3, 10), Decimal('2000.00'))
+        tx = self._tx_credito()
+        client = self._cliente('mpa1', 'change_receitaaluguel')
+        resposta = self._post(client, tx, 'conciliar', receita_ids=[receita.pk])
+        self.assertEqual(resposta.status_code, 403)
+        tx.refresh_from_db(); receita.refresh_from_db()
+        self.assertEqual(tx.status, 'pendente')
+        self.assertIsNone(receita.valor_recebido)
+        self.assertEqual(receita.recebimentos.count(), 0)
+        self.assertEqual(tx.itens_receita.count(), 0)
+
+    def test_conciliar_somente_change_transacaoextrato_403(self):
+        receita = _receita(self.contrato, date(2026, 3, 10), Decimal('2000.00'))
+        tx = self._tx_credito()
+        client = self._cliente('mpa2', 'change_transacaoextrato')
+        resposta = self._post(client, tx, 'conciliar', receita_ids=[receita.pk])
+        self.assertEqual(resposta.status_code, 403)
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'pendente')
+        self.assertEqual(tx.itens_receita.count(), 0)
+
+    def test_conciliar_com_as_duas_permissoes_funciona(self):
+        receita = _receita(self.contrato, date(2026, 3, 10), Decimal('2000.00'))
+        tx = self._tx_credito()
+        client = self._cliente('mpa3', 'change_transacaoextrato', 'change_receitaaluguel')
+        resposta = self._post(client, tx, 'conciliar', receita_ids=[receita.pk])
+        self.assertEqual(resposta.status_code, 302)
+        tx.refresh_from_db(); receita.refresh_from_db()
+        self.assertEqual(tx.status, 'conciliada')
+        self.assertEqual(receita.status, 'recebido')
+
+    def test_conciliar_marcar_comissoes_sem_change_despesa_403(self):
+        from .models import ConciliacaoComissao
+        tx, receita, comissao = _gerar_repasse_liquido(
+            self.conta, self.extrato, self.locatario, 'mpa-rl4', 'Sala MPA4',
+        )
+        client = self._cliente('mpa4', 'change_transacaoextrato', 'change_receitaaluguel')
+        resposta = self._post(client, tx, 'conciliar', receita_ids=[receita.pk], marcar_comissoes='1')
+        self.assertEqual(resposta.status_code, 403)
+        tx.refresh_from_db(); receita.refresh_from_db(); comissao.refresh_from_db()
+        self.assertEqual(tx.status, 'pendente')
+        self.assertIsNone(receita.valor_recebido)
+        self.assertEqual(receita.recebimentos.count(), 0)
+        self.assertEqual(comissao.status, 'prevista')
+        self.assertEqual(ConciliacaoComissao.objects.filter(transacao=tx).count(), 0)
+
+    def test_conciliar_marcar_comissoes_com_as_tres_permissoes_funciona(self):
+        tx, receita, comissao = _gerar_repasse_liquido(
+            self.conta, self.extrato, self.locatario, 'mpa-rl5', 'Sala MPA5',
+        )
+        client = self._cliente(
+            'mpa5', 'change_transacaoextrato', 'change_receitaaluguel', 'change_despesa',
+        )
+        resposta = self._post(client, tx, 'conciliar', receita_ids=[receita.pk], marcar_comissoes='1')
+        self.assertEqual(resposta.status_code, 302)
+        tx.refresh_from_db(); receita.refresh_from_db(); comissao.refresh_from_db()
+        self.assertEqual(tx.status, 'conciliada')
+        self.assertEqual(receita.status, 'recebido')
+        self.assertEqual(comissao.status, 'paga')
+
+    # ── Lançar despesa (6-8) ─────────────────────────────────────────────
+    def test_lancar_despesa_somente_add_despesa_403(self):
+        tx = self._tx_debito()
+        client = self._cliente('mpa6', 'add_despesa')
+        resposta = self._post(client, tx, 'lancar_despesa', categoria='outro', descricao='Energia')
+        self.assertEqual(resposta.status_code, 403)
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'pendente')
+        self.assertIsNone(tx.despesa_id)
+        self.assertEqual(Despesa.objects.count(), 0)
+
+    def test_lancar_despesa_somente_change_transacaoextrato_403(self):
+        tx = self._tx_debito()
+        client = self._cliente('mpa7', 'change_transacaoextrato')
+        resposta = self._post(client, tx, 'lancar_despesa', categoria='outro', descricao='Energia')
+        self.assertEqual(resposta.status_code, 403)
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'pendente')
+        self.assertEqual(Despesa.objects.count(), 0)
+
+    def test_lancar_despesa_com_as_duas_permissoes_funciona(self):
+        tx = self._tx_debito()
+        client = self._cliente('mpa8', 'change_transacaoextrato', 'add_despesa')
+        resposta = self._post(client, tx, 'lancar_despesa', categoria='outro', descricao='Energia')
+        self.assertEqual(resposta.status_code, 302)
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'conciliada')
+        self.assertIsNotNone(tx.despesa_id)
+        self.assertEqual(Despesa.objects.count(), 1)
+
+    # ── Ignorar e reabrir (9-12) ─────────────────────────────────────────
+    def test_ignorar_sem_change_transacaoextrato_403(self):
+        tx = self._tx_debito(fitid='mpa-ign', valor='-10.00')
+        client = self._cliente('mpa9')  # só view_extratoimportado
+        resposta = self._post(client, tx, 'ignorar')
+        self.assertEqual(resposta.status_code, 403)
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'pendente')
+
+    def test_ignorar_com_change_transacaoextrato_funciona(self):
+        tx = self._tx_debito(fitid='mpa-ign2', valor='-10.00')
+        client = self._cliente('mpa10', 'change_transacaoextrato')
+        resposta = self._post(client, tx, 'ignorar')
+        self.assertEqual(resposta.status_code, 302)
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'ignorada')
+
+    def test_reabrir_sem_change_transacaoextrato_403(self):
+        tx = self._tx_debito(fitid='mpa-reab', valor='-10.00')
+        tx.status = 'ignorada'; tx.save(update_fields=['status'])
+        client = self._cliente('mpa11')  # só view_extratoimportado
+        resposta = self._post(client, tx, 'reabrir')
+        self.assertEqual(resposta.status_code, 403)
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'ignorada')
+
+    def test_reabrir_com_change_transacaoextrato_funciona(self):
+        tx = self._tx_debito(fitid='mpa-reab2', valor='-10.00')
+        tx.status = 'ignorada'; tx.save(update_fields=['status'])
+        client = self._cliente('mpa12', 'change_transacaoextrato')
+        resposta = self._post(client, tx, 'reabrir')
+        self.assertEqual(resposta.status_code, 302)
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'pendente')
+
+    # ── Desfazer crédito (13-17) ─────────────────────────────────────────
+    def _conciliar_credito_simples(self, fitid):
+        # contrato próprio por chamada — evita colisão de competência
+        # (contrato+mês+ano é único em ReceitaAluguel).
+        imovel = Imovel.objects.create(nome=f'Sala {fitid}', endereco='X', cidade='BH', estado='MG')
+        contrato = _contrato(imovel, self.locatario)
+        receita = _receita(contrato, date(2026, 3, 10), Decimal('2000.00'))
+        tx = self._tx_credito(fitid=fitid)
+        conciliar_com_receitas(tx, [receita])
+        tx.refresh_from_db(); receita.refresh_from_db()
+        return tx, receita
+
+    def test_desfazer_credito_sem_comissoes_com_as_duas_permissoes_funciona(self):
+        tx, receita = self._conciliar_credito_simples('mpa-dc13')
+        client = self._cliente('mpa13', 'change_transacaoextrato', 'change_receitaaluguel')
+        resposta = self._post(client, tx, 'desfazer')
+        self.assertEqual(resposta.status_code, 302)
+        tx.refresh_from_db(); receita.refresh_from_db()
+        self.assertEqual(tx.status, 'pendente')
+        self.assertEqual(receita.recebimentos.count(), 0)
+        self.assertEqual(tx.itens_receita.count(), 0)
+
+    def test_desfazer_credito_faltando_uma_permissao_403_preserva_vinculos(self):
+        # falta change_receitaaluguel
+        tx, receita = self._conciliar_credito_simples('mpa-dc14a')
+        client = self._cliente('mpa14a', 'change_transacaoextrato')
+        resposta = self._post(client, tx, 'desfazer')
+        self.assertEqual(resposta.status_code, 403)
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'conciliada')
+        self.assertEqual(receita.recebimentos.count(), 1)
+        self.assertEqual(tx.itens_receita.count(), 1)
+
+        # falta change_transacaoextrato
+        tx2, receita2 = self._conciliar_credito_simples('mpa-dc14b')
+        client2 = self._cliente('mpa14b', 'change_receitaaluguel')
+        resposta2 = self._post(client2, tx2, 'desfazer')
+        self.assertEqual(resposta2.status_code, 403)
+        tx2.refresh_from_db()
+        self.assertEqual(tx2.status, 'conciliada')
+        self.assertEqual(receita2.recebimentos.count(), 1)
+        self.assertEqual(tx2.itens_receita.count(), 1)
+
+    def test_desfazer_credito_com_comissoes_exige_change_despesa(self):
+        from .models import ConciliacaoComissao
+        tx, receita, comissao = _gerar_repasse_liquido(
+            self.conta, self.extrato, self.locatario, 'mpa-dc15', 'Sala MPA15',
+        )
+        conciliar_com_receitas(tx, [receita], marcar_comissoes=True)
+        client = self._cliente(
+            'mpa15', 'change_transacaoextrato', 'change_receitaaluguel', 'change_despesa',
+        )
+        resposta = self._post(client, tx, 'desfazer')
+        self.assertEqual(resposta.status_code, 302)
+        tx.refresh_from_db(); comissao.refresh_from_db()
+        self.assertEqual(tx.status, 'pendente')
+        self.assertEqual(comissao.status, 'prevista')
+        self.assertEqual(ConciliacaoComissao.objects.filter(transacao=tx).count(), 0)
+
+    def test_desfazer_credito_com_comissoes_sem_change_despesa_preserva_tudo(self):
+        from .models import ConciliacaoComissao
+        from financeiro.models import RecebimentoReceita
+        tx, receita, comissao = _gerar_repasse_liquido(
+            self.conta, self.extrato, self.locatario, 'mpa-dc16', 'Sala MPA16',
+        )
+        conciliar_com_receitas(tx, [receita], marcar_comissoes=True)
+        client = self._cliente('mpa16', 'change_transacaoextrato', 'change_receitaaluguel')
+        resposta = self._post(client, tx, 'desfazer')
+        self.assertEqual(resposta.status_code, 403)
+        tx.refresh_from_db(); receita.refresh_from_db(); comissao.refresh_from_db()
+        self.assertEqual(tx.status, 'conciliada')
+        self.assertEqual(receita.status, 'recebido')
+        self.assertEqual(RecebimentoReceita.objects.filter(receita=receita).count(), 1)
+        self.assertEqual(comissao.status, 'paga')
+        self.assertEqual(ConciliacaoComissao.objects.filter(transacao=tx).count(), 1)
+
+    def test_desfazer_credito_com_comissoes_todas_as_permissoes_funciona(self):
+        tx, receita, comissao = _gerar_repasse_liquido(
+            self.conta, self.extrato, self.locatario, 'mpa-dc17', 'Sala MPA17',
+        )
+        conciliar_com_receitas(tx, [receita], marcar_comissoes=True)
+        client = self._cliente(
+            'mpa17', 'change_transacaoextrato', 'change_receitaaluguel', 'change_despesa',
+        )
+        resposta = self._post(client, tx, 'desfazer')
+        self.assertEqual(resposta.status_code, 302)
+        tx.refresh_from_db(); receita.refresh_from_db(); comissao.refresh_from_db()
+        self.assertEqual(tx.status, 'pendente')
+        self.assertIn(receita.status, ('previsto', 'atrasado'))
+        self.assertEqual(comissao.status, 'prevista')
+
+    # ── Desfazer débito (18-21) ──────────────────────────────────────────
+    def _lancar_debito(self, fitid):
+        tx = self._tx_debito(fitid=fitid, valor='-350.00')
+        despesa = lancar_despesa(tx, categoria='outro', descricao='Energia')
+        tx.refresh_from_db()
+        return tx, despesa
+
+    def test_desfazer_debito_change_transacaoextrato_sem_delete_despesa_403(self):
+        tx, despesa = self._lancar_debito('mpa-dd18')
+        client = self._cliente('mpa18', 'change_transacaoextrato')
+        resposta = self._post(client, tx, 'desfazer')
+        self.assertEqual(resposta.status_code, 403)
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'conciliada')
+        self.assertEqual(tx.despesa_id, despesa.pk)
+        self.assertTrue(Despesa.objects.filter(pk=despesa.pk).exists())
+
+    def test_desfazer_debito_delete_despesa_sem_change_transacaoextrato_403(self):
+        tx, despesa = self._lancar_debito('mpa-dd19')
+        client = self._cliente('mpa19', 'delete_despesa')
+        resposta = self._post(client, tx, 'desfazer')
+        self.assertEqual(resposta.status_code, 403)
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'conciliada')
+        self.assertTrue(Despesa.objects.filter(pk=despesa.pk).exists())
+
+    def test_desfazer_debito_com_ambas_as_permissoes_funciona(self):
+        tx, despesa = self._lancar_debito('mpa-dd20')
+        client = self._cliente('mpa20', 'change_transacaoextrato', 'delete_despesa')
+        resposta = self._post(client, tx, 'desfazer')
+        self.assertEqual(resposta.status_code, 302)
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'pendente')
+        self.assertIsNone(tx.despesa_id)
+        self.assertFalse(Despesa.objects.filter(pk=despesa.pk).exists())
+
+    def test_desfazer_debito_403_preserva_despesa_e_transacao(self):
+        tx, despesa = self._lancar_debito('mpa-dd21')
+        client = self._cliente('mpa21')  # nenhuma permissão de ação
+        resposta = self._post(client, tx, 'desfazer')
+        self.assertEqual(resposta.status_code, 403)
+        tx.refresh_from_db()
+        self.assertEqual(tx.status, 'conciliada')
+        self.assertEqual(tx.despesa_id, despesa.pk)
+        self.assertTrue(Despesa.objects.filter(pk=despesa.pk).exists())
+
+
+@override_settings(MEDIA_ROOT=MEDIA_TEMP)
+class MatrizPermissoesTemplateTest(TestCase):
+    """
+    Os controles (botões/formulários) só aparecem no HTML quando o usuário
+    tem TODAS as permissões da ação — a matriz do botão nunca diverge da do
+    POST. Verificação de AUSÊNCIA no HTML, não só o 403 do POST.
+    """
+    def setUp(self):
+        self.conta = ContaBancaria.objects.create(nome='Conta MPT')
+        self.extrato = ExtratoImportado.objects.create(conta=self.conta, hash_arquivo='hmpt')
+        self.imovel, self.locatario = _base()
+        self.contrato = _contrato(self.imovel, self.locatario)
+
+    def _cliente(self, nome, *codenames):
+        # view_despesa/view_receitaaluguel/view_imovel para poder VER os
+        # detalhes das transações tratadas (item 3) — ortogonal às ações.
+        user = User.objects.create_user(nome, password='pass')
+        user.user_permissions.add(*Permission.objects.filter(
+            codename__in=('view_extratoimportado', 'view_despesa',
+                          'view_receitaaluguel', 'view_imovel') + codenames
+        ))
+        client = Client()
+        client.login(username=nome, password='pass')
+        return client
+
+    def _get(self, client):
+        return client.get(reverse('conciliar_extrato', args=[self.extrato.pk]))
+
+    def _tx_credito_pendente(self, fitid='mpt-c'):
+        _receita(self.contrato, date(2026, 3, 10), Decimal('2000.00'))
+        return TransacaoExtrato.objects.create(
+            extrato=self.extrato, conta=self.conta, fitid=fitid,
+            data=date(2026, 3, 12), valor=Decimal('2000.00'), tipo='credito', descricao='PIX',
+        )
+
+    def _tx_debito_pendente(self, fitid='mpt-d'):
+        return TransacaoExtrato.objects.create(
+            extrato=self.extrato, conta=self.conta, fitid=fitid,
+            data=date(2026, 3, 12), valor=Decimal('-350.00'), tipo='debito', descricao='CEMIG',
+        )
+
+    # 22: botão de conciliar crédito não aparece sem as duas permissões
+    def test_botao_conciliar_credito_exige_as_duas_permissoes(self):
+        self._tx_credito_pendente()
+        # só change_receitaaluguel → sem botão
+        html = self._get(self._cliente('mpt22a', 'change_receitaaluguel')).content.decode()
+        self.assertNotIn('value="conciliar"', html)
+        # só change_transacaoextrato → sem botão
+        html = self._get(self._cliente('mpt22b', 'change_transacaoextrato')).content.decode()
+        self.assertNotIn('value="conciliar"', html)
+        # ambas → botão aparece
+        html = self._get(self._cliente('mpt22c', 'change_transacaoextrato', 'change_receitaaluguel')).content.decode()
+        self.assertIn('value="conciliar"', html)
+
+    # 23: opção de marcar comissões não aparece sem change_despesa
+    def test_opcao_marcar_comissoes_exige_change_despesa(self):
+        from financeiro.services import gerar_receitas_para_contrato
+        # A sugestão de repasse líquido (que faz o checkbox de comissões
+        # aparecer) exige >= 2 receitas da MESMA imobiliária. Duas de R$2000
+        # com 10% → bruto 4000, comissões 400, líquido 3600.
+        imob = Pessoa.objects.create(nome='Imob MPT23', tipo='imobiliaria')
+        for i in range(2):
+            c = _contrato(
+                Imovel.objects.create(nome=f'Sala MPT23-{i}', endereco='X', cidade='BH', estado='MG'),
+                self.locatario, valor_aluguel=Decimal('2000.00'), imobiliaria=imob,
+                comissao_imobiliaria_percentual=Decimal('10.00'),
+                data_inicio=date(2026, 1, 1), data_fim=date(2026, 12, 31),
+            )
+            gerar_receitas_para_contrato(c, data_inicio=date(2026, 3, 1), data_fim=date(2026, 3, 31))
+        TransacaoExtrato.objects.create(
+            extrato=self.extrato, conta=self.conta, fitid='mpt-rl23',
+            data=date(2026, 3, 12), valor=Decimal('3600.00'), tipo='credito', descricao='REPASSE',
+        )
+        # sem change_despesa: conciliar sim, comissões não
+        html = self._get(self._cliente('mpt23a', 'change_transacaoextrato', 'change_receitaaluguel')).content.decode()
+        self.assertIn('value="conciliar"', html)
+        self.assertNotIn('name="marcar_comissoes"', html)
+        # com change_despesa: checkbox aparece
+        html = self._get(self._cliente(
+            'mpt23b', 'change_transacaoextrato', 'change_receitaaluguel', 'change_despesa',
+        )).content.decode()
+        self.assertIn('name="marcar_comissoes"', html)
+
+    # 24: formulário de lançar despesa não aparece sem as duas permissões
+    def test_form_lancar_despesa_exige_as_duas_permissoes(self):
+        self._tx_debito_pendente()
+        html = self._get(self._cliente('mpt24a', 'add_despesa')).content.decode()
+        self.assertNotIn('value="lancar_despesa"', html)
+        html = self._get(self._cliente('mpt24b', 'change_transacaoextrato')).content.decode()
+        self.assertNotIn('value="lancar_despesa"', html)
+        html = self._get(self._cliente('mpt24c', 'change_transacaoextrato', 'add_despesa')).content.decode()
+        self.assertIn('value="lancar_despesa"', html)
+
+    # 25: ignorar e reabrir respeitam change_transacaoextrato
+    def test_botoes_ignorar_e_reabrir_exigem_change_transacaoextrato(self):
+        self._tx_debito_pendente(fitid='mpt-ign')
+        ignorada = self._tx_debito_pendente(fitid='mpt-reab')
+        ignorada.status = 'ignorada'; ignorada.save(update_fields=['status'])
+
+        html = self._get(self._cliente('mpt25a')).content.decode()  # só view
+        self.assertNotIn('value="ignorar"', html)
+        self.assertNotIn('value="reabrir"', html)
+
+        html = self._get(self._cliente('mpt25b', 'change_transacaoextrato')).content.decode()
+        self.assertIn('value="ignorar"', html)
+        self.assertIn('value="reabrir"', html)
+
+    # 26: botão desfazer crédito segue a matriz de crédito
+    def test_botao_desfazer_credito_segue_matriz_de_credito(self):
+        receita = _receita(self.contrato, date(2026, 3, 10), Decimal('2000.00'))
+        tx = TransacaoExtrato.objects.create(
+            extrato=self.extrato, conta=self.conta, fitid='mpt-dc',
+            data=date(2026, 3, 12), valor=Decimal('2000.00'), tipo='credito', descricao='PIX',
+        )
+        conciliar_com_receitas(tx, [receita])
+        # só change_transacaoextrato (falta change_receitaaluguel) → sem botão
+        html = self._get(self._cliente('mpt26a', 'change_transacaoextrato')).content.decode()
+        self.assertNotIn('value="desfazer"', html)
+        # matriz completa de crédito → botão aparece
+        html = self._get(self._cliente('mpt26b', 'change_transacaoextrato', 'change_receitaaluguel')).content.decode()
+        self.assertIn('value="desfazer"', html)
+
+    # 27: botão desfazer débito segue a matriz de débito
+    def test_botao_desfazer_debito_segue_matriz_de_debito(self):
+        tx = self._tx_debito_pendente(fitid='mpt-dd')
+        lancar_despesa(tx, categoria='outro', descricao='Energia')
+        # change_transacaoextrato + change_receitaaluguel (matriz de crédito)
+        # NÃO basta para débito (precisa delete_despesa) → sem botão
+        html = self._get(self._cliente('mpt27a', 'change_transacaoextrato', 'change_receitaaluguel')).content.decode()
+        self.assertNotIn('value="desfazer"', html)
+        # matriz de débito (change_transacaoextrato + delete_despesa) → botão
+        html = self._get(self._cliente('mpt27b', 'change_transacaoextrato', 'delete_despesa')).content.decode()
+        self.assertIn('value="desfazer"', html)

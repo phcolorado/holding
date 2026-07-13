@@ -10,6 +10,7 @@ from core.utils import pk_param
 from financeiro.models import ReceitaAluguel
 from .forms import UploadExtratoForm, DespesaExtratoForm
 from .models import ExtratoImportado, TransacaoExtrato, ContaBancaria
+from .permissions import ACOES_COM_MATRIZ, permissoes_para_acao, usuario_pode_executar
 from .services import (
     ConciliacaoInvalidaError, ExtratoJaImportadoError, OFXInvalidoError,
     importar_ofx, receitas_candidatas, sugerir_receitas, sugerir_classificacao,
@@ -111,18 +112,22 @@ def extrato_download(request, pk):
         raise Http404('Arquivo não encontrado no armazenamento.')
 
 
-def _contexto_transacao(transacao, pode_conciliar_receitas, pode_lancar_despesa):
+def _contexto_transacao(transacao, ve_candidatas_receita, constroi_form_despesa):
     """
     Pré-calcula sugestões e candidatas para exibição na tela de conciliação
     — item 6.2: nunca consulta receitas candidatas se o usuário não puder
-    conciliar receitas, nem sugere classificação de débito (que exigiria
-    consultar fornecedores/imóveis do form) se não puder lançar despesa.
+    VER receitas (financeiro.change_receitaaluguel), nem sugere classificação
+    de débito (que exigiria consultar fornecedores/imóveis do form) se não
+    puder criar despesa (financeiro.add_despesa). Este gating é da CONSULTA
+    de dados financeiros (não vaza dados de uma área sem a permissão dela);
+    a VISIBILIDADE do botão/formulário exige a matriz completa da ação (ver
+    permissoes_para_acao) e é decidida no template pelos flags de ação.
     """
     dados = {'transacao': transacao, 'sugestao': None, 'candidatas': [], 'regra': None}
     if transacao.status != 'pendente':
         return dados
     if transacao.tipo == 'credito':
-        if not pode_conciliar_receitas:
+        if not ve_candidatas_receita:
             return dados
         sugestao = sugerir_receitas(transacao)
         dados['sugestao'] = sugestao
@@ -132,7 +137,7 @@ def _contexto_transacao(transacao, pode_conciliar_receitas, pode_lancar_despesa)
             for r in receitas_candidatas(transacao)
         ]
     else:
-        if not pode_lancar_despesa:
+        if not constroi_form_despesa:
             return dados
         dados['regra'] = sugerir_classificacao(transacao)
     return dados
@@ -143,30 +148,60 @@ def _contexto_transacao(transacao, pode_conciliar_receitas, pode_lancar_despesa)
 def conciliar_extrato(request, pk):
     """Tela de conciliação de um extrato: créditos ↔ receitas, débitos → despesas."""
     extrato = get_object_or_404(ExtratoImportado.objects.select_related('conta'), pk=pk)
-    pode_conciliar_receitas = request.user.has_perm('financeiro.change_receitaaluguel')
-    pode_lancar_despesa = request.user.has_perm('financeiro.add_despesa')
-    pode_alterar_transacao = request.user.has_perm('conciliacao.change_transacaoextrato')
+    user = request.user
+
+    # Gating de CONSULTA de dados financeiros (item 6.2): construir a lista
+    # de candidatas de receita / o form de despesa depende apenas da
+    # permissão financeira daquela área — não vaza dados sem a permissão de
+    # ver/criar naquela área. (A VISIBILIDADE do botão exige mais — ver os
+    # flags de ação abaixo.)
+    ve_candidatas_receita = user.has_perm('financeiro.change_receitaaluguel')
+    constroi_form_despesa = user.has_perm('financeiro.add_despesa')
+
+    # Flags de AÇÃO (matriz completa): cada botão/formulário exige TODAS as
+    # permissões dos efeitos da operação. A MESMA função (permissoes_para_
+    # acao) é a fonte da regra do POST e do botão — nunca divergem.
+    pode_conciliar_credito = usuario_pode_executar(user, permissoes_para_acao('conciliar'))
+    pode_conciliar_com_comissoes = usuario_pode_executar(
+        user, permissoes_para_acao('conciliar', marcar_comissoes=True)
+    )
+    pode_lancar_despesa = usuario_pode_executar(user, permissoes_para_acao('lancar_despesa'))
+    pode_ignorar = usuario_pode_executar(user, permissoes_para_acao('ignorar'))
+    pode_reabrir = usuario_pode_executar(user, permissoes_para_acao('reabrir'))
+
     # Item 3 (rodada de fechamento estrutural): ver a lista de extratos NÃO
     # concede acesso aos detalhes internos das transações já TRATADAS —
     # descrição/categoria/fornecedor/imóvel de uma despesa e imóvel/
     # locatário/valores de receitas vinculadas só aparecem para quem também
     # tem a permissão de VER aquela área (nunca a de escrita, que é outra
     # coisa). Nomes de imóvel dependem também de patrimonio.view_imovel.
-    ve_imoveis = request.user.has_perm('patrimonio.view_imovel')
-    pode_ver_detalhes_despesas = request.user.has_perm('financeiro.view_despesa') and ve_imoveis
-    pode_ver_detalhes_receitas = request.user.has_perm('financeiro.view_receitaaluguel') and ve_imoveis
+    ve_imoveis = user.has_perm('patrimonio.view_imovel')
+    pode_ver_detalhes_despesas = user.has_perm('financeiro.view_despesa') and ve_imoveis
+    pode_ver_detalhes_receitas = user.has_perm('financeiro.view_receitaaluguel') and ve_imoveis
 
     if request.method == 'POST':
         transacao = get_object_or_404(
             TransacaoExtrato, pk=pk_param(request.POST.get('transacao_id')) or 0, extrato=extrato
         )
         action = request.POST.get('action', '')
+        marcar_comissoes = request.POST.get('marcar_comissoes') == '1'
+
+        # Autorização ANTES de qualquer service: a matriz corresponde a TODOS
+        # os efeitos da operação (transação + receitas/despesas). Para
+        # 'desfazer', permissoes_para_acao() consulta o ESTADO PERSISTIDO da
+        # transação (transacao.tipo / comissoes_marcadas) — nunca campos do
+        # formulário. Falta de permissão levanta 403 (PermissionDenied) sem
+        # tocar em transação, receitas, recebimentos, comissões ou despesas.
+        if action in ACOES_COM_MATRIZ:
+            permissoes = permissoes_para_acao(
+                action, transacao=transacao, marcar_comissoes=marcar_comissoes
+            )
+            if not usuario_pode_executar(user, permissoes):
+                raise PermissionDenied
 
         if action == 'conciliar':
-            _exigir_permissao(request, 'financeiro.change_receitaaluguel')
             receita_ids = [pk_param(v) for v in request.POST.getlist('receita_ids') if pk_param(v)]
             receitas = list(ReceitaAluguel.objects.filter(pk__in=receita_ids))
-            marcar_comissoes = request.POST.get('marcar_comissoes') == '1'
             try:
                 conciliar_com_receitas(
                     transacao, receitas,
@@ -179,7 +214,6 @@ def conciliar_extrato(request, pk):
                 messages.success(request, f'Crédito de R$ {transacao.valor_absoluto} conciliado com: {nomes}.')
 
         elif action == 'lancar_despesa':
-            _exigir_permissao(request, 'financeiro.add_despesa')
             form = DespesaExtratoForm(request.POST)
             if form.is_valid():
                 try:
@@ -199,7 +233,6 @@ def conciliar_extrato(request, pk):
                 messages.error(request, f'Despesa não lançada: {erros}')
 
         elif action == 'desfazer':
-            _exigir_permissao(request, 'conciliacao.change_transacaoextrato')
             try:
                 resultado = desfazer_conciliacao(transacao)
             except ConciliacaoInvalidaError as exc:
@@ -217,13 +250,11 @@ def conciliar_extrato(request, pk):
                     )
 
         elif action == 'ignorar' and transacao.status == 'pendente':
-            _exigir_permissao(request, 'conciliacao.change_transacaoextrato')
             transacao.status = 'ignorada'
             transacao.save(update_fields=['status'])
             messages.info(request, 'Transação marcada como ignorada.')
 
         elif action == 'reabrir' and transacao.status == 'ignorada':
-            _exigir_permissao(request, 'conciliacao.change_transacaoextrato')
             transacao.status = 'pendente'
             transacao.save(update_fields=['status'])
             messages.info(request, 'Transação reaberta.')
@@ -241,10 +272,19 @@ def conciliar_extrato(request, pk):
     transacoes = list(transacoes_qs)
 
     pendentes = [
-        _contexto_transacao(t, pode_conciliar_receitas, pode_lancar_despesa)
+        _contexto_transacao(t, ve_candidatas_receita, constroi_form_despesa)
         for t in transacoes if t.status == 'pendente'
     ]
     tratadas = [t for t in transacoes if t.status != 'pendente']
+    # Item: o desfazer de crédito e o de débito exigem permissões DIFERENTES
+    # (crédito → change_receitaaluguel [+ change_despesa se comissões];
+    # débito → delete_despesa). Cada transação tratada recebe seu próprio
+    # flag pelo MESMO permissoes_para_acao() usado no POST — o botão nunca
+    # aparece para quem o servidor recusaria.
+    for t in tratadas:
+        t.pode_desfazer = usuario_pode_executar(
+            user, permissoes_para_acao('desfazer', transacao=t)
+        )
 
     context = {
         'extrato': extrato,
@@ -252,12 +292,15 @@ def conciliar_extrato(request, pk):
         'tratadas': tratadas,
         'total': len(pendentes) + len(tratadas),
         # DespesaExtratoForm() constrói ModelChoiceField de fornecedor/imóvel
-        # (consulta o banco) — só é criado quando o usuário pode lançar
-        # despesa (item 6.2).
-        'despesa_form': DespesaExtratoForm() if pode_lancar_despesa else None,
-        'pode_conciliar_receitas': pode_conciliar_receitas,
+        # (consulta o banco) — só é criado quando o usuário pode CRIAR
+        # despesa (item 6.2); a visibilidade do form exige a matriz completa
+        # (pode_lancar_despesa) no template.
+        'despesa_form': DespesaExtratoForm() if constroi_form_despesa else None,
+        'pode_conciliar_credito': pode_conciliar_credito,
+        'pode_conciliar_com_comissoes': pode_conciliar_com_comissoes,
         'pode_lancar_despesa': pode_lancar_despesa,
-        'pode_alterar_transacao': pode_alterar_transacao,
+        'pode_ignorar': pode_ignorar,
+        'pode_reabrir': pode_reabrir,
         'pode_ver_detalhes_despesas': pode_ver_detalhes_despesas,
         'pode_ver_detalhes_receitas': pode_ver_detalhes_receitas,
     }

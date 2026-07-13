@@ -44,7 +44,7 @@
                 <span class="text-muted ms-2">{{ t.data|date:"d/m/Y" }}</span>
                 <div class="small text-muted mt-1">{{ t.descricao }}{% if t.memo and t.memo != t.descricao %} — {{ t.memo }}{% endif %}</div>
             </div>
-            {% if perms.conciliacao.change_transacaoextrato %}
+            {% if pode_ignorar %}
             <form method="post" class="align-self-start">
                 {% csrf_token %}
                 <input type="hidden" name="transacao_id" value="{{ t.pk }}">
@@ -58,7 +58,7 @@
         </div>
 
         {% if t.tipo == 'credito' %}
-        {% if perms.financeiro.change_receitaaluguel %}
+        {% if pode_conciliar_credito %}
         <!-- Crédito: conciliar com receitas -->
         <form method="post" class="mt-3">
             {% csrf_token %}
@@ -118,7 +118,7 @@
                 <button type="submit" class="btn btn-success btn-sm">
                     <i class="bi bi-check-lg me-1"></i>Confirmar Recebimento
                 </button>
-                {% if item.sugestao and item.sugestao.tipo == 'repasse_liquido' %}
+                {% if item.sugestao and item.sugestao.tipo == 'repasse_liquido' and pode_conciliar_com_comissoes %}
                 <div class="form-check mb-0">
                     <input class="form-check-input" type="checkbox" name="marcar_comissoes" value="1" checked
                            id="comissoes-{{ t.pk }}">
@@ -142,7 +142,7 @@
         {% endif %}
 
         {% else %}
-        {% if perms.financeiro.add_despesa %}
+        {% if pode_lancar_despesa %}
         <!-- Débito: lançar despesa -->
         <form method="post" class="mt-3">
             {% csrf_token %}
@@ -242,15 +242,14 @@
                         {% endif %}
                     </td>
                     <td class="text-end">
-                        {% if perms.conciliacao.change_transacaoextrato %}
-                        {% if t.status == 'ignorada' %}
+                        {% if t.status == 'ignorada' and pode_reabrir %}
                         <form method="post" class="d-inline">
                             {% csrf_token %}
                             <input type="hidden" name="transacao_id" value="{{ t.pk }}">
                             <input type="hidden" name="action" value="reabrir">
                             <button type="submit" class="btn btn-sm btn-outline-secondary py-0">Reabrir</button>
                         </form>
-                        {% elif t.status == 'conciliada' %}
+                        {% elif t.status == 'conciliada' and t.pode_desfazer %}
                         <form method="post" class="d-inline">
                             {% csrf_token %}
                             <input type="hidden" name="transacao_id" value="{{ t.pk }}">
@@ -260,7 +259,6 @@
                                 Desfazer
                             </button>
                         </form>
-                        {% endif %}
                         {% endif %}
                     </td>
                 </tr>
