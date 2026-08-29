@@ -11,6 +11,7 @@ urlpatterns = [
     path('checklist-mensal/', views.checklist_mensal_view, name='checklist_mensal'),
     path('export/imoveis/<str:formato>/', views.export_imoveis, name='export_imoveis'),
     path('export/contratos/<str:formato>/', views.export_contratos, name='export_contratos'),
+    path('export/locatarios/<str:formato>/', views.export_locatarios, name='export_locatarios'),
     path('export/receitas/<str:formato>/', views.export_receitas, name='export_receitas'),
     path('export/despesas/<str:formato>/', views.export_despesas, name='export_despesas'),
     path('export/inadimplencia/<str:formato>/', views.export_inadimplencia, name='export_inadimplencia'),

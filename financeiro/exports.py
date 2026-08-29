@@ -39,8 +39,15 @@ def _response_xlsx(nome_arquivo):
 
 
 def _response_csv(nome_arquivo):
-    response = HttpResponse(content_type='text/csv; charset=utf-8-sig')
+    # charset=utf-8 (NÃO utf-8-sig): o codec utf-8-sig prepende um BOM a
+    # CADA HttpResponse.write(), e csv.writer chama write() uma vez por
+    # linha — o arquivo saía com um BOM por linha, e no Excel a primeira
+    # coluna de TODAS as linhas vinha com um caractere invisível grudado
+    # (quebrando ordenação, filtro e PROCV). O BOM, que o Excel precisa
+    # para reconhecer UTF-8, é escrito UMA única vez aqui.
+    response = HttpResponse(content_type='text/csv; charset=utf-8')
     response['Content-Disposition'] = f'attachment; filename="{nome_arquivo}"'
+    response.write('\ufeff')  # BOM escrito uma única vez
     return response
 
 
@@ -134,6 +141,69 @@ def exportar_contratos_xlsx(request, contratos):
         ws.append(linha)
     _estilizar_cabecalho(ws, len(CABECALHO_CONTRATOS))
     response = _response_xlsx('contratos.xlsx')
+    wb.save(response)
+    return response
+
+
+# ─── locatários por imóvel alugado (relatório para a contabilidade) ────────────
+
+CABECALHO_LOCATARIOS = [
+    'Imóvel', 'Endereço', 'Cidade', 'UF',
+    'Locatário', 'CPF / CNPJ',
+    'Início do Contrato', 'Valor do Aluguel',
+]
+
+# Texto explícito quando a pessoa está cadastrada sem CPF/CNPJ: uma célula
+# vazia pareceria falha da exportação; assim a contabilidade vê o que falta
+# cadastrar.
+CPF_NAO_CADASTRADO = '(não cadastrado)'
+
+
+def _linhas_locatarios(contratos):
+    """
+    UMA LINHA POR LOCATÁRIO (não por contrato): um contrato pode ter vários
+    locatários, e juntar nomes/CPFs numa mesma célula tornaria o par
+    nome↔CPF ambíguo justamente no dado que a contabilidade precisa. Um
+    contrato sem locatário cadastrado ainda gera uma linha, para o imóvel
+    alugado nunca sumir silenciosamente do relatório.
+    """
+    for c in contratos:
+        locatarios = c.get_locatarios()
+        if not locatarios:
+            yield [
+                c.imovel.nome, c.imovel.endereco, c.imovel.cidade, c.imovel.estado,
+                '(sem locatário cadastrado)', '',
+                c.data_inicio, c.valor_aluguel,
+            ]
+            continue
+        for pessoa in locatarios:
+            yield [
+                c.imovel.nome, c.imovel.endereco, c.imovel.cidade, c.imovel.estado,
+                pessoa.nome, pessoa.cpf_cnpj or CPF_NAO_CADASTRADO,
+                c.data_inicio, c.valor_aluguel,
+            ]
+
+
+def exportar_locatarios_csv(request, contratos):
+    response = _response_csv('locatarios_por_imovel.csv')
+    writer = csv.writer(response)
+    writer.writerow(CABECALHO_LOCATARIOS)
+    for linha in _linhas_locatarios(contratos):
+        writer.writerow(linha)
+    return response
+
+
+def exportar_locatarios_xlsx(request, contratos):
+    if not OPENPYXL_AVAILABLE:
+        return exportar_locatarios_csv(request, contratos)
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = 'Locatários'
+    ws.append(CABECALHO_LOCATARIOS)
+    for linha in _linhas_locatarios(contratos):
+        ws.append(linha)
+    _estilizar_cabecalho(ws, len(CABECALHO_LOCATARIOS))
+    response = _response_xlsx('locatarios_por_imovel.xlsx')
     wb.save(response)
     return response
 

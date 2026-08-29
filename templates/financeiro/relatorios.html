@@ -80,6 +80,39 @@
     </div>
     {% endif %}
 
+    <!-- Locatários por imóvel alugado (para a contabilidade) -->
+    {% if ve_contratos %}
+    <div class="col-md-6">
+        <div class="card shadow-sm">
+            <div class="card-header fw-semibold bg-white">
+                <i class="bi bi-person-vcard me-2 text-primary"></i>Locatários por Imóvel
+            </div>
+            <div class="card-body">
+                <p class="text-muted small mb-3">
+                    Imóveis com contrato ativo, com nome e CPF/CNPJ do locatário —
+                    uma linha por locatário.
+                </p>
+                <div class="row g-2 mb-3">
+                    <div class="col-12">
+                        <select id="loc-imovel" class="form-select form-select-sm">
+                            <option value="">Todos os imóveis</option>
+                            {% for im in imoveis %}<option value="{{ im.pk }}">{{ im.nome }}</option>{% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <div class="d-flex gap-2">
+                    <button onclick="exportarLocatarios('csv')" class="btn btn-outline-secondary btn-sm flex-fill">
+                        <i class="bi bi-filetype-csv"></i> CSV
+                    </button>
+                    <button onclick="exportarLocatarios('xlsx')" class="btn btn-outline-success btn-sm flex-fill">
+                        <i class="bi bi-file-earmark-excel"></i> XLSX
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
     <!-- Receitas por período -->
     {% if ve_receitas %}
     <div class="col-md-6">
@@ -321,6 +354,11 @@ function exportarContratos(fmt) {
     if (imovel) params.set('imovel', imovel);
     if (imobiliaria) params.set('imobiliaria', imobiliaria);
     window.location = `/financeiro/export/contratos/${fmt}/?` + params;
+}
+function exportarLocatarios(fmt) {
+    const imovel = document.getElementById('loc-imovel').value;
+    const params = imovel ? `?imovel=${imovel}` : '';
+    window.location = `/financeiro/export/locatarios/${fmt}/${params}`;
 }
 function exportarInadimplencia(fmt) {
     const imovel = document.getElementById('inadimp-imovel').value;

@@ -635,6 +635,150 @@ class ExportContratosViewTest(TestCase):
         self.assertNotIn('Casa Dois', content)
 
 
+class ExportLocatariosViewTest(TestCase):
+    """
+    Relatório para a contabilidade: imóveis alugados (contrato ativo) com
+    nome e CPF/CNPJ do locatário, uma linha por locatário.
+    """
+
+    def setUp(self):
+        from patrimonio.models import ContratoParte
+        self.ContratoParte = ContratoParte
+        self.client = Client()
+        self.user = com_leitura(User.objects.create_user('exp_loc', password='pass'))
+        self.client.login(username='exp_loc', password='pass')
+
+        self.imovel, self.locatario = _criar_base()
+        self.locatario.cpf_cnpj = '123.456.789-09'
+        self.locatario.save()
+        _criar_contrato(self.imovel, self.locatario, date(2024, 1, 1), date(2030, 12, 31), status='ativo')
+
+        # imóvel com contrato ENCERRADO — não é imóvel alugado
+        self.imovel_vago = Imovel.objects.create(
+            nome='Casa Vazia', endereco='Rua V', cidade='SP', estado='SP',
+        )
+        self.ex_locatario = Pessoa.objects.create(
+            nome='Ex Locatário', tipo='locatario', cpf_cnpj='987.654.321-00',
+        )
+        _criar_contrato(
+            self.imovel_vago, self.ex_locatario, date(2020, 1, 1), date(2021, 12, 31),
+            status='encerrado',
+        )
+
+    def _csv(self, query=''):
+        resposta = self.client.get(reverse('export_locatarios', args=['csv']) + query)
+        self.assertEqual(resposta.status_code, 200)
+        return resposta.content.decode('utf-8-sig')
+
+    def test_exporta_imovel_alugado_com_locatario_e_cpf(self):
+        conteudo = self._csv()
+        self.assertIn('Apartamento Teste', conteudo)
+        self.assertIn('Locatário Teste', conteudo)
+        self.assertIn('123.456.789-09', conteudo)
+
+    def test_nao_inclui_imovel_sem_contrato_ativo(self):
+        conteudo = self._csv()
+        self.assertNotIn('Casa Vazia', conteudo)
+        self.assertNotIn('Ex Locatário', conteudo)
+        self.assertNotIn('987.654.321-00', conteudo)
+
+    def test_uma_linha_por_locatario_quando_contrato_tem_varios(self):
+        """
+        Contrato com dois locatários gera DUAS linhas — o par nome↔CPF
+        nunca fica ambíguo numa célula só.
+        """
+        outro_imovel = Imovel.objects.create(
+            nome='Loja Dupla', endereco='Rua L', cidade='SP', estado='SP',
+        )
+        contrato = _criar_contrato(
+            outro_imovel, self.locatario, date(2024, 1, 1), date(2030, 12, 31), status='ativo',
+        )
+        casal = [
+            Pessoa.objects.create(nome='Locatário Um', tipo='locatario', cpf_cnpj='111.111.111-11'),
+            Pessoa.objects.create(nome='Locatário Dois', tipo='locatario', cpf_cnpj='222.222.222-22'),
+        ]
+        for pessoa in casal:
+            self.ContratoParte.objects.create(contrato=contrato, pessoa=pessoa, papel='locatario')
+
+        conteudo = self._csv()
+        linhas = [linha for linha in conteudo.splitlines() if 'Loja Dupla' in linha]
+        self.assertEqual(len(linhas), 2)
+        self.assertTrue(any('Locatário Um' in linha and '111.111.111-11' in linha for linha in linhas))
+        self.assertTrue(any('Locatário Dois' in linha and '222.222.222-22' in linha for linha in linhas))
+
+    def test_locatario_sem_cpf_cadastrado_e_sinalizado(self):
+        """Célula vazia pareceria falha do relatório — o texto explícito
+        mostra à contabilidade o que falta cadastrar."""
+        from financeiro.exports import CPF_NAO_CADASTRADO
+        sem_doc = Imovel.objects.create(
+            nome='Sala Sem Doc', endereco='Rua S', cidade='SP', estado='SP',
+        )
+        pessoa = Pessoa.objects.create(nome='Sem Documento', tipo='locatario')  # cpf_cnpj em branco
+        _criar_contrato(sem_doc, pessoa, date(2024, 1, 1), date(2030, 12, 31), status='ativo')
+
+        conteudo = self._csv()
+        linha = next(l for l in conteudo.splitlines() if 'Sala Sem Doc' in l)
+        self.assertIn('Sem Documento', linha)
+        self.assertIn(CPF_NAO_CADASTRADO, linha)
+
+    def test_filtro_por_imovel(self):
+        outro = Imovel.objects.create(nome='Outro Imóvel', endereco='Rua O', cidade='SP', estado='SP')
+        _criar_contrato(outro, self.locatario, date(2024, 1, 1), date(2030, 12, 31), status='ativo')
+        conteudo = self._csv(f'?imovel={self.imovel.pk}')
+        self.assertIn('Apartamento Teste', conteudo)
+        self.assertNotIn('Outro Imóvel', conteudo)
+
+    def test_xlsx_responde_planilha(self):
+        resposta = self.client.get(reverse('export_locatarios', args=['xlsx']))
+        self.assertEqual(resposta.status_code, 200)
+        self.assertIn('spreadsheet', resposta['Content-Type'])
+
+    def test_exige_permissao_de_contrato(self):
+        sem_perm = User.objects.create_user('exp_loc_sem', password='pass')
+        cliente = Client()
+        cliente.login(username='exp_loc_sem', password='pass')
+        resposta = cliente.get(reverse('export_locatarios', args=['csv']))
+        self.assertEqual(resposta.status_code, 403)
+
+
+class ExportCsvBomTest(TestCase):
+    """
+    O CSV deve ter UM ÚNICO BOM, no início do arquivo.
+
+    Regressão: com content_type 'charset=utf-8-sig', o Django encodava CADA
+    HttpResponse.write() com o codec utf-8-sig — e csv.writer escreve uma vez
+    por linha, então o arquivo saía com um BOM por LINHA. No Excel isso
+    grudava um caractere invisível na primeira coluna de todas as linhas,
+    quebrando ordenação, filtro e PROCV. Vale para todos os exports CSV.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        com_leitura(User.objects.create_user('exp_bom', password='pass'))
+        self.client.login(username='exp_bom', password='pass')
+        self.imovel, self.locatario = _criar_base()
+        self.locatario.cpf_cnpj = '123.456.789-09'
+        self.locatario.save()
+        _criar_contrato(self.imovel, self.locatario, date(2024, 1, 1), date(2030, 12, 31), status='ativo')
+
+    def test_csvs_tem_exatamente_um_bom_no_inicio(self):
+        BOM = '﻿'.encode('utf-8')
+        for rota in ('export_locatarios', 'export_contratos', 'export_imoveis'):
+            with self.subTest(rota=rota):
+                bruto = self.client.get(reverse(rota, args=['csv'])).content
+                self.assertTrue(bruto.startswith(BOM), f'{rota}: sem BOM inicial')
+                self.assertEqual(bruto.count(BOM), 1, f'{rota}: BOM repetido nas linhas')
+
+    def test_primeira_coluna_das_linhas_nao_tem_caractere_invisivel(self):
+        conteudo = self.client.get(
+            reverse('export_locatarios', args=['csv'])
+        ).content.decode('utf-8-sig')
+        for linha in conteudo.splitlines():
+            self.assertFalse(linha.startswith('﻿'), f'linha suja: {linha!r}')
+        # o valor chega íntegro para comparação/PROCV na planilha
+        self.assertIn('Apartamento Teste,', conteudo)
+
+
 # ─── Testes da tela de baixa de aluguéis ──────────────────────────────────────
 
 class BaixaReceitasViewTest(TestCase):

@@ -15,6 +15,7 @@ from .forms import RegistrarRecebimentoForm, EditarEncargosForm
 from .exports import (
     exportar_imoveis_csv, exportar_imoveis_xlsx,
     exportar_contratos_csv, exportar_contratos_xlsx,
+    exportar_locatarios_csv, exportar_locatarios_xlsx,
     exportar_receitas_csv, exportar_receitas_xlsx,
     exportar_despesas_csv, exportar_despesas_xlsx,
     exportar_inadimplencia_csv, exportar_inadimplencia_xlsx,
@@ -259,6 +260,33 @@ def export_contratos(request, formato):
     if formato == 'csv':
         return exportar_contratos_csv(request, contratos)
     return exportar_contratos_xlsx(request, contratos)
+
+
+@login_required
+@permission_required('patrimonio.view_contrato', raise_exception=True)
+def export_locatarios(request, formato):
+    """
+    Relatório para a contabilidade: cada imóvel ALUGADO com o nome e o
+    CPF/CNPJ do(s) locatário(s). Uma linha por locatário.
+
+    "Imóvel alugado" = imóvel com contrato ATIVO — mesma convenção do
+    export de contratos (o contrato é a fonte de quem é o locatário; o
+    campo Imovel.status é apenas reflexo dele). Exige patrimonio.view_
+    contrato: o relatório expõe dados de contrato e documento das partes.
+    """
+    imovel_id = pk_param(request.GET.get('imovel'))
+    contratos = (
+        Contrato.objects
+        .filter(status='ativo')
+        .select_related('imovel', 'locatario')
+        .prefetch_related('partes__pessoa')
+        .order_by('imovel__nome')
+    )
+    if imovel_id:
+        contratos = contratos.filter(imovel_id=imovel_id)
+    if formato == 'csv':
+        return exportar_locatarios_csv(request, contratos)
+    return exportar_locatarios_xlsx(request, contratos)
 
 
 @login_required
