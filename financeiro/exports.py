@@ -12,6 +12,7 @@ try:
 except ImportError:
     OPENPYXL_AVAILABLE = False
 
+from .dimob import MESES_ABREV
 from .models import ReceitaAluguel, Despesa, receitas_inadimplentes_qs
 
 
@@ -204,6 +205,119 @@ def exportar_locatarios_xlsx(request, contratos):
         ws.append(linha)
     _estilizar_cabecalho(ws, len(CABECALHO_LOCATARIOS))
     response = _response_xlsx('locatarios_por_imovel.xlsx')
+    wb.save(response)
+    return response
+
+
+# ─── DIMOB: planilha de apoio (ficha de locação) ───────────────────────────────
+
+def _cabecalho_dimob():
+    """
+    Colunas AGRUPADAS POR MÉTRICA (12 de rendimento, depois 12 de comissão,
+    depois 12 de IRRF) em vez de intercaladas mês a mês: fica muito mais
+    fácil conferir e somar uma linha inteira antes de digitar no PGD.
+    """
+    colunas = [
+        'Imóvel', 'Endereço', 'Cidade', 'UF', 'CEP',
+        'Nº Contrato', 'Data do Contrato',
+        'Locatário', 'CPF / CNPJ do Locatário',
+    ]
+    colunas += [f'Rend. Bruto {m}' for m in MESES_ABREV]
+    colunas.append('Total Rendimento')
+    colunas += [f'Comissão {m}' for m in MESES_ABREV]
+    colunas.append('Total Comissão')
+    colunas += [f'IRRF {m}' for m in MESES_ABREV]
+    colunas.append('Total IRRF')
+    colunas.append('Pendências de cadastro')
+    return colunas
+
+
+def _linhas_dimob(linhas):
+    for item in linhas:
+        imovel = item['imovel']
+        locatarios = item['locatarios']
+        nomes = ', '.join(p.nome for p in locatarios) or '(sem locatário cadastrado)'
+        docs = ', '.join(p.cpf_cnpj or CPF_NAO_CADASTRADO for p in locatarios)
+        linha = [
+            imovel.nome, imovel.endereco, imovel.cidade, imovel.estado, imovel.cep,
+            item['numero_contrato'], item['data_contrato'],
+            nomes, docs,
+        ]
+        linha += item['rendimento_mensal']
+        linha.append(item['total_rendimento'])
+        linha += item['comissao_mensal']
+        linha.append(item['total_comissao'])
+        # IRRF: o sistema ainda não registra imposto retido na fonte. As
+        # colunas saem zeradas de propósito — em branco pareceriam "não
+        # apurado"; zerado com a ressalva na aba de conferência deixa
+        # explícito que o dado precisa vir de fora enquanto não houver campo.
+        linha += [Decimal('0.00')] * 12
+        linha.append(Decimal('0.00'))
+        linha.append('; '.join(item['pendencias']))
+        yield linha
+
+
+def exportar_dimob_xlsx(request, ano, linhas):
+    """
+    Planilha de apoio para a contabilidade preencher a DIMOB do ano.
+
+    Aba 1 — ficha de locação, um contrato por linha, com os 12 meses de
+    rendimento bruto (regime de caixa) e de comissão já apurados.
+    Aba 2 — conferência: o que falta no cadastro e o que o sistema ainda
+    não apura, para não ser descoberto na hora de transmitir.
+    """
+    if not OPENPYXL_AVAILABLE:
+        raise RuntimeError('openpyxl é necessário para gerar a planilha da DIMOB.')
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = f'Locação {ano}'
+    cabecalho = _cabecalho_dimob()
+    ws.append(cabecalho)
+    for linha in _linhas_dimob(linhas):
+        ws.append(linha)
+    _estilizar_cabecalho(ws, len(cabecalho))
+    ws.freeze_panes = 'A2'
+
+    conf = wb.create_sheet('Conferência')
+    conf.append(['Item', 'Situação'])
+    conf.append(['Ano-calendário', ano])
+    conf.append(['Contratos com operação no ano', len(linhas)])
+    total_geral = sum((item['total_rendimento'] for item in linhas), Decimal('0.00'))
+    conf.append(['Total de rendimento bruto no ano', total_geral])
+    conf.append([
+        'Regime de apuração',
+        'Caixa — rendimento no mês do RECEBIMENTO e comissão no mês do PAGAMENTO, '
+        'conforme a DIMOB (não é a competência do aluguel).',
+    ])
+    conf.append([
+        'IRRF (imposto retido na fonte)',
+        'NÃO apurado pelo sistema — colunas zeradas. Se houver locatário pessoa '
+        'jurídica que retenha IRRF, o valor precisa ser informado pela '
+        'contabilidade, e o rendimento bruto deve ser conferido: o sistema '
+        'registra o valor recebido, que nesse caso é líquido da retenção.',
+    ])
+    conf.append([
+        'Código do município (tabela RFB) e tipo do imóvel (U/R)',
+        'NÃO cadastrados no sistema — exigidos apenas na geração do arquivo '
+        'oficial, não nesta planilha de apoio.',
+    ])
+    conf.append([])
+    conf.append(['Pendências de cadastro por contrato', ''])
+    pendentes = [item for item in linhas if item['pendencias']]
+    if pendentes:
+        for item in pendentes:
+            conf.append([
+                f"{item['imovel'].nome} (contrato {item['numero_contrato']})",
+                '; '.join(item['pendencias']),
+            ])
+    else:
+        conf.append(['Nenhuma', 'Todos os contratos com os dados necessários preenchidos.'])
+    _estilizar_cabecalho(conf, 2)
+    conf.column_dimensions['A'].width = 45
+    conf.column_dimensions['B'].width = 100
+
+    response = _response_xlsx(f'dimob_locacao_{ano}.xlsx')
     wb.save(response)
     return response
 

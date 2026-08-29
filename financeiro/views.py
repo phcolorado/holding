@@ -11,11 +11,13 @@ from django.urls import reverse
 from django.utils import timezone
 
 from .models import ReceitaAluguel, Despesa, FechamentoMensal, valor_total_devido_expr
+from .dimob import linhas_locacao
 from .forms import RegistrarRecebimentoForm, EditarEncargosForm
 from .exports import (
     exportar_imoveis_csv, exportar_imoveis_xlsx,
     exportar_contratos_csv, exportar_contratos_xlsx,
     exportar_locatarios_csv, exportar_locatarios_xlsx,
+    exportar_dimob_xlsx,
     exportar_receitas_csv, exportar_receitas_xlsx,
     exportar_despesas_csv, exportar_despesas_xlsx,
     exportar_inadimplencia_csv, exportar_inadimplencia_xlsx,
@@ -215,6 +217,11 @@ def relatorios(request):
         've_receitas': ve_receitas,
         've_despesas': ve_despesas,
         've_documentos': ve_documentos,
+        # DIMOB cruza contratos/locatários (patrimônio) com valores
+        # recebidos (financeiro) — mesmas permissões cobradas por export_dimob.
+        've_dimob': ve_contratos and ve_receitas,
+        'anos_dimob': anos_para_filtro(),
+        'ano_dimob_padrao': hoje.year - 1,
         've_relatorio_mensal': ve_receitas and ve_despesas,
         've_relatorio_contabil': ve_receitas and ve_despesas and ve_documentos,
         'mes_atual': hoje.month,
@@ -287,6 +294,21 @@ def export_locatarios(request, formato):
     if formato == 'csv':
         return exportar_locatarios_csv(request, contratos)
     return exportar_locatarios_xlsx(request, contratos)
+
+
+@login_required
+@permission_required('patrimonio.view_contrato', raise_exception=True)
+@permission_required('financeiro.view_receitaaluguel', raise_exception=True)
+def export_dimob(request):
+    """
+    Planilha de apoio da DIMOB (ficha de locação) do ano-calendário.
+
+    Exige as DUAS permissões: o relatório cruza dados de contrato/locatário
+    (patrimônio) com os valores recebidos mês a mês (financeiro).
+    """
+    ano = int_param(request.GET.get('ano'), timezone.localdate().year - 1, 1990, 2200)
+    linhas = linhas_locacao(ano)
+    return exportar_dimob_xlsx(request, ano, linhas)
 
 
 @login_required

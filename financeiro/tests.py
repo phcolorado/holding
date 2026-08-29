@@ -741,6 +741,201 @@ class ExportLocatariosViewTest(TestCase):
         self.assertEqual(resposta.status_code, 403)
 
 
+class DimobApuracaoTest(TestCase):
+    """
+    Apuração da ficha de locação da DIMOB: regime de CAIXA (mês do
+    recebimento), um registro por CONTRATO, incluindo contratos já
+    encerrados que receberam dentro do ano.
+    """
+
+    def setUp(self):
+        from financeiro.models import RecebimentoReceita
+        self.RecebimentoReceita = RecebimentoReceita
+        self.imovel, self.locatario = _criar_base()
+        self.locatario.cpf_cnpj = '123.456.789-09'
+        self.locatario.save()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, date(2024, 1, 1), date(2030, 12, 31), status='ativo',
+        )
+
+    def _receita(self, mes, ano=2025, valor='2000.00'):
+        return ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=mes, competencia_ano=ano,
+            data_vencimento=date(ano, mes, 10),
+            valor_previsto=Decimal(valor), status='previsto',
+        )
+
+    def _receber(self, receita, data, valor):
+        return self.RecebimentoReceita.objects.create(
+            receita=receita, data_recebimento=data, valor=Decimal(valor), origem='manual',
+        )
+
+    def test_rendimento_entra_no_mes_do_recebimento_nao_da_competencia(self):
+        """Regime de caixa: aluguel de MARÇO pago em ABRIL entra em abril."""
+        from financeiro.dimob import linhas_locacao
+        receita = self._receita(mes=3)
+        self._receber(receita, date(2025, 4, 5), '2000.00')
+
+        linha = linhas_locacao(2025)[0]
+        mensal = linha['rendimento_mensal']
+        self.assertEqual(mensal[2], Decimal('0.00'), 'março deveria ficar zerado')
+        self.assertEqual(mensal[3], Decimal('2000.00'), 'abril deveria receber o valor')
+        self.assertEqual(linha['total_rendimento'], Decimal('2000.00'))
+
+    def test_soma_varios_recebimentos_no_mesmo_mes(self):
+        from financeiro.dimob import linhas_locacao
+        receita = self._receita(mes=5)
+        self._receber(receita, date(2025, 5, 10), '1200.00')
+        self._receber(receita, date(2025, 5, 20), '800.00')
+
+        linha = linhas_locacao(2025)[0]
+        self.assertEqual(linha['rendimento_mensal'][4], Decimal('2000.00'))
+
+    def test_ignora_recebimentos_de_outro_ano(self):
+        from financeiro.dimob import linhas_locacao
+        self._receber(self._receita(mes=12, ano=2024), date(2024, 12, 15), '2000.00')
+        self._receber(self._receita(mes=1), date(2025, 1, 15), '2000.00')
+
+        linha = linhas_locacao(2025)[0]
+        self.assertEqual(linha['total_rendimento'], Decimal('2000.00'))
+        self.assertEqual(linha['rendimento_mensal'][0], Decimal('2000.00'))
+
+    def test_contrato_encerrado_com_recebimento_no_ano_entra(self):
+        """A DIMOB olha a OPERAÇÃO do ano, não a vigência do contrato."""
+        from financeiro.dimob import linhas_locacao
+        imovel2 = Imovel.objects.create(nome='Sala Encerrada', endereco='R. E', cidade='SP', estado='SP')
+        contrato2 = _criar_contrato(
+            imovel2, self.locatario, date(2023, 1, 1), date(2025, 6, 30), status='encerrado',
+        )
+        receita = ReceitaAluguel.objects.create(
+            contrato=contrato2, imovel=imovel2, competencia_mes=6, competencia_ano=2025,
+            data_vencimento=date(2025, 6, 10), valor_previsto=Decimal('1500.00'), status='previsto',
+        )
+        self._receber(receita, date(2025, 6, 10), '1500.00')
+
+        nomes = [l['imovel'].nome for l in linhas_locacao(2025)]
+        self.assertIn('Sala Encerrada', nomes)
+
+    def test_contrato_sem_operacao_no_ano_nao_entra(self):
+        from financeiro.dimob import linhas_locacao
+        self.assertEqual(linhas_locacao(2025), [])
+
+    def test_comissao_entra_no_mes_do_pagamento(self):
+        from financeiro.dimob import linhas_locacao
+        receita = self._receita(mes=7)
+        self._receber(receita, date(2025, 7, 10), '2000.00')
+        Despesa.objects.create(
+            imovel=self.imovel, contrato=self.contrato, receita=receita,
+            categoria='comissao_imobiliaria', descricao='Taxa de administração',
+            data_vencimento=date(2025, 7, 10), data_pagamento=date(2025, 8, 3),
+            valor=Decimal('200.00'), status='paga', origem_automatica=True,
+        )
+
+        linha = linhas_locacao(2025)[0]
+        self.assertEqual(linha['comissao_mensal'][6], Decimal('0.00'), 'julho: comissão ainda não paga')
+        self.assertEqual(linha['comissao_mensal'][7], Decimal('200.00'), 'agosto: mês do pagamento')
+        self.assertEqual(linha['total_comissao'], Decimal('200.00'))
+
+    def test_comissao_nao_paga_nao_entra(self):
+        from financeiro.dimob import linhas_locacao
+        receita = self._receita(mes=9)
+        self._receber(receita, date(2025, 9, 10), '2000.00')
+        Despesa.objects.create(
+            imovel=self.imovel, contrato=self.contrato, receita=receita,
+            categoria='comissao_imobiliaria', descricao='Taxa prevista',
+            data_vencimento=date(2025, 9, 10),
+            valor=Decimal('200.00'), status='prevista', origem_automatica=True,
+        )
+        self.assertEqual(linhas_locacao(2025)[0]['total_comissao'], Decimal('0.00'))
+
+    def test_pendencia_de_cpf_e_sinalizada_sem_omitir_o_contrato(self):
+        from financeiro.dimob import linhas_locacao, FALTA_CPF_LOCATARIO
+        self.locatario.cpf_cnpj = ''
+        self.locatario.save()
+        self._receber(self._receita(mes=2), date(2025, 2, 10), '2000.00')
+
+        linha = linhas_locacao(2025)[0]
+        self.assertEqual(linha['total_rendimento'], Decimal('2000.00'))
+        self.assertTrue(any(FALTA_CPF_LOCATARIO in p for p in linha['pendencias']))
+
+    def test_pendencia_de_cep_e_sinalizada(self):
+        from financeiro.dimob import linhas_locacao, FALTA_CEP
+        self._receber(self._receita(mes=2), date(2025, 2, 10), '2000.00')
+        linha = linhas_locacao(2025)[0]
+        self.assertIn(FALTA_CEP, linha['pendencias'])
+
+    def test_sem_pendencias_quando_cadastro_completo(self):
+        from financeiro.dimob import linhas_locacao
+        self.imovel.cep = '30130-000'
+        self.imovel.save()
+        self._receber(self._receita(mes=2), date(2025, 2, 10), '2000.00')
+        self.assertEqual(linhas_locacao(2025)[0]['pendencias'], [])
+
+
+class DimobExportViewTest(TestCase):
+    """Planilha de apoio da DIMOB: permissões e resposta."""
+
+    def setUp(self):
+        from financeiro.models import RecebimentoReceita
+        self.client = Client()
+        self.imovel, self.locatario = _criar_base()
+        self.locatario.cpf_cnpj = '123.456.789-09'
+        self.locatario.save()
+        contrato = _criar_contrato(
+            self.imovel, self.locatario, date(2024, 1, 1), date(2030, 12, 31), status='ativo',
+        )
+        receita = ReceitaAluguel.objects.create(
+            contrato=contrato, imovel=self.imovel, competencia_mes=3, competencia_ano=2025,
+            data_vencimento=date(2025, 3, 10), valor_previsto=Decimal('2000.00'), status='previsto',
+        )
+        RecebimentoReceita.objects.create(
+            receita=receita, data_recebimento=date(2025, 3, 12),
+            valor=Decimal('2000.00'), origem='manual',
+        )
+
+    def test_gera_planilha_com_as_duas_permissoes(self):
+        com_leitura(User.objects.create_user('dimob_ok', password='pass'))
+        self.client.login(username='dimob_ok', password='pass')
+        resposta = self.client.get(reverse('export_dimob') + '?ano=2025')
+        self.assertEqual(resposta.status_code, 200)
+        self.assertIn('spreadsheet', resposta['Content-Type'])
+        self.assertIn('dimob_locacao_2025.xlsx', resposta['Content-Disposition'])
+
+    def test_exige_permissao_de_contrato_e_de_receita(self):
+        from django.contrib.auth.models import Permission
+        # só view_receitaaluguel: falta patrimonio.view_contrato
+        parcial = User.objects.create_user('dimob_parcial', password='pass')
+        parcial.user_permissions.add(
+            *Permission.objects.filter(codename='view_receitaaluguel')
+        )
+        self.client.login(username='dimob_parcial', password='pass')
+        self.assertEqual(self.client.get(reverse('export_dimob')).status_code, 403)
+
+        # só view_contrato: falta financeiro.view_receitaaluguel
+        outro = User.objects.create_user('dimob_parcial2', password='pass')
+        outro.user_permissions.add(*Permission.objects.filter(codename='view_contrato'))
+        self.client.login(username='dimob_parcial2', password='pass')
+        self.assertEqual(self.client.get(reverse('export_dimob')).status_code, 403)
+
+    def test_card_dimob_so_aparece_com_as_duas_permissoes(self):
+        from django.contrib.auth.models import Permission
+        parcial = User.objects.create_user('dimob_card', password='pass')
+        parcial.user_permissions.add(*Permission.objects.filter(codename='view_receitaaluguel'))
+        self.client.login(username='dimob_card', password='pass')
+        resposta = self.client.get(reverse('relatorios'))
+        self.assertFalse(resposta.context['ve_dimob'])
+        # confere o CONTROLE do card (o nome da função JS fica no rodapé
+        # da página independentemente da permissão)
+        self.assertNotIn('id="dimob-ano"', resposta.content.decode())
+
+        com_leitura(User.objects.create_user('dimob_card2', password='pass'))
+        self.client.login(username='dimob_card2', password='pass')
+        resposta = self.client.get(reverse('relatorios'))
+        self.assertTrue(resposta.context['ve_dimob'])
+        self.assertIn('id="dimob-ano"', resposta.content.decode())
+
+
 class ExportCsvBomTest(TestCase):
     """
     O CSV deve ter UM ÚNICO BOM, no início do arquivo.
