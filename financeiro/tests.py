@@ -4489,3 +4489,175 @@ class DespesaIntegridadeTest(TestCase):
         self.assertEqual(comissao.status, 'prevista')
         self.assertIsNone(comissao.data_pagamento)
         comissao.full_clean()  # estado coerente após desfazer
+
+
+class DimobLegadoTest(TestCase):
+    """
+    Recebimento consolidado LEGADO (valor_recebido preenchido sem nenhum
+    RecebimentoReceita) precisa entrar na ficha de locação: é dinheiro que
+    entrou de verdade, e o próprio model trata esse estado como válido
+    (garantir_recebimento_legado / preservar_legado).
+    """
+
+    def setUp(self):
+        self.imovel, self.locatario = _criar_base()
+        self.locatario.cpf_cnpj = '123.456.789-09'
+        self.locatario.save()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, date(2024, 1, 1), date(2030, 12, 31), status='ativo',
+        )
+
+    def _receita_legada(self, mes, ano=2025, valor='2000.00', data_recebimento=None, **kwargs):
+        return ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=mes, competencia_ano=ano,
+            data_vencimento=date(ano, mes, 10),
+            valor_previsto=Decimal(valor),
+            valor_recebido=Decimal(valor),
+            data_recebimento=data_recebimento,
+            status=kwargs.pop('status', 'recebido'),
+            **kwargs,
+        )
+
+    def test_consolidado_sem_recebimento_entra_pela_data_de_recebimento(self):
+        from financeiro.dimob import linhas_locacao
+        self._receita_legada(mes=3, data_recebimento=date(2025, 4, 5))
+
+        linhas = linhas_locacao(2025)
+        self.assertEqual(len(linhas), 1, 'o consolidado legado sumiu da ficha')
+        mensal = linhas[0]['rendimento_mensal']
+        self.assertEqual(mensal[3], Decimal('2000.00'), 'deveria cair em abril (regime de caixa)')
+        self.assertEqual(mensal[2], Decimal('0.00'))
+
+    def test_consolidado_sem_data_usa_o_vencimento(self):
+        """Mesmo critério de garantir_recebimento_legado(): data_vencimento."""
+        from financeiro.dimob import linhas_locacao
+        self._receita_legada(mes=7, data_recebimento=None)
+
+        linhas = linhas_locacao(2025)
+        self.assertEqual(linhas[0]['rendimento_mensal'][6], Decimal('2000.00'))
+
+    def test_consolidado_de_outro_ano_nao_entra(self):
+        from financeiro.dimob import linhas_locacao
+        self._receita_legada(mes=5, ano=2024, data_recebimento=date(2024, 5, 8))
+        self.assertEqual(linhas_locacao(2025), [])
+
+    def test_nao_conta_em_dobro_quando_ha_recebimento_registrado(self):
+        """Receita COM recebimento é apurada só pelo recebimento."""
+        from financeiro.models import RecebimentoReceita
+        from financeiro.dimob import linhas_locacao
+        receita = ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=2, competencia_ano=2025,
+            data_vencimento=date(2025, 2, 10),
+            valor_previsto=Decimal('2000.00'), status='previsto',
+        )
+        RecebimentoReceita.objects.create(
+            receita=receita, data_recebimento=date(2025, 2, 9),
+            valor=Decimal('2000.00'), origem='manual',
+        )
+        receita.refresh_from_db()
+        self.assertEqual(receita.valor_recebido, Decimal('2000.00'))  # consolidado preenchido
+
+        linha = linhas_locacao(2025)[0]
+        self.assertEqual(linha['total_rendimento'], Decimal('2000.00'), 'valor contado em dobro')
+
+    def test_recebimento_parcial_nao_traz_o_consolidado_junto(self):
+        """Consolidado só vale quando NÃO existe nenhum recebimento."""
+        from financeiro.models import RecebimentoReceita
+        from financeiro.dimob import linhas_locacao
+        receita = ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=8, competencia_ano=2025,
+            data_vencimento=date(2025, 8, 10),
+            valor_previsto=Decimal('2000.00'), status='previsto',
+        )
+        RecebimentoReceita.objects.create(
+            receita=receita, data_recebimento=date(2025, 8, 9),
+            valor=Decimal('500.00'), origem='manual',
+        )
+        linha = linhas_locacao(2025)[0]
+        self.assertEqual(linha['total_rendimento'], Decimal('500.00'))
+
+    def test_consolidado_de_receita_cancelada_continua_contabilizado(self):
+        """O dinheiro entrou; o cancelamento encerra a cobrança, não o caixa."""
+        from financeiro.dimob import linhas_locacao
+        self._receita_legada(mes=9, data_recebimento=date(2025, 9, 3), status='cancelado')
+        linha = linhas_locacao(2025)[0]
+        self.assertEqual(linha['rendimento_mensal'][8], Decimal('2000.00'))
+
+
+class DimobDiagnosticoTest(TestCase):
+    """Diagnóstico que explica uma ficha de locação vazia."""
+
+    def setUp(self):
+        self.imovel, self.locatario = _criar_base()
+        self.contrato = _criar_contrato(
+            self.imovel, self.locatario, date(2024, 1, 1), date(2030, 12, 31), status='ativo',
+        )
+
+    def test_sem_contrato_nenhum_aponta_cadastro_vazio(self):
+        from financeiro.dimob import diagnostico
+        Contrato.objects.all().delete()
+        d = diagnostico(2025)
+        self.assertEqual(d['linhas_geradas'], 0)
+        self.assertTrue(any('NENHUM contrato' in c for c in d['conclusoes']))
+
+    def test_receitas_previstas_sem_baixa_explicam_o_vazio(self):
+        from financeiro.dimob import diagnostico
+        ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=4, competencia_ano=2025,
+            data_vencimento=date(2025, 4, 10),
+            valor_previsto=Decimal('2000.00'), status='previsto',
+        )
+        d = diagnostico(2025)
+        self.assertEqual(d['linhas_geradas'], 0)
+        self.assertEqual(d['receitas_competencia_no_ano'], 1)
+        self.assertEqual(d['recebimentos_no_ano'], 0)
+        self.assertTrue(any('nenhum recebimento de aluguel registrado' in c for c in d['conclusoes']))
+        self.assertTrue(any('competência' in c for c in d['conclusoes']))
+
+    def test_aponta_o_ano_em_que_existe_movimento(self):
+        from financeiro.models import RecebimentoReceita
+        from financeiro.dimob import diagnostico
+        receita = ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=6, competencia_ano=2024,
+            data_vencimento=date(2024, 6, 10),
+            valor_previsto=Decimal('2000.00'), status='previsto',
+        )
+        RecebimentoReceita.objects.create(
+            receita=receita, data_recebimento=date(2024, 6, 9),
+            valor=Decimal('2000.00'), origem='manual',
+        )
+        d = diagnostico(2025)
+        self.assertEqual(d['anos_com_movimento'], [2024])
+        self.assertTrue(any('2024' in c for c in d['conclusoes']))
+
+    def test_ano_com_dados_confirma_que_nao_esta_vazio(self):
+        from financeiro.models import RecebimentoReceita
+        from financeiro.dimob import diagnostico
+        receita = ReceitaAluguel.objects.create(
+            contrato=self.contrato, imovel=self.imovel,
+            competencia_mes=6, competencia_ano=2025,
+            data_vencimento=date(2025, 6, 10),
+            valor_previsto=Decimal('2000.00'), status='previsto',
+        )
+        RecebimentoReceita.objects.create(
+            receita=receita, data_recebimento=date(2025, 6, 9),
+            valor=Decimal('2000.00'), origem='manual',
+        )
+        d = diagnostico(2025)
+        self.assertEqual(d['linhas_geradas'], 1)
+        self.assertEqual(d['valor_recebimentos_no_ano'], Decimal('2000.00'))
+        self.assertTrue(any('NÃO está vazio' in c for c in d['conclusoes']))
+
+    def test_comando_roda_e_imprime_o_resumo(self):
+        from io import StringIO
+        from django.core.management import call_command
+        saida = StringIO()
+        call_command('diagnostico_dimob', 2025, stdout=saida)
+        texto = saida.getvalue()
+        self.assertIn('DIMOB — diagnóstico do ano 2025', texto)
+        self.assertIn('CONTRATOS NA FICHA DE LOCAÇÃO', texto)

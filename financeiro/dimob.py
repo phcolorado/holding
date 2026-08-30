@@ -15,6 +15,12 @@ Regras da DIMOB que determinam a apuração:
   em que o aluguel foi efetivamente pago, não no mês de competência. Por
   isso a base é RecebimentoReceita.data_recebimento (o registro oficial de
   pagamento no sistema), nunca a competência da ReceitaAluguel.
+  EXCEÇÃO NECESSÁRIA: uma receita pode ter valor_recebido consolidado SEM
+  nenhum RecebimentoReceita — é o dado legado que o próprio model trata
+  como válido (ver ReceitaAluguel.garantir_recebimento_legado e o
+  preservar_legado de recalcular_recebimentos). Esse dinheiro entrou de
+  verdade e precisa aparecer na DIMOB; ler só RecebimentoReceita deixaria
+  a declaração a menos. Ver _rendimentos_legados_por_contrato().
 * UM REGISTRO POR CONTRATO (não por imóvel nem por locatário).
 * Entram os contratos que TIVERAM operação no ano — inclusive contratos já
   encerrados, se receberam aluguel dentro do ano-calendário.
@@ -24,9 +30,10 @@ Regras da DIMOB que determinam a apuração:
 from collections import defaultdict
 from decimal import Decimal
 
-from django.db.models import Q
+from django.db.models import Q, Sum
+from django.db.models.functions import Coalesce
 
-from .models import Despesa, RecebimentoReceita
+from .models import Despesa, ReceitaAluguel, RecebimentoReceita
 
 MESES_ABREV = [
     'Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun',
@@ -61,7 +68,36 @@ def _rendimentos_por_contrato(ano):
     )
     for contrato_id, data, valor in recebimentos:
         totais[contrato_id][data.month - 1] += valor
+    _somar_rendimentos_legados(ano, totais)
     return totais
+
+
+def _receitas_legadas(ano):
+    """
+    Receitas com valor_recebido consolidado e NENHUM RecebimentoReceita, cuja
+    data de caixa cai no ano — o dado legado que o model preserva.
+
+    A data de caixa é data_recebimento e, na falta dela, data_vencimento —
+    exatamente o critério que garantir_recebimento_legado() usaria ao
+    materializar esse valor como recebimento.
+
+    O status NÃO filtra: uma receita cancelada cujo dinheiro entrou continua
+    contabilizada (mesma regra de recalcular_recebimentos), e os
+    recebimentos normais também não são filtrados por status.
+    """
+    return (
+        ReceitaAluguel.objects
+        .filter(valor_recebido__gt=0, recebimentos__isnull=True)
+        .annotate(data_caixa=Coalesce('data_recebimento', 'data_vencimento'))
+        .filter(data_caixa__year=ano)
+    )
+
+
+def _somar_rendimentos_legados(ano, totais):
+    for contrato_id, data, valor in _receitas_legadas(ano).values_list(
+        'contrato_id', 'data_caixa', 'valor_recebido'
+    ):
+        totais[contrato_id][data.month - 1] += valor
 
 
 def _comissoes_por_contrato(ano):
@@ -155,3 +191,97 @@ def linhas_locacao(ano):
             'pendencias': _pendencias_do_contrato(contrato, locatarios),
         })
     return linhas
+
+
+def anos_com_movimento_de_caixa():
+    """
+    Anos-calendário em que existe QUALQUER entrada de aluguel — recebimentos
+    registrados ou valor consolidado legado. É a resposta direta para
+    "pedi 2025 e veio vazio: então em que ano estão os meus dados?".
+    """
+    anos = {
+        data.year
+        for data in RecebimentoReceita.objects
+        .values_list('data_recebimento', flat=True)
+        if data is not None
+    }
+    anos.update(
+        data.year
+        for data in ReceitaAluguel.objects
+        .filter(valor_recebido__gt=0, recebimentos__isnull=True)
+        .annotate(data_caixa=Coalesce('data_recebimento', 'data_vencimento'))
+        .values_list('data_caixa', flat=True)
+        if data is not None
+    )
+    return sorted(anos)
+
+
+def diagnostico(ano):
+    """
+    Explica por que a ficha de locação de um ano saiu vazia (ou conferida).
+
+    Não altera nada — só conta o que existe no banco. Devolve um dict com os
+    números e uma lista `conclusoes` em linguagem direta, para o comando
+    `manage.py diagnostico_dimob`.
+    """
+    from patrimonio.models import Contrato
+
+    linhas = linhas_locacao(ano)
+
+    recebimentos = RecebimentoReceita.objects.filter(
+        data_recebimento__year=ano, receita__contrato__isnull=False,
+    )
+    legadas = _receitas_legadas(ano)
+    comissoes = Despesa.objects.filter(
+        categoria='comissao_imobiliaria', status='paga', data_pagamento__year=ano,
+    )
+
+    dados = {
+        'ano': ano,
+        'contratos_total': Contrato.objects.count(),
+        'contratos_ativos': Contrato.objects.filter(status='ativo').count(),
+        'receitas_total': ReceitaAluguel.objects.count(),
+        'receitas_competencia_no_ano': ReceitaAluguel.objects.filter(competencia_ano=ano).count(),
+        'recebimentos_total': RecebimentoReceita.objects.count(),
+        'recebimentos_no_ano': recebimentos.count(),
+        'valor_recebimentos_no_ano': recebimentos.aggregate(t=Sum('valor'))['t'] or ZERO,
+        'legadas_no_ano': legadas.count(),
+        'valor_legadas_no_ano': legadas.aggregate(t=Sum('valor_recebido'))['t'] or ZERO,
+        'comissoes_no_ano': comissoes.count(),
+        'valor_comissoes_no_ano': comissoes.aggregate(t=Sum('valor'))['t'] or ZERO,
+        'linhas_geradas': len(linhas),
+        'anos_com_movimento': anos_com_movimento_de_caixa(),
+    }
+
+    conclusoes = []
+    if dados['linhas_geradas']:
+        conclusoes.append(
+            f"A ficha de {ano} tem {dados['linhas_geradas']} contrato(s) — o relatório NÃO está vazio."
+        )
+    elif dados['contratos_total'] == 0:
+        conclusoes.append('Não há NENHUM contrato cadastrado — não há o que declarar.')
+    elif dados['recebimentos_total'] == 0 and not dados['anos_com_movimento']:
+        conclusoes.append(
+            'Não há nenhum recebimento de aluguel registrado em ano nenhum. '
+            'A DIMOB é por regime de caixa: enquanto os aluguéis não forem '
+            'baixados (tela "Baixa de receitas" ou recebimento no Admin), a '
+            'ficha sai vazia mesmo com contratos e receitas previstas.'
+        )
+    elif dados['anos_com_movimento']:
+        anos = ', '.join(str(a) for a in dados['anos_com_movimento'])
+        conclusoes.append(
+            f'Não houve entrada de aluguel em {ano}. Os anos com recebimento '
+            f'registrado são: {anos}. Gere a ficha para um desses anos.'
+        )
+    if (
+        dados['receitas_competencia_no_ano']
+        and not dados['recebimentos_no_ano']
+        and not dados['legadas_no_ano']
+    ):
+        conclusoes.append(
+            f"Existem {dados['receitas_competencia_no_ano']} receita(s) com competência em "
+            f'{ano}, mas nenhuma foi baixada com data de recebimento em {ano} — '
+            'a DIMOB conta o mês do PAGAMENTO, não o da competência.'
+        )
+    dados['conclusoes'] = conclusoes
+    return dados
